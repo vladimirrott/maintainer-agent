@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Local gate. There is no CI here on purpose: this repository is private, and a
+# solo maintainer's gate should run before the commit exists rather than after.
+set -uo pipefail
+root="$(git rev-parse --show-toplevel)"
+fail=0
+step() {
+    printf '[pre-commit] %s\n' "$1"; shift
+    if ! "$@"; then printf '[pre-commit] FAILED: %s\n' "$1" >&2; fail=1; fi
+}
+# Check by shebang, not by path. bin/maintainer is Python, and globbing bin/*
+# into `bash -n` reported a syntax error in a perfectly good file.
+step "syntax: every shell script"  bash -c '
+    cd "'"$root"'" || exit 1
+    rc=0
+    for f in $(git ls-files); do
+        [ -f "$f" ] || continue
+        case "$(head -c 80 "$f" 2>/dev/null)" in
+            *"#!/usr/bin/env bash"*|*"#!/bin/bash"*|*"#!/bin/sh"*) bash -n "$f" || rc=1 ;;
+            *"#!/usr/bin/env python3"*) python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$f" || rc=1 ;;
+        esac
+    done
+    exit $rc'
+step "offline test suite"          bash "$root/tests/run-tests.sh"
+step "eval rules still present"    bash "$root/evals/run-evals.sh"
+step "README numbers are derived"  bash "$root/scripts/check_claims.sh"
+exit "$fail"

@@ -16,7 +16,21 @@ set -uo pipefail
 # longer reach a live run.
 main() {
 
-local_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Resolve the tree we were installed into. In the repository this file is
+# lib/run.sh, so profiles live one level up; installed, it sits beside them.
+# Checking both is what makes `./install.sh` and a git checkout behave the same.
+# Getting this wrong is silent: the unit exits 64 and the timer logs nothing.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if   [ -d "$here/profiles" ];    then local_root="$here"
+elif [ -d "$here/../profiles" ]; then local_root="$(cd "$here/.." && pwd)"
+else echo "run.sh: cannot find a profiles/ directory beside or above $here" >&2; exit 64
+fi
+# Backends move with the same ambiguity: lib/backends in the repository,
+# backends/ beside run.sh once installed.
+if   [ -d "$local_root/backends" ];     then BACKEND_DIR="$local_root/backends"
+elif [ -d "$local_root/lib/backends" ]; then BACKEND_DIR="$local_root/lib/backends"
+else echo "run.sh: cannot find a backends/ directory under $local_root" >&2; exit 64
+fi
 profile="${1:?usage: run.sh <profile> <task>}"
 task="${2:?usage: run.sh <profile> <task>}"
 
@@ -42,7 +56,7 @@ alert() {
 }
 
 # shellcheck disable=SC1090
-. "$local_root/lib/backends/$BACKEND.sh" || { alert "no backend '$BACKEND'"; exit 64; }
+. "$BACKEND_DIR/$BACKEND.sh" || { alert "no backend '$BACKEND'"; exit 64; }
 
 {
     echo "=== run.sh $profile/$task $(date -Is) ==="
@@ -52,6 +66,18 @@ alert() {
 if ! msg="$(backend_check)"; then
     alert "backend $BACKEND unusable: $msg"
     exit 1
+fi
+
+# A backend may declare the only tasks it is fit for. Cursor does, because its
+# non-interactive mode has full write access and no per-command deny list, so it
+# must never be handed a task that can post, publish or merge. Enforced here
+# rather than trusted to a comment in the backend file.
+if declare -F backend_allowed_tasks >/dev/null; then
+    allowed="$(backend_allowed_tasks)"
+    case " $allowed " in
+        *" $task "*) ;;
+        *) alert "backend '$BACKEND' may only run: $allowed (refused '$task')"; exit 78 ;;
+    esac
 fi
 
 # Every task shares one working tree and `maintainer start` checks out main.
@@ -100,6 +126,12 @@ trap 'rm -f "$prompt_file"' RETURN
 {
     cat "$PROFILE_DIR/prompts/common-preamble.md"
     printf '\n\n'
+    # Opt-out, not opt-in: anything other than an explicit "raw" gets the
+    # prose discipline. A missing or misspelled value must still write well.
+    if [ "${PROSE_STYLE:-stop-slop}" != "raw" ]; then
+        cat "$local_root/lib/prose-style.md" 2>/dev/null || cat "$local_root/prose-style.md"
+        printf '\n\n'
+    fi
     cat "$PROFILE_DIR/prompts/$task.md"
     printf '\n\n## Context for this run, computed just now\n\n```\n%s\n```\n' "$context"
 } > "$prompt_file"

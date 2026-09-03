@@ -27,7 +27,7 @@ run() { if [ "$dry" = 1 ]; then say "would: $*"; else "$@"; fi; }
 say "deploying from $root"
 run mkdir -p "$share" "$bin" "$units"
 run cp "$root/lib/run.sh" "$share/run.sh"
-run cp "$root/systemd/run-instance.sh" "$share/run-instance.sh"
+run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp -r "$root/lib/backends" "$share/backends"
 run cp -r "$root/profiles" "$share/profiles"
 # Render the deny wall. Its paths must be absolute at runtime, but the repo
@@ -56,9 +56,36 @@ if [ "$dry" = 0 ] && [ ! -d "$share/profiles/sysknife" ]; then
     exit 1
 fi
 
-for u in "$root"/systemd/podman-userns-warmup.service "$root"/systemd/maintainer@.service "$root"/systemd/maintainer-alert@.service "$root"/systemd/*.timer; do
-    run cp "$u" "$units/$(basename "$u")"
-done
+# --- platform dispatch -----------------------------------------------------
+# The core is bash everywhere. Only scheduling is per-platform, so only that is
+# forked. Two implementations of the gate would drift, and the gate is the
+# product.
+case "$(uname -s)" in
+  Linux)
+    for u in "$root"/platform/linux/*.service "$root"/platform/linux/*.timer; do
+        [ -e "$u" ] || continue
+        run cp "$u" "$units/$(basename "$u")"
+    done
+    run cp "$root/platform/linux/run-instance.sh" "$share/run-instance.sh"
+    say "platform: Linux (systemd user units)"
+    ;;
+  Darwin)
+    say "platform: macOS (launchd)"
+    say "run platform/macos/install-launchd.sh to register the agents"
+    say "note: launchd has no Persistent=true; a missed run does not catch up"
+    timers=0
+    ;;
+  MINGW*|MSYS*|CYGWIN*)
+    say "platform: Windows"
+    say "files deployed; register the tasks from PowerShell:"
+    say "  platform\\windows\\Install-Maintainer.ps1"
+    timers=0
+    ;;
+  *)
+    say "platform: $(uname -s) is unrecognised; files deployed, scheduling is yours to wire"
+    timers=0
+    ;;
+esac
 
 if [ "$timers" = 1 ]; then
     run systemctl --user daemon-reload

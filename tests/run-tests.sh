@@ -211,5 +211,78 @@ else
     bad "gh pr merge is no longer denied; the gate can be bypassed"
 fi
 
+echo "== the installed layout resolves, not just the repo layout =="
+# The bug this catches: run.sh looked for profiles at ../profiles, which is right
+# in the repo (lib/run.sh) and wrong once installed beside them. The unit exited
+# 64 and the timer logged nothing, because a file-existence check is not a start.
+lay="$stub_dir/layout"; mkdir -p "$lay/profiles/sysknife/prompts"
+cp "$root/lib/run.sh" "$lay/run.sh"
+cp -r "$root/lib/backends" "$lay/backends"
+cp "$root/profiles/sysknife/profile.env" "$lay/profiles/sysknife/"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo nobody; exit 0;; esac"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$lay/run.sh" sysknife review 2>&1); rc=$?
+# It must get PAST profile resolution and fail on the identity gate (rc=1),
+# not on "no profile" (rc=64).
+if [ "$rc" = "1" ]; then ok "installed layout resolves the profile (reached the identity gate)"
+elif [ "$rc" = "64" ]; then bad "installed layout cannot find its profile (exit 64) -- the deployment bug"
+else bad "installed layout: unexpected rc=$rc"; fi
+
+echo "== prose discipline is opt-OUT, and reaches the prompt =="
+ps="$root/lib/prose-style.md"
+for needle in "em dashes" "throat-clearing" "not X, it" "adverbs" "Never disclose"; do
+    if grep -qi "$needle" "$ps"; then ok "prose style covers: $needle"; else bad "prose style lost: $needle"; fi
+done
+if grep -q 'PROSE_STYLE="${MAINTAINER_PROSE_STYLE:-stop-slop}"' "$root/profiles/sysknife/profile.env"; then
+    ok "default is stop-slop (opt-out, not opt-in)"
+else
+    bad "prose style is no longer on by default"
+fi
+# A misspelled or absent value must still get the discipline. Only "raw" opts out.
+if grep -q '!= "raw"' "$root/lib/run.sh"; then
+    ok "only an explicit \"raw\" disables it; a typo still writes well"
+else
+    bad "the opt-out is not fail-safe"
+fi
+# And it must actually land in the assembled prompt.
+if grep -q 'prose-style.md' "$root/lib/run.sh" && grep -q 'prose-style.md' "$root/install.sh"; then
+    ok "prose style is assembled into the prompt and shipped by install"
+else
+    bad "prose style is not wired into the prompt or not installed"
+fi
+
+echo "== cross-platform: only scheduling forks, the core does not =="
+[ -f "$root/platform/linux/maintainer@.service" ]        && ok "linux: systemd units present"   || bad "linux units missing"
+[ -x "$root/platform/macos/install-launchd.sh" ]         && ok "macos: launchd installer present" || bad "macos installer missing"
+[ -f "$root/platform/windows/Install-Maintainer.ps1" ]   && ok "windows: PowerShell installer present" || bad "windows installer missing"
+if grep -q 'uname -s' "$root/install.sh"; then ok "install.sh dispatches by platform"; else bad "install.sh is not platform-aware"; fi
+# Only one implementation of the gate may exist.
+# Count only executable implementations. Prose that describes the gate (docs,
+# eval scenarios, this file) is not a second implementation, and an earlier
+# version of this check counted it as one.
+gates=$(grep -rl 'no verification receipt' "$root/bin" "$root/lib" "$root/platform" 2>/dev/null | wc -l)
+if [ "$gates" = "1" ]; then ok "exactly one executable implementation of the merge gate"; else bad "$gates executable implementations of the merge gate (they will drift)"; fi
+
+echo "== the PowerShell installer, statically (pwsh is not installed here) =="
+ps1="$root/platform/windows/Install-Maintainer.ps1"
+o=$(grep -c '{' "$ps1"); c=$(grep -c '}' "$ps1")
+[ -n "$o" ] && ok "PowerShell: braces present (open-lines=$o close-lines=$c)"
+for cmdlet in New-ScheduledTaskAction New-ScheduledTaskTrigger New-ScheduledTaskSettingsSet New-ScheduledTaskPrincipal Register-ScheduledTask; do
+    grep -q "$cmdlet" "$ps1" && ok "PowerShell uses $cmdlet" || bad "PowerShell lost $cmdlet"
+done
+grep -q 'StartWhenAvailable' "$ps1" && ok "PowerShell sets StartWhenAvailable (the Persistent=true analogue)" || bad "missed-run catch-up not configured"
+grep -q 'RunLevel Limited' "$ps1" && ok "PowerShell task runs unelevated" || bad "PowerShell task may run elevated"
+
+echo "== the cursor backend cannot be handed a posting task =="
+cb="$root/lib/backends/cursor.sh"
+grep -q 'backend_allowed_tasks' "$cb" && ok "cursor declares its allowed tasks" || bad "cursor no longer restricts itself"
+grep -q 'backend_allowed_tasks' "$root/lib/run.sh" && ok "run.sh enforces the declaration" || bad "run.sh ignores backend task restrictions"
+# Only executable lines count. The file explains at length why --force is
+# absent, and an earlier version of this check read those comments as usage.
+if sed 's/#.*//' "$cb" | grep -qE '(^|[[:space:]])--(force|yolo)([[:space:]]|$)'; then
+    bad "cursor backend passes --force (full write access)"
+else
+    ok "cursor backend never passes --force outside comments"
+fi
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

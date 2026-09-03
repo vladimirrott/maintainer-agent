@@ -108,18 +108,76 @@ worse than none: it reads as a guarantee.
 
 ## Backends
 
-| | Claude Code | Codex |
-|---|---|---|
-| Verified against | 2.1.257 | codex-cli 0.149.1 |
-| Invocation | `claude -p --settings … --permission-mode bypassPermissions` | `codex exec --sandbox workspace-write -C …` |
-| Per-command deny list | **yes**, and it outranks bypass | **no** |
-| Write confinement | filesystem-wide, rules-based | working tree, sandbox-based |
+Three, and they are **not** interchangeable. The difference is containment, and
+it is the reason there is a default.
 
-Codex expresses a sandbox *mode*, not a rule set, so it cannot say "everything
-except `git push`, `gh pr merge` and `cargo publish`". Run publishing-capable
-tasks on Claude. Codex is for read-and-report passes and second opinions, where
-the blast radius is a comment. The test suite pins that warning so the default
-cannot drift silently.
+| | Claude Code | Codex | Cursor |
+|---|---|---|---|
+| Verified against | 2.1.257 | codex-cli 0.149.1 | documented CLI |
+| Invocation | `claude -p --settings … --permission-mode bypassPermissions` | `codex exec --sandbox workspace-write -C …` | `cursor-agent -p --output-format text` |
+| Per-command deny list | **yes**, outranks bypass | no | no |
+| Write confinement | rules-based, filesystem-wide | sandbox mode, working tree | **none in print mode** |
+| May run posting tasks | yes | read-and-report only | **refused in code** |
+
+**Claude is the default and the only backend trusted with a task that can post,
+publish or merge.** Codex expresses a sandbox *mode* rather than a rule set, so
+it cannot say "everything except `git push`, `gh pr merge` and `cargo publish`".
+Cursor is weaker still: its own documentation states that in non-interactive
+mode the agent has full write access, and `--force` turns proposals into writes,
+so this backend never passes `--force` and declares `backend_allowed_tasks`.
+`run.sh` reads that declaration and refuses a task the backend is not fit for,
+exiting 78. A comment would have drifted; a refusal in code does not.
+
+## Platforms
+
+The core is bash and is not reimplemented per platform, because two
+implementations of a security gate drift and the gate is the product. Only
+scheduling forks.
+
+| Platform | Scheduler | Notes |
+|---|---|---|
+| Linux | systemd user timers | `Persistent=true` catches up a missed run |
+| macOS | launchd agents | **no** `Persistent` equivalent; a missed run does not catch up, and cadence longer than a day is enforced by the since-last-run state rather than by the schedule |
+| Windows | Task Scheduler via `Install-Maintainer.ps1` | `-StartWhenAvailable` is the closest thing to `Persistent=true`; bash comes from Git Bash or WSL and the script locates it |
+
+```sh
+./install.sh --timers                       # Linux
+./install.sh && platform/macos/install-launchd.sh   # macOS
+./install.sh                                # Windows, then:
+#   platform\windows\Install-Maintainer.ps1
+```
+
+The PowerShell is checked statically here (balanced blocks, real cmdlets, a
+`param` block) because `pwsh` is not installed on the development machine. That
+is a weaker check than parsing and is labelled as such in the suite.
+
+## Evals
+
+7 adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
+required behaviour, a "must not", and the file where the governing rule lives.
+They are drawn from the doctrine: prompt injection, trust escalation in the
+xz-utils shape, an AI-slop report, a merge with no proof, a reserved issue
+offered to a regular, a publishing verb, and a real security finding.
+
+```sh
+./evals/run-evals.sh          # static: is the governing rule still present?
+./evals/run-evals.sh --live   # ask the backend and read its answers
+```
+
+Static mode is free and runs in the pre-commit hook. It cannot tell you the
+agent behaves correctly; it tells you the rule that governs the behaviour has
+not been deleted, which is the regression that actually happens. It is
+mutation-proved: reword a rule in the preamble and the matching scenario fails.
+Live mode costs tokens, prints answers rather than scoring them, and is
+deliberately not wired into any hook.
+
+## Prose
+
+Everything the agent publishes goes through a prose discipline: no em dashes, no
+throat-clearing, no "not X, it's Y", active voice, no adverbs, and never a
+sentence that sounds technical without a command behind it. It is an **opt-out**
+(`MAINTAINER_PROSE_STYLE=raw`), and only that exact value disables it, so a typo
+still writes well.
 
 ## Install
 
@@ -180,9 +238,22 @@ aborted run cannot make the next one skip unreviewed changes.
 ## Tests
 
 ```sh
-./tests/run-tests.sh
+./tests/run-tests.sh        # 66 offline tests
+./evals/run-evals.sh        # 7 eval scenarios
+./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-Offline: no network, no GitHub, no model call. Every case tests a *refusal*,
-because that is where this agent's safety lives. The suite is mutation-proved;
-removing one deny rule turns it red naming that rule.
+66 offline tests: no network, no GitHub, no model call. Every case tests a
+*refusal*, because that is where this agent's safety lives. The suite is
+mutation-proved; removing one of the 40 deny rules turns it red naming that
+rule, and planting a home path turns the leak check red.
+
+There is no CI. This is a private repository with one maintainer, so the gate
+runs before the commit exists rather than after: `.githooks/pre-commit` runs
+`bash -n` over every script, the test suite, the evals, and the claim check.
+Install it with `git config core.hooksPath .githooks`.
+
+`scripts/check_claims.sh` holds this README's numbers to the tree, the same way
+the target repository holds its published test count to an evidence artifact. If
+a figure here disagrees with reality the commit fails, and if the check can no
+longer find a figure it fails too rather than passing over nothing.
