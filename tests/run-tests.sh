@@ -653,6 +653,71 @@ for want in "profile" "posting" "task" "review"; do
 done
 printf '%s' "$out" | grep -qE 'in [0-9]+' && ok "status converts the next-run time to a duration" \
     || bad "status does not show when the next run is"
+# `maintainer run` exists so nobody has to be told the path to run.sh twice, and
+# it must not become a second way to start a run that skips the gates.
+grep -q 'def cmd_run' "$root/bin/maintainer" && ok "maintainer run wraps the deployed orchestrator" \
+    || bad "no maintainer run subcommand"
+grep -q 'os.execv' "$root/bin/maintainer" && ok "maintainer run execs run.sh rather than reimplementing it" \
+    || bad "maintainer run does not delegate to run.sh"
+out=$(python3 "$root/bin/maintainer" run 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "maintainer run with no task is refused" || bad "maintainer run accepted an empty task"
+
+echo "== the screen decides what may execute on this host =="
+# Containment layer 3, and it had no test at all until now. `cargo test` on a
+# fork PR runs a stranger's code as this user and `build.rs` runs it at compile
+# time, so a screen that errs toward SAFE launders an unknown into a
+# reassurance. Every case here is driven through the real cmd_screen.
+screen_stub() {  # $1 = files json, $2 = changedFiles count, $3 = diff text
+    make_stub gh "case \"\$*\" in
+      *'pr view'*) cat <<'J'
+{\"files\":$1,\"headRefOid\":\"abcdef1234567890\",\"author\":{\"login\":\"stranger\"},\"title\":\"t\",\"changedFiles\":$2}
+J
+        ;;
+      *'pr diff'*) printf '%s\n' '$3' ;;
+      *) exit 1 ;;
+    esac"
+}
+screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
+screen_case() {  # $1 label, $2 expected substring
+    out="$(screen_run)"
+    if printf '%s' "$out" | grep -qF "$2"; then ok "$1"
+    else bad "$1 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100))"; fi
+}
+
+screen_stub '[{"path":"README.md"},{"path":"docs/a.md"}]' 2 ''
+screen_case "docs-only change is INERT" "VERDICT: INERT"
+
+screen_stub '[{"path":"crates/x/src/lib.rs"}]' 1 ''
+screen_case "a .rs file is DO NOT EXECUTE (cargo test runs it)" "VERDICT: DO NOT EXECUTE"
+
+screen_stub '[{"path":"crates/x/build.rs"}]' 1 ''
+screen_case "build.rs is DO NOT EXECUTE (it runs at compile time)" "runs at compile time"
+
+screen_stub '[{"path":".github/workflows/ci.yml"}]' 1 ''
+screen_case "a workflow change warns against approving its run" "Do NOT approve its queued workflow"
+
+screen_stub '[{"path":"scripts/x.sh"}]' 1 ''
+screen_case "a shell script is DO NOT EXECUTE (the gates run it)" "VERDICT: DO NOT EXECUTE"
+
+# A dependency line moved inside Cargo.toml: new third-party code would be built.
+screen_stub '[{"path":"Cargo.toml"}]' 1 'diff --git a/Cargo.toml b/Cargo.toml
++[dependencies]
++evil = "1.0"'
+screen_case "a dependency change is DO NOT EXECUTE" "dependency lines changed"
+
+# gh returns fewer files than it says exist: the rest were never screened.
+screen_stub '[{"path":"README.md"}]' 300 ''
+screen_case "a truncated file list fails closed" "never screened"
+
+# An extension the screen does not classify must not fall through to INERT.
+screen_stub '[{"path":"assets/blob.bin"}]' 1 ''
+screen_case "an unclassifiable file fails closed" "failing closed"
+
+# And if gh cannot answer at all, the screen must refuse rather than guess.
+make_stub gh 'exit 1'
+out="$(screen_run)"
+if printf '%s' "$out" | grep -q 'READ-ONLY'; then ok "an unreachable gh fails closed"
+else bad "the screen produced a verdict with no data (got: $(printf '%s' "$out" | head -1))"; fi
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

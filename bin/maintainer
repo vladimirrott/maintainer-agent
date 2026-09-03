@@ -2,6 +2,7 @@
 """Refresh the sysknife checkout and keep an auditable record of each maintenance run.
 
     maintainer status                          what has run, what is due, is it posting
+    maintainer run [--show-prompt] <task>      run one task now, or print its prompt
     maintainer start  <task>                   refresh, diff against the last run, open a report
     maintainer finish <run_id>                 close the run and append it to the index
     maintainer screen <pr>                     may this PR be built on the host?
@@ -504,6 +505,24 @@ def cmd_status() -> None:
               + ", ".join("#" + p.stem for p in rec))
 
 
+def cmd_run(args: list[str]) -> None:
+    """Run one task now, through the deployed orchestrator.
+
+    A wrapper over ~/.local/share/maintainer/run.sh, because the path to it is
+    the one thing a new maintainer has to be told twice. The cadence gate still
+    applies; MAINTAINER_FORCE=1 overrides it.
+    """
+    profile = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+    runsh = Path.home() / ".local/share/maintainer/run.sh"
+    if not runsh.exists():
+        raise SystemExit(f"maintainer: {runsh} not found. Run ./install.sh from the repository.")
+    show = [a for a in args if a == "--show-prompt"]
+    rest = [a for a in args if a != "--show-prompt"]
+    if len(rest) != 1:
+        raise SystemExit("usage: maintainer run [--show-prompt] <task>")
+    os.execv("/bin/bash", ["bash", str(runsh), *show, profile, rest[0]])
+
+
 def cmd_log(n: int) -> None:
     if not INDEX.exists():
         print("maintainer: no runs recorded yet")
@@ -518,6 +537,8 @@ def main() -> None:
     cmd = sys.argv[1]
     if cmd == "status":
         cmd_status()
+    elif cmd == "run":
+        cmd_run(sys.argv[2:])
     elif cmd == "start" and len(sys.argv) == 3:
         cmd_start(sys.argv[2])
     elif cmd == "finish" and len(sys.argv) == 3:

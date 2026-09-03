@@ -17,7 +17,8 @@ for container verification and for the PowerShell parse check.
 Read the prompt before you trust the agent:
 
 ```sh
-./lib/run.sh --show-prompt sysknife review | less
+./lib/run.sh --show-prompt sysknife review | less   # from a checkout
+maintainer run --show-prompt review                 # once installed
 ```
 
 That is the same assembly a real run uses, not a reconstruction of it. It

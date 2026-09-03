@@ -15,7 +15,7 @@ git clone <this repo> && cd maintainer-agent
 ./install.sh
 MAINTAINER_PROFILE=myrepo maintainer-doctor      # checks by running things
 ./lib/run.sh --show-prompt myrepo review | less  # read what it will be told
-~/.local/share/maintainer/run.sh myrepo review   # one run, by hand
+MAINTAINER_PROFILE=myrepo maintainer run review  # one run, by hand
 maintainer status
 ```
 
@@ -352,6 +352,10 @@ pass silently. `maintainer status` prints the whole picture in one screen: what
 ran, how long ago, how long the report was, when the next run fires, and whether
 this profile is posting at all.
 
+`maintainer run <task>` starts one by hand and `maintainer run --show-prompt
+<task>` prints what it would be told. Both go through the same `run.sh`, so the
+cadence gate and the identity gate still apply.
+
 Alongside each log the run now writes a `.commands` file listing every command
 the agent actually ran, taken from the backend's structured output rather than
 from its prose. A run report once read
@@ -394,12 +398,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 157 offline tests
+./tests/run-tests.sh        # 169 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-157 offline tests: no network, no GitHub, no model call. Every case tests a
+169 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
