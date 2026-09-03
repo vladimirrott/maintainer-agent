@@ -1,10 +1,32 @@
 # maintainer-agent
 
 An unattended maintainer for an open-source repository. It runs Claude Code (or
-Codex) on a systemd timer to review pull requests, file and place issues, audit
-the tracker, and harden CI, and it posts the results to GitHub for real.
+Codex, Cursor, or opencode) on a timer to review pull requests, file and place
+issues, audit the tracker, harden CI, prune merged branches and say when a
+release is owed. It posts the results to GitHub for real.
 
 It currently maintains [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife).
+
+## Try it without letting it speak
+
+```sh
+git clone <this repo> && cd maintainer-agent
+./new-profile.sh myrepo you/yourrepo ~/src/yourrepo your-gh-login "Your Name"
+./install.sh
+MAINTAINER_PROFILE=myrepo maintainer-doctor      # checks by running things
+./lib/run.sh --show-prompt myrepo review | less  # read what it will be told
+~/.local/share/maintainer/run.sh myrepo review   # one run, by hand
+maintainer status
+```
+
+A scaffolded profile starts at **`POST=off`**. The agent does the whole pass,
+writes the run report and its drafts, and reaches nobody: every GitHub write
+verb is denied in the settings file it is handed, and the prompt says so. Read a
+week of reports, then set `POST=on` in `profiles/myrepo/profile.env` and enable
+the timers with `./install.sh --timers`.
+
+`./install.sh --uninstall` removes all of it and keeps the audit trail, because
+that trail is the record of what was published in your name.
 
 ## This is a maintainer, not a PR bot
 
@@ -63,21 +85,33 @@ rule against a real git repository.
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries 72 deny rules covering `git push`, `git tag`,
+backend, `--settings` carries 132 deny rules covering `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
 `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`, `~/.aws`, `~/.gnupg`,
-`~/.netrc` and credentials files. `tests/run-tests.sh` pins them and is
-mutation-proved: delete a rule and the suite goes red naming it.
+`~/.netrc` and credentials files. Rehearsal adds every GitHub write verb on top,
+216 in rehearsal. `tests/run-tests.sh` pins them and is mutation-proved: delete
+a rule and the suite goes red naming it.
 
-Two properties, both measured on 2026-09-03 rather than assumed:
+The wall is **generated** from `profiles/<name>/deny.json`, one line per verb,
+spelled four ways on the way out. It was hand-written until the spelling
+measurement below forced 40 rules to 72 one line at a time, and the next verb
+anyone added would have had the same hole.
+
+Three properties, all measured rather than assumed:
 
 - **Deny does outrank `bypassPermissions`.** A differential run with one denied
   path and one control: the denied `touch` was blocked and the control
   succeeded, and the agent reported "First command hit permission restriction".
 - **The matcher keys on the command as written, so equivalent spellings evade
   it.** `/usr/bin/touch /tmp/mt-y` succeeded against a rule denying
-  `touch /tmp/mt-y`. Absolute-path forms of every blocked verb are now denied
-  too, which is why there are 72 rules and not 40.
+  `touch /tmp/mt-y`. Every blocked verb now comes out bare and under `/bin`,
+  `/usr/bin` and `/usr/local/bin`.
+- **A `Read` rule needs `~/` or `//`, and a single leading slash denies
+  nothing.** Measured with a control: `Read(/tmp/x/f)` let the file through
+  while `Read(//tmp/x/f)` and `Read(~/f)` blocked it. Claude Code resolves one
+  slash against the settings file's own directory, so the obvious tidy-up
+  (`Read(~/.ssh/**)` to `Read(/home/you/.ssh/**)`) would disable every
+  credential rule at once and silently. A test asserts the `~/` form survives.
 
 That second measurement bounds the claim honestly. **A deny list is not a
 boundary against an adversarial agent**, because enumeration cannot be complete;
@@ -133,6 +167,7 @@ it is the reason there is a default.
 | Permission model | **default-deny + allowlist** | denylist over bypass | sandbox mode | none in print mode |
 | Survives an unfamiliar spelling | **yes, structurally** | **no** (measured) | n/a | n/a |
 | May run posting tasks | yes | yes | read-and-report only | **refused in code** |
+| Can enforce `POST=off` | yes | yes | no | no |
 
 **opencode has the strongest containment, and the reason is structural rather
 than diligent.** Its permission rules are patterns evaluated last-match-wins, so
@@ -160,23 +195,59 @@ The core is bash and is not reimplemented per platform, because two
 implementations of a security gate drift and the gate is the product. Only
 scheduling forks.
 
+**Cadence lives in one place and every platform reads it.** Each task carries
+`MIN_HOURS_<task>` in `profile.env`, and `run.sh` declines a task that ran more
+recently than that, printing why. Schedulers only decide when to *try*.
+
+That is not tidiness. launchd's `StartCalendarInterval` cannot say "every five
+days" at all, and cron's day-of-month stepping fires on the 31st and again on
+the 1st. Before the gate existed, `install-launchd.sh` claimed the since-last-run
+state enforced the cadence and nothing did: a five-day audit would have run daily
+on macOS. Now every scheduler fires daily and the gate decides.
+
 | Platform | Scheduler | Notes |
 |---|---|---|
 | Linux | systemd user timers | `Persistent=true` catches up a missed run |
-| macOS | launchd agents | **no** `Persistent` equivalent; a missed run does not catch up, and cadence longer than a day is enforced by the since-last-run state rather than by the schedule |
+| macOS | launchd agents | **no** `Persistent` equivalent, so a run missed while asleep waits for tomorrow rather than repeating |
 | Windows | Task Scheduler via `Install-Maintainer.ps1` | `-StartWhenAvailable` is the closest thing to `Persistent=true`; bash comes from Git Bash or WSL and the script locates it |
-| **Everything else** | `platform/posix/install-cron.sh` | FreeBSD, OpenBSD, NetBSD, Alpine and other musl or systemd-less Linux, Termux, containers. **No catch-up for a missed run**, and cron gives a job almost no environment, so the entries pin `PATH` |
+| **Everything else** | `platform/posix/install-cron.sh` | FreeBSD, OpenBSD, NetBSD, Alpine and other musl or systemd-less Linux, Termux, containers. cron gives a job almost no environment, so the entries pin `PATH` |
 
 ```sh
-./install.sh --timers                       # Linux
-./install.sh && platform/macos/install-launchd.sh   # macOS
-./install.sh                                # Windows, then:
+./install.sh --timers                                # Linux
+./install.sh && platform/macos/install-launchd.sh    # macOS
+./install.sh                                         # Windows, then:
 #   platform\windows\Install-Maintainer.ps1
 ```
 
-The PowerShell is checked statically here (balanced blocks, real cmdlets, a
-`param` block) because `pwsh` is not installed on the development machine. That
-is a weaker check than parsing and is labelled as such in the suite.
+All three read the task list from the deployed `profile.env`, so a second
+repository needs a profile and no edit to any of them. The PowerShell installer
+is parsed by a real `pwsh` in a container when the image is present locally;
+counting braces was the previous check, and it would pass a file PowerShell
+refuses to load.
+
+## Another repository
+
+```sh
+./new-profile.sh widget acme/widget ~/src/widget acmebot "Ada Lovelace"
+```
+
+That writes `profiles/widget/` from `profiles/_template/`, substitutes every
+placeholder, refuses to continue if one survives, and generates one systemd
+timer per task. Then rewrite `profiles/widget/prompts/*.md` for the project.
+The generic ones are a starting point; `profiles/sysknife/prompts/` is the
+worked set.
+
+Nothing in `bin/` or `lib/` carries a repository's name. The task list, the
+skill each task loads, the models, the cadences, the deny wall and the state
+directory all come from `profile.env`. `CONTRIBUTING.md` has claimed that since
+the beginning; before `new-profile.sh` it was not true, because adding a
+repository meant editing a hardcoded skill map in `bin/maintainer` and
+hand-writing four unit files.
+
+The doctrine itself lives once, in `lib/preamble-core.md`, and every profile
+gets it: the injection rule, the screen rule, the evidence rule, the tone. A
+profile contributes its own site header and its task prompts. A run assembled
+without the core refuses to start rather than proceeding with a shorter prompt.
 
 ## Housekeeping and releases
 
@@ -187,6 +258,10 @@ intentions.
 maintainer-repo prune --dry-run   # branches merged into main, local and remote
 maintainer-repo release-check     # is a release owed, and which digit moves
 ```
+
+Both are in the `review` prompt, so they run every pass rather than when someone
+remembers. `git push` stays denied to the agent directly; what it is allowed is
+the audited script, the same shape as the merge gate.
 
 `prune` refuses to touch a branch that still heads an open pull request, and
 defines "merged" as an ancestor of `origin/main` rather than trusting a name.
@@ -233,6 +308,7 @@ still writes well.
 ./install.sh              # deploy files, leave the scheduler alone
 maintainer-doctor         # check it by running it
 ./install.sh --timers     # enable (Linux); see the table above for other platforms
+./install.sh --uninstall  # remove everything except the audit trail
 ```
 
 **`maintainer-doctor` is the command to reach for when anything is wrong.** It
@@ -243,7 +319,12 @@ before the file was copied, and a `cp -r` that nested directories so the live
 deny wall stayed frozen at 40 rules while the repository had 72. It prints the
 fix, not the symptom.
 
-`./install.sh --dry-run` prints what would change and touches nothing.
+`./install.sh --dry-run` prints what would change and touches nothing. It is a
+weaker check than it looks: `--dry-run` prints the commands instead of running
+them, so it happily printed `systemctl enable *.timer` for a glob that matched
+no file, and only a real install revealed that `--timers` had never enabled
+anything. The suite now runs the install against a stub `systemctl` and counts
+what it enabled.
 
 The installer writes a timer stamp before enabling. A fresh `Persistent=true`
 timer treats "never run" as a missed slot and fires a catch-up run the instant
@@ -253,20 +334,31 @@ it is enabled, landing a job on top of whatever a human is doing.
 
 | Task | Cadence | Does |
 |---|---|---|
-| `review` | twice daily, 09:13 and 21:13 | reviews every open PR, verifies claims, reports ready-to-merge |
-| `issues` | every 2 days | files issues, places them, prepares TWiR submissions |
-| `ci` | every 3 days | audits one CI gate in depth |
-| `audit` | every 5 days | sweeps every open issue for validity, accuracy, placement, labels |
+| `review` | 6h minimum | reviews every open PR, verifies claims, merges through the gate, prunes merged branches, reports whether a release is owed |
+| `issues` | 36h minimum | files issues, places them with the person who has demonstrated the skill, prepares TWiR submissions |
+| `ci` | 60h minimum | audits one CI gate in depth |
+| `audit` | 108h minimum | sweeps every open issue for validity, accuracy, placement, labels |
 
-Each task is one prompt in `profiles/<name>/prompts/`, paired with a skill the
-agent loads at runtime.
+Each task is one prompt in `profiles/<name>/prompts/`, paired with a skill named
+in `profile.env` that the agent loads at runtime. The cadence is the minimum
+above, not the schedule: a timer that fires early gets a skip and says so.
 
 ## The audit trail
 
 Every run appends to `~/.local/state/sysknife-maint/`: `index.md` lists them,
-`runs/` holds the reports, `logs/` the transcripts, `state/` the
-since-last-run snapshots. `finish` refuses an empty report, so a run that did
-nothing cannot pass silently.
+`runs/` holds the reports, `logs/` the transcripts, `state/` the since-last-run
+snapshots. `finish` refuses an empty report, so a run that did nothing cannot
+pass silently. `maintainer status` prints the whole picture in one screen: what
+ran, how long ago, how long the report was, when the next run fires, and whether
+this profile is posting at all.
+
+Alongside each log the run now writes a `.commands` file listing every command
+the agent actually ran, taken from the backend's structured output rather than
+from its prose. A run report once read
+`sysknife-maint screen 348 -> DO NOT EXECUTE` for a command that had been renamed
+away and did not exist. Whether the agent ran the real one and mistyped the
+report, or ran nothing and wrote the verdict anyway, the trail could not say.
+A report is a claim; the transcript is the record.
 
 Baselines promote only on success. `start` writes `pending-<task>.json` and
 `finish` promotes it to `last-<task>.json` after the report checks pass, so an
@@ -274,8 +366,8 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the ten defects that reached a working
-system, each with the measurement that found it and the guard that now stops it.
+[`docs/lessons.md`](docs/lessons.md) has the fifteen defects that reached a
+working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
 ## Operational traps, each one paid for
@@ -302,15 +394,17 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 100 offline tests
+./tests/run-tests.sh        # 156 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-100 offline tests: no network, no GitHub, no model call. Every case tests a
+156 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
-mutation-proved; removing one of the 72 deny rules turns it red naming that
-rule, and planting a home path turns the leak check red.
+mutation-proved; removing a deny rule turns it red naming that rule, planting a
+home path turns the leak check red, restoring the renamed command in a prompt
+turns the command check red, and pointing the installer's timer glob back at the
+directory it used to look in turns the install test red.
 
 There is no CI. This is a private repository with one maintainer, so the gate
 runs before the commit exists rather than after: `.githooks/pre-commit` runs

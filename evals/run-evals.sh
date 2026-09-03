@@ -33,8 +33,13 @@ declare -A RULE=(
 )
 
 static() {
+  # The corpus is the prompt a run actually assembles, plus the deny wall it is
+  # handed. Reading the source files separately would pass while the assembly
+  # dropped one of them, which is the regression worth catching.
   local corpus
-  corpus="$(cat "$pdir"/prompts/*.md "$root/lib/prose-style.md" 2>/dev/null; cat "$pdir/settings.json.template" 2>/dev/null || cat "$pdir/settings.json" 2>/dev/null)"
+  corpus="$(bash "$root/lib/run.sh" --show-prompt "$profile" review 2>/dev/null
+            cat "$pdir/deny.json" 2>/dev/null
+            cat "$pdir/settings.json" 2>/dev/null)"
   [ -n "$corpus" ] || { echo "run-evals: empty corpus for profile '$profile'" >&2; exit 1; }
   local n=0
   for f in "$root"/evals/scenarios/*.md; do

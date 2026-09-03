@@ -48,15 +48,38 @@ pdir="$share/profiles/$profile"
 if [ -f "$pdir/profile.env" ]; then green "profile '$profile' present"; else
     red "no profile '$profile'" "check profiles/ in the repository"; fi
 if [ -f "$pdir/settings.json.template" ]; then
-    red "the deny-wall template was never rendered" "./install.sh renders it"
+    red "an old settings.json.template is still here" "rm it and re-run ./install.sh; walls are generated from deny.json now"
+elif [ ! -f "$pdir/deny.json" ]; then
+    red "no deny.json for '$profile'" "every profile needs one; copy profiles/_template/deny.json"
 elif [ -f "$pdir/settings.json" ]; then
     n=$(python3 -c "import json;print(len(json.load(open('$pdir/settings.json'))['permissions']['deny']))" 2>/dev/null)
     if [ -z "$n" ]; then red "deny wall is not valid JSON" "reinstall"
-    elif [ "$n" -lt 60 ]; then
+    elif [ "$n" -lt 100 ]; then
         red "deny wall has only $n rules; it is stale" "rm -rf $share && ./install.sh"
-    else green "deny wall rendered, $n rules"; fi
+    else green "deny wall generated, $n rules"; fi
     grep -q '__HOME__' "$pdir/settings.json" && red "unrendered __HOME__ left in the deny wall" "reinstall"
+    # Measured: a single leading slash anchors to the settings directory, not to
+    # the filesystem root, so Read(/home/you/.ssh/**) denies nothing. The ~/ form
+    # is the one that works. Losing it would disable every credential rule at
+    # once, silently.
+    if grep -q '"Read(~/' "$pdir/settings.json"; then
+        green "credential Read rules use the home-relative form that actually denies"
+    else
+        red "no Read(~/...) rule; credential paths are not protected" \
+            "check credential_paths in deny.json and re-run ./install.sh"
+    fi
 else red "no deny wall at all" "./install.sh"; fi
+# POST=off is the wall that makes a first week safe. If the profile asks for it,
+# the wall it needs must exist.
+if [ -f "$pdir/settings-rehearsal.json" ]; then
+    r=$(python3 -c "import json;print(len(json.load(open('$pdir/settings-rehearsal.json'))['permissions']['deny']))" 2>/dev/null)
+    green "rehearsal wall present, $r rules (POST=off posts nothing)"
+else
+    yellow "no rehearsal wall; POST=off would refuse to start" "./install.sh generates it"
+fi
+if [ -d "$share/profiles/_template" ]; then
+    yellow "the scaffolding template was deployed" "harmless, but ./install.sh should have skipped it"
+fi
 
 head_ "Backend"
 # shellcheck disable=SC1091
@@ -72,6 +95,17 @@ case "$b" in
   opencode) command -v opencode >/dev/null && green "opencode on PATH" || red "opencode not on PATH" "curl -fsSL https://opencode.ai/install | bash" ;;
 esac
 
+head_ "Commands the prompts tell the agent to run"
+# A prompt once told an unattended run to call `sysknife-maint screen`, a name
+# that had been renamed away. The run reported a screen verdict it could not
+# have obtained. Checking that each name resolves is cheap; noticing it in a
+# report six months later is not.
+for c in ${REQUIRED_COMMANDS:-maintainer maintainer-merge gh git}; do
+    if command -v "$c" >/dev/null 2>&1; then green "$c resolves"; else
+        red "$c is named in the prompts and is NOT on PATH" \
+            "install it, or remove it from the prompts and REQUIRED_COMMANDS"; fi
+done
+
 head_ "GitHub identity"
 # Lesson 9: the active account changes under you, and a write under the wrong
 # one is worse than a refusal.
@@ -82,6 +116,13 @@ if command -v gh >/dev/null; then
     elif [ -z "$who" ]; then red "gh is not authenticated" "gh auth login"
     else yellow "gh is '$who', not '$want'" "run.sh switches automatically, but check ~/.config/gh/hosts.yml"; fi
 else red "gh not installed" "install the GitHub CLI"; fi
+
+head_ "Posting"
+case "${POST:-on}" in
+  *off*) green "POST=off: this profile writes reports and drafts, and posts nothing" ;;
+  *)     yellow "POST=on: this profile writes to GitHub as ${GH_ACCOUNT:-?}" \
+                "set POST=off in profile.env for a rehearsal week" ;;
+esac
 
 head_ "Repository"
 r="${REPO_PATH:-$HOME/Desktop/lacs}"

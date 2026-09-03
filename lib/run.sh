@@ -31,8 +31,14 @@ if   [ -d "$local_root/backends" ];     then BACKEND_DIR="$local_root/backends"
 elif [ -d "$local_root/lib/backends" ]; then BACKEND_DIR="$local_root/lib/backends"
 else echo "run.sh: cannot find a backends/ directory under $local_root" >&2; exit 64
 fi
-profile="${1:?usage: run.sh <profile> <task>}"
-task="${2:?usage: run.sh <profile> <task>}"
+# --show-prompt assembles the prompt and prints it, touching nothing. It is the
+# answer to "what exactly does this thing tell an agent to do in my name", and
+# it must stay the SAME assembly the run uses, not a copy: a preview that
+# reassembles the prompt its own way is a preview of a different agent.
+show=0
+if [ "${1:-}" = "--show-prompt" ]; then show=1; shift; fi
+profile="${1:?usage: run.sh [--show-prompt] <profile> <task>}"
+task="${2:?usage: run.sh [--show-prompt] <profile> <task>}"
 
 PROFILE_DIR="$local_root/profiles/$profile"
 [ -f "$PROFILE_DIR/profile.env" ] || { echo "run.sh: no profile '$profile'" >&2; exit 64; }
@@ -40,9 +46,49 @@ PROFILE_DIR="$local_root/profiles/$profile"
 . "$PROFILE_DIR/profile.env"
 export PROFILE_DIR REPO_PATH
 export MAINTAINER_REPO="$REPO_PATH" MAINTAINER_SLUG="$REPO_SLUG" MAINTAINER_STATE="$STATE_DIR"
+# scripts/ sits under local_root in both layouts: repo/scripts, and $share/scripts
+# once installed. local_root already accounts for the difference.
+[ -d "$local_root/scripts" ] && export MAINTAINER_SCRIPTS="$local_root/scripts"
 
 case " $TASKS " in *" $task "*) ;; *) echo "run.sh: unknown task '$task'" >&2; exit 64 ;; esac
 model_var="MODEL_$task"; model="${!model_var:?no model configured for $task}"
+# The helper takes its task list and skill label from the profile rather than
+# from a dict in its own source, so a second repository needs no code change.
+skill_var="SKILL_$task"
+export MAINTAINER_TASKS="$TASKS" MAINTAINER_SKILL="${!skill_var:-}"
+
+# The scheduler is not the only thing that decides cadence, because not every
+# scheduler can express one. systemd says "every 5 days" and means it; launchd's
+# StartCalendarInterval cannot say it at all, so the macOS agents fire daily,
+# and cron's day-of-month stepping runs on the 31st and again on the 1st. Until
+# this gate existed, the macOS installer claimed the since-last-run state
+# enforced the cadence. Nothing did: `audit` would have run five times a week.
+#
+# The baseline is promoted by `finish` only on success, so a run that failed
+# does not lock out its own retry.
+min_gate() {
+    [ "${MAINTAINER_FORCE:-0}" = 1 ] && return 0
+    # Two statements, not one. `local a=X b=${!a}` expands every word before the
+    # builtin assigns any of them, so the indirect reference sees an unset name
+    # and bash reports "invalid indirect expansion". The gate then fell through
+    # and every task ran regardless of its interval.
+    local var min
+    var="MIN_HOURS_$task"
+    min="${!var:-0}"
+    [ "$min" = 0 ] && return 0
+    local f="$STATE_DIR/state/last-$task.json"
+    [ -f "$f" ] || return 0
+    local last now age
+    last="$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)"
+    now="$(date +%s)"
+    age=$(( (now - last) / 3600 ))
+    if [ "$age" -lt "$min" ]; then
+        printf 'skipped: %s last ran %dh ago, minimum is %dh (MAINTAINER_FORCE=1 overrides)\n' \
+            "$task" "$age" "$min"
+        exit 0
+    fi
+}
+[ "$show" = 1 ] || min_gate
 
 logs="$STATE_DIR/logs"; mkdir -p "$logs"
 stamp="$(date +%Y-%m-%dT%H-%M)"
@@ -55,15 +101,45 @@ alert() {
         notify-send -u critical "maintainer: $profile/$task failed" "$1" 2>/dev/null || true
 }
 
+# Rehearsal: the agent does the whole run and reaches nobody.
+#
+# A first run that posts is the reason people do not try an unattended
+# maintainer at all. With POST=off the backend gets a deny wall that also blocks
+# every verb that writes to GitHub, and the prompt says so, so the agent stops
+# rather than retrying around a refusal it does not expect. Both, because the
+# prompt alone is a request and the wall alone produces a confused run.
+POST="${POST:-on}"
+if [ "$POST" = off ]; then
+    if [ -f "$PROFILE_DIR/settings-rehearsal.json" ]; then
+        export MAINTAINER_SETTINGS="$PROFILE_DIR/settings-rehearsal.json"
+    elif [ -f "$PROFILE_DIR/opencode-rehearsal.json" ]; then
+        export MAINTAINER_SETTINGS="$PROFILE_DIR/opencode-rehearsal.json"
+    elif [ "$show" = 1 ]; then
+        echo "run.sh: (preview) no rehearsal wall is rendered in this tree; a real" >&2
+        echo "        run would refuse here. ./install.sh renders it." >&2
+    else
+        echo "run.sh: POST=off but no rehearsal wall was rendered for '$profile'" >&2
+        echo "        re-run ./install.sh, which renders it beside settings.json" >&2
+        exit 78
+    fi
+fi
+
 # shellcheck disable=SC1090
 . "$BACKEND_DIR/$BACKEND.sh" || { alert "no backend '$BACKEND'"; exit 64; }
+
+# A backend with no per-command control cannot honour POST=off. Saying so is the
+# only honest option: a rehearsal that silently posts is worse than no rehearsal.
+if [ "$show" = 0 ] && [ "$POST" = off ] && ! declare -F backend_rehearsal >/dev/null; then
+    alert "backend '$BACKEND' cannot enforce POST=off (no per-command deny list); use claude or opencode"
+    exit 78
+fi
 
 {
     echo "=== run.sh $profile/$task $(date -Is) ==="
     echo "backend=$(backend_name) model=$model log=$log"
 } >>"$log"
 
-if ! msg="$(backend_check)"; then
+if [ "$show" = 0 ] && ! msg="$(backend_check)"; then
     alert "backend $BACKEND unusable: $msg"
     exit 1
 fi
@@ -79,6 +155,8 @@ if declare -F backend_allowed_tasks >/dev/null; then
         *) alert "backend '$BACKEND' may only run: $allowed (refused '$task')"; exit 78 ;;
     esac
 fi
+
+if [ "$show" = 0 ]; then
 
 # Every task shares one working tree and `maintainer start` checks out main.
 # Two at once would fight over HEAD and over target/, and the loser would review
@@ -118,23 +196,70 @@ if [ -z "$run_id" ]; then
     exit 1
 fi
 
+else
+    context="(preview only: no refresh ran, so nothing here reflects the tracker)"
+    run_id="preview"
+fi
+
 # 2. preamble + task prompt + freshly computed context, in that order. Written
 #    to a file rather than piped from a variable so the backend can choose
 #    stdin or an argument without the caller caring.
 prompt_file="$(mktemp)"
 trap 'rm -f "$prompt_file"' RETURN
+
+# lib/ files sit under lib/ in the repository and beside run.sh once installed.
+libfile() {
+    if   [ -f "$local_root/lib/$1" ]; then printf '%s' "$local_root/lib/$1"
+    elif [ -f "$local_root/$1" ];     then printf '%s' "$local_root/$1"
+    else return 1; fi
+}
+# The core preamble carries the injection rule, the screen rule and the evidence
+# rule. A run without it is an unattended agent with no doctrine, so this fails
+# closed rather than continuing with a shorter prompt.
+core="$(libfile preamble-core.md)" || {
+    alert "preamble-core.md is missing; refusing to run without the doctrine"
+    exit 1
+}
+prose="$(libfile prose-style.md || true)"
+
 {
+    # 1. Who this profile is, and what it is authorised to do.
     cat "$PROFILE_DIR/prompts/common-preamble.md"
     printf '\n\n'
-    # Opt-out, not opt-in: anything other than an explicit "raw" gets the
-    # prose discipline. A missing or misspelled value must still write well.
-    if [ "${PROSE_STYLE:-stop-slop}" != "raw" ]; then
-        cat "$local_root/lib/prose-style.md" 2>/dev/null || cat "$local_root/prose-style.md"
+    # 2. The doctrine, shared by every profile so it cannot drift between repos.
+    sed -e "s|__MAINTAINER__|${MAINTAINER_NAME:-the maintainer}|g" \
+        -e "s|__SLUG__|$REPO_SLUG|g" "$core"
+    printf '\n\n'
+    # 3. Prose discipline. Opt-OUT, not opt-in: anything other than an explicit
+    #    "raw" gets it, so a missing or misspelled value still writes well.
+    if [ "${PROSE_STYLE:-stop-slop}" != "raw" ] && [ -n "$prose" ]; then
+        cat "$prose"
         printf '\n\n'
     fi
+    # 4. Rehearsal, last before the task so it overrides anything above it.
+    if [ "$POST" = off ]; then
+        cat <<'REHEARSAL'
+## This run is a REHEARSAL. Post nothing.
+
+Do the whole pass: read, verify, recount, form the conclusions you would
+publish. Then write them into the run report and the drafts directory instead
+of into GitHub. Every posting command is blocked by the settings file, so a
+refusal here is the rehearsal working. Do not look for another way to send it.
+
+In the report, list what you WOULD have posted and where, so the maintainer can
+read it and decide whether to turn posting on.
+REHEARSAL
+        printf '\n\n'
+    fi
+    # 5. The task, then what changed since this task last ran.
     cat "$PROFILE_DIR/prompts/$task.md"
     printf '\n\n## Context for this run, computed just now\n\n```\n%s\n```\n' "$context"
 } > "$prompt_file"
+
+if [ "$show" = 1 ]; then
+    cat "$prompt_file"
+    exit 0
+fi
 
 # 3. Hand it to the backend. Wall-clock is bounded by systemd, not here.
 cd "$REPO_PATH" || { alert "cannot cd to $REPO_PATH"; exit 1; }

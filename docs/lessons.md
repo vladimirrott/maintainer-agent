@@ -128,3 +128,90 @@ sentence lost its subject. The post still reported success; only stderr said
 
 **Guard:** quoted heredoc and `--body-file`, always. Read back the first lines
 of anything posted.
+
+## 11. A dry run cannot see a glob that matches nothing
+
+`./install.sh --timers` globbed `$root/systemd/*.timer`. This repository has
+never had a `systemd/` directory; the units live under `platform/linux`. With
+`nullglob` off the loop ran once on the literal pattern, and
+`systemctl --user enable --now '*.timer'` aborted the install under `set -e`
+having enabled nothing.
+
+`--dry-run` printed `would: systemctl --user enable --now *.timer` and exited 0,
+because a dry run prints commands instead of running them. The documented Linux
+install path was broken and every dry run said it was fine. It only worked here
+because the timers had been enabled by hand months earlier.
+
+**Guard:** the suite runs the real installer against a stub `systemctl` and
+counts what it enabled against the number of `.timer` files in the tree. Point
+the glob back at `$root/systemd` and the suite goes red.
+
+## 12. A prompt that names a renamed command gets a verdict anyway
+
+The preamble told every unattended run, in bold, to call
+`sysknife-maint screen <pr>` before building a pull request. That command was
+renamed to `maintainer screen` and `sysknife-maint` no longer exists anywhere on
+`PATH`. The screen is the control that stops contributor code executing on a
+machine holding SSH keys.
+
+The 2026-09-03 review report reads `sysknife-maint screen 348 -> DO NOT EXECUTE`.
+Either the agent ran the real command and copied the prompt's dead name into the
+report, or it ran nothing and wrote a plausible verdict. The audit trail could
+not distinguish those, which is the deeper defect.
+
+**Guard, two of them.** `profile.env` declares `REQUIRED_COMMANDS` and
+`KNOWN_NAMES`; a test extracts every hyphenated backticked name from the
+*assembled* prompt of every task and fails on anything undeclared, and fails
+again on a declaration no prompt uses so the list cannot be padded quiet.
+`maintainer-doctor` checks each required command resolves. Separately, the
+Claude backend now runs with `--output-format stream-json` and writes every
+command the agent actually ran to a `.commands` file beside the log. A report is
+a claim; the transcript is the record.
+
+## 13. `local a=X b=${!a}` expands before it assigns
+
+The cadence gate opened with
+
+```sh
+local var="MIN_HOURS_$task" min="${!var:-0}"
+```
+
+`local` is a builtin, so bash expands every one of its arguments before the
+builtin assigns any of them. `${!var}` therefore resolved against an unset name
+and bash printed `var: invalid indirect expansion`. Without `set -e` the
+function fell straight through, and every task ran regardless of its interval.
+
+The test that caught it was the one asserting a two-hour-old task gets skipped.
+The two tests either side of it passed, for the wrong reason.
+
+**Guard:** the gate is asserted in three directions, including the negative one,
+and the fix is two statements rather than one.
+
+## 14. A leading slash in a `Read` rule points somewhere else entirely
+
+`Read(//home/you/.ssh/**)` looks like a typo for `Read(/home/you/.ssh/**)`. It
+is not. Claude Code resolves a single leading slash against the settings file's
+own directory; only `//` means the filesystem root, and `~/` means the home
+directory.
+
+Measured with a control: `Read(/tmp/x/dbl.txt)` let the file through, while the
+`//` and `~/` forms both denied it. Normalising the double slash away, which is
+exactly what a tidy-up commit does, would have disabled all seven credential
+rules at once and left the count unchanged.
+
+**Guard:** the wall is generated in the `~/` form, a test asserts that form
+survives, and the generator refuses to write a wall containing no `Read(~/`
+rule at all.
+
+## 15. Prose can claim a cadence that no code enforces
+
+`install-launchd.sh` said the every-N-days cadence was "enforced by the
+since-last-run state". Nothing enforced it. `maintainer start` computes what
+changed since the last run and puts it in the prompt; it never declines to run.
+launchd cannot express a multi-day interval, so on macOS the five-day tracker
+audit would have run every single day, and the README repeated the claim.
+
+**Guard:** `MIN_HOURS_<task>` in `profile.env`, enforced in `run.sh` on every
+platform, with the skip printed and the override named. Every scheduler now
+fires daily and the gate decides, which also removes cron's day-of-month
+stepping firing on the 31st and again on the 1st.

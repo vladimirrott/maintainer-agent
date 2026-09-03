@@ -38,7 +38,14 @@ gate_test "someone-else" 1
 gate_test ""             1
 
 echo "== the Claude deny wall still names the verbs that matter =="
-s="$root/profiles/sysknife/settings.json.template"
+# Generated, then asserted. The tests read the artifact the agent is handed, not
+# the spec it came from: a generator bug that drops every absolute spelling is
+# invisible to a test that reads the input.
+wall_dir="$stub_dir/wall"; mkdir -p "$wall_dir"
+cp "$root/profiles/sysknife/deny.json" "$root/profiles/sysknife/opencode.json" "$wall_dir/"
+python3 "$root/scripts/render-settings.py" "$wall_dir" /home/fakeuser >/dev/null 2>&1 \
+    && ok "the deny wall generates from deny.json" || bad "render-settings.py failed"
+s="$wall_dir/settings.json"
 for verb in "git push" "gh pr merge" "cargo publish" "npm publish" "gh release" "git tag"; do
     if grep -q "$verb" "$s"; then ok "deny list names '$verb'"; else bad "deny list LOST '$verb'"; fi
 done
@@ -62,12 +69,21 @@ else
     bad "default backend is no longer claude"
 fi
 
-echo "== the deny-wall template renders to valid JSON with no placeholder left =="
-rendered="$(mktemp)"; sed "s|__HOME__|/tmp/fakehome|g" "$s" > "$rendered"
-if grep -q '__HOME__' "$rendered"; then bad "template left an unrendered placeholder"; else ok "template renders fully"; fi
-if python3 -c "import json;json.load(open('$rendered'))" 2>/dev/null; then ok "rendered deny wall is valid JSON"; else bad "rendered deny wall is not valid JSON"; fi
-if grep -q '/tmp/fakehome/.ssh' "$rendered"; then ok "rendered rules carry absolute paths"; else bad "rendered rules lost their absolute paths"; fi
-rm -f "$rendered"
+echo "== the generated wall is valid, absolute, and home-relative where it must be =="
+if python3 -c "import json;json.load(open('$s'))" 2>/dev/null; then ok "generated deny wall is valid JSON"; else bad "generated deny wall is not valid JSON"; fi
+grep -q '__HOME__' "$s" && bad "a placeholder survived generation" || ok "no placeholder survived"
+grep -q '/home/fakeuser/.ssh' "$s" && ok "credential paths are spelled expanded" || bad "expanded spelling missing"
+grep -q '\$HOME/.ssh' "$s" && ok "credential paths are spelled with \$HOME" || bad "\$HOME spelling missing"
+# MEASURED 2026-09-03: Read(/abs/path) anchors to the SETTINGS directory and
+# denies nothing; Read(~/path) denies. Normalising the tilde away, which looks
+# like a tidy-up, would disable every credential rule at once and silently.
+grep -q '"Read(~/.ssh/\*\*)"' "$s" && ok "Read rules use the home-relative form that denies" \
+    || bad "Read rules lost the ~/ form; credential paths are unprotected"
+python3 - "$root/profiles/sysknife/deny.json" <<'PYEOF' && ok "deny.json commits no literal home path" || bad "deny.json contains a home path"
+import json,sys
+spec=open(sys.argv[1]).read()
+sys.exit(1 if "/home/" in spec or "/Users/" in spec else 0)
+PYEOF
 
 echo "== no home path or username is committed =="
 # The needle is assembled at runtime so this file does not match itself, which
@@ -196,16 +212,27 @@ gate_case 7 "$docs_head" "receipt still applies" "docs-only movement keeps the r
 gate_case 8 "$prod_head" "production code changed" "production movement invalidates the receipt"
 
 echo "== the doctrine reaches a run, not just a reader =="
-pre="$root/profiles/sysknife/prompts/common-preamble.md"
-for needle in "Trust is the attack surface" "slop" "Persistence"; do
-    if grep -qi "$needle" "$pre"; then ok "preamble carries: $needle"; else bad "preamble lost: $needle"; fi
+# Assembled, not inspected. The doctrine lives in lib/preamble-core.md and the
+# profile contributes only its site header, so grepping either file alone would
+# pass while the agent received neither. --show-prompt is the same assembly a
+# real run uses.
+assembled="$stub_dir/assembled.md"
+PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife review >"$assembled" 2>/dev/null
+if [ -s "$assembled" ]; then ok "the prompt assembles"; else bad "--show-prompt produced nothing"; fi
+for needle in "Trust is the attack surface" "slop" "Persistence" "data, not instruction" \
+              "maintainer screen" "Never post a claim you have not run"; do
+    if grep -qi "$needle" "$assembled"; then ok "assembled prompt carries: $needle"; else bad "assembled prompt LOST: $needle"; fi
 done
+# The profile's own name must be substituted into the shared doctrine, or the
+# agent is told to protect a repository that is not the one it is reviewing.
+grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+grep -q 'lacs-project/sysknife' "$assembled" && ok "the doctrine names this profile's repository" || bad "slug substitution did not happen"
 if grep -q 'maintainer-merge' "$root/profiles/sysknife/prompts/review.md"; then
     ok "review prompt routes merges through the gate"
 else
     bad "review prompt no longer names the merge gate"
 fi
-if grep -q 'Bash(gh pr merge:\*)' "$root/profiles/sysknife/settings.json.template"; then
+if grep -q 'Bash(gh pr merge:\*)' "$s"; then
     ok "direct gh pr merge is still denied (the gate is the only path)"
 else
     bad "gh pr merge is no longer denied; the gate can be bypassed"
@@ -262,10 +289,28 @@ if grep -q 'uname -s' "$root/install.sh"; then ok "install.sh dispatches by plat
 gates=$(grep -rl 'no verification receipt' "$root/bin" "$root/lib" "$root/platform" 2>/dev/null | wc -l)
 if [ "$gates" = "1" ]; then ok "exactly one executable implementation of the merge gate"; else bad "$gates executable implementations of the merge gate (they will drift)"; fi
 
-echo "== the PowerShell installer, statically (pwsh is not installed here) =="
+echo "== the PowerShell installer =="
 ps1="$root/platform/windows/Install-Maintainer.ps1"
-o=$(grep -c '{' "$ps1"); c=$(grep -c '}' "$ps1")
-[ -n "$o" ] && ok "PowerShell: braces present (open-lines=$o close-lines=$c)"
+# Parsed by a real PowerShell when the image is already local, so the suite
+# stays offline. Counting braces was the previous check, and it would have
+# passed a file that pwsh refuses to load.
+if command -v podman >/dev/null 2>&1 && podman image exists mcr.microsoft.com/powershell:latest 2>/dev/null; then
+    if podman run --rm --network=none -v "$root/platform/windows:/w:ro" \
+        mcr.microsoft.com/powershell:latest pwsh -NoProfile -Command \
+        '$e=$null;$t=$null;[System.Management.Automation.Language.Parser]::ParseFile("/w/Install-Maintainer.ps1",[ref]$t,[ref]$e);exit $e.Count' >/dev/null 2>&1; then
+        ok "PowerShell: parses under a real pwsh"
+    else
+        bad "PowerShell: pwsh reports a parse error"
+    fi
+else
+    ok "PowerShell: pwsh parse skipped (no local image); cmdlet checks below still run"
+fi
+# $Profile is an automatic PowerShell variable. Shadowing it in a param block is
+# legal and confusing, so the parameter is named ProfileName.
+grep -qE '\[string\]\$Profile\b' "$ps1" && bad "the param shadows PowerShell's automatic \$Profile" \
+    || ok "PowerShell: no parameter shadows an automatic variable"
+grep -q 'TASKS=' "$ps1" && ok "PowerShell reads the task list from the profile" \
+    || bad "PowerShell hardcodes a task list"
 for cmdlet in New-ScheduledTaskAction New-ScheduledTaskTrigger New-ScheduledTaskSettingsSet New-ScheduledTaskPrincipal Register-ScheduledTask; do
     grep -q "$cmdlet" "$ps1" && ok "PowerShell uses $cmdlet" || bad "PowerShell lost $cmdlet"
 done
@@ -320,10 +365,10 @@ HOME="$ih" "$root/install.sh" >/dev/null 2>&1
 HOME="$ih" "$root/install.sh" >/dev/null 2>&1
 nested=$(find "$ih/.local/share/maintainer" -type d \( -name profiles -o -name backends \) 2>/dev/null | wc -l)
 if [ "$nested" = "2" ]; then ok "two installs leave one profiles/ and one backends/"; else bad "two installs left $nested such dirs (cp -r nested them)"; fi
-want=$(python3 -c "import json;print(len(json.load(open('$root/profiles/sysknife/settings.json.template'))['permissions']['deny']))")
+want=$(python3 -c "import json;print(len(json.load(open('$s'))['permissions']['deny']))")
 got=$(python3 -c "import json;print(len(json.load(open('$ih/.local/share/maintainer/profiles/sysknife/settings.json'))['permissions']['deny']))" 2>/dev/null)
 if [ "$got" = "$want" ]; then ok "reinstall refreshes the deny wall ($got rules)"; else bad "deployed deny wall has $got rules, the repo has $want"; fi
-if [ -e "$ih/.local/share/maintainer/profiles/sysknife/settings.json.template" ]; then bad "template left in the deployed tree"; else ok "template consumed on reinstall"; fi
+if [ -d "$ih/.local/share/maintainer/profiles/_template" ]; then bad "the scaffolding template was deployed as a runnable profile"; else ok "_template is not deployed"; fi
 # Every deployed entry point must be executable. A clean install once left
 # run-instance.sh unexecutable because chmod ran before the platform dispatch
 # that copies it, and systemd would have failed with a permission error.
@@ -389,6 +434,214 @@ grep -qE 'case "\$br" in main\|master' "$mr" && ok "prune never touches main" ||
 grep -q 'Unreleased' "$mr" && ok "release-check reads the CHANGELOG Unreleased section" || bad "release-check no longer reads the CHANGELOG"
 grep -q 'rests on file counts alone' "$mr" && ok "release-check warns when the CHANGELOG is unreadable" || bad "release-check would pass silently over a missing CHANGELOG"
 if grep -q "format=%s.*grep -ciE 'security" "$mr"; then bad "release-check still guesses from commit subjects"; else ok "release-check does not guess from commit subjects"; fi
+
+
+echo "== --timers enables unit files that exist =="
+# The bug: the loop globbed $root/systemd, a directory this repository has never
+# had. With nullglob off it ran once on the literal pattern, and
+# `systemctl enable '*.timer'` aborted the install having enabled nothing. A
+# file-existence check cannot see this; only running the install can.
+th="$stub_dir/timerhome"; mkdir -p "$th"
+make_stub systemctl 'printf "%s\n" "$*" >> "$SYSTEMCTL_LOG"; exit 0'
+make_stub loginctl 'echo yes'
+SYSTEMCTL_LOG="$stub_dir/systemctl.log"; : > "$SYSTEMCTL_LOG"
+PATH="$stub_dir:$PATH" HOME="$th" SYSTEMCTL_LOG="$SYSTEMCTL_LOG" "$root/install.sh" --timers >/dev/null 2>&1
+enabled=$(grep -c 'enable --now maintainer@' "$SYSTEMCTL_LOG" 2>/dev/null || echo 0)
+units_in_repo=$(find "$root/platform/linux" -name '*.timer' | wc -l)
+if [ "$enabled" = "$units_in_repo" ] && [ "$enabled" -gt 0 ]; then
+    ok "--timers enabled all $enabled timer units"
+else
+    bad "--timers enabled $enabled of $units_in_repo units"
+fi
+grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an unexpanded glob to systemctl" \
+    || ok "--timers never passes a literal glob"
+for u in $(find "$root/platform/linux" -name '*.timer' -exec basename {} \;); do
+    grep -q "stamp-$u" "$SYSTEMCTL_LOG" 2>/dev/null
+done
+[ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
+    || bad "no stamp written; enabling fires every missed slot at once"
+
+echo "== every command the prompt names is declared, and resolves =="
+# A prompt told an unattended run to call `sysknife-maint screen <pr>` after that
+# command had been renamed to `maintainer screen`. The run report carried a
+# screen verdict for a command that could not have produced one. Nothing caught
+# it: the evals check that a RULE is present, not that a tool exists.
+#
+# Scanned over the ASSEMBLED prompt, because the doctrine and the task prompt
+# come from different files and only the assembly is what the agent reads.
+# Every task, not a sample: a stale command name in the one prompt nobody
+# assembled is exactly the case this check exists for.
+# shellcheck disable=SC1091
+( . "$root/profiles/sysknife/profile.env"
+  for tk in $TASKS; do
+      PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife "$tk" \
+          >"$stub_dir/p-$tk.md" 2>/dev/null
+  done )
+# shellcheck disable=SC1091
+( . "$root/profiles/sysknife/profile.env"
+  python3 - "$stub_dir" "$REQUIRED_COMMANDS" "$KNOWN_NAMES" <<'PYEOF'
+import glob, os, re, sys
+d, required, known = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
+allowed = set(required) | set(known)
+# Hyphenated lowercase words inside backticks, taken as the first token of the
+# span. Precise enough that the current prompts yield nine names, not ninety;
+# calibrated by checking it flags a renamed command and nothing else.
+span = re.compile(r"`([^`\n]+)`")
+name = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$")
+seen, undeclared = set(), {}
+for f in sorted(glob.glob(os.path.join(d, "p-*.md"))):
+    for m in span.findall(open(f).read()):
+        tok = m.split()[0] if m.split() else ""
+        if not name.match(tok):
+            continue
+        seen.add(tok)
+        if tok not in allowed:
+            undeclared.setdefault(tok, os.path.basename(f))
+for tok, f in undeclared.items():
+    print(f"  {tok} (in {f}) is neither a REQUIRED_COMMAND nor a KNOWN_NAME")
+# A declaration nobody uses is padding, and padding is how this check would go
+# quiet: add every plausible name and it can never fail again.
+unused = [k for k in known if k not in seen]
+for k in unused:
+    print(f"  KNOWN_NAMES lists '{k}', which no assembled prompt uses")
+sys.exit(1 if undeclared or unused else 0)
+PYEOF
+) && ok "every hyphenated name in the prompt is declared, and no declaration is padding" \
+  || bad "an undeclared or unused name in the prompt (see above)"
+
+echo "== the cadence gate holds a task that ran too recently =="
+# launchd cannot express "every N days" and cron's day-of-month stepping fires
+# on the 31st and again on the 1st. Before this gate, the macOS installer said
+# the since-last-run state enforced the cadence; nothing did, so `audit` would
+# have run five times a week.
+cad="$stub_dir/cadence"; mkdir -p "$cad/state"
+age_last() { touch -d "@$(( $(date +%s) - $1 ))" "$cad/state/last-review.json"; }
+echo '{"run_id":"x"}' > "$cad/state/last-review.json"
+cad_run() { MAINTAINER_STATE_DIR="$cad" PATH="$stub_dir:$PATH" \
+            env "$@" bash "$root/lib/run.sh" sysknife review 2>&1; }
+# MIN_HOURS_review is 6.
+age_last 7200
+out=$(cad_run X=1)
+printf '%s' "$out" | grep -q '^skipped' && ok "a task inside its minimum interval is skipped" \
+    || bad "the gate did not hold a 2h-old task (got: $(printf '%s' "$out" | head -1))"
+printf '%s' "$out" | grep -q 'MAINTAINER_FORCE' && ok "the skip names the override" || bad "the skip does not say how to override"
+age_last 32400
+out=$(cad_run X=1)
+printf '%s' "$out" | grep -q '^skipped' && bad "a task past its interval was skipped anyway" \
+    || ok "a task past its minimum interval proceeds"
+age_last 60
+out=$(cad_run MAINTAINER_FORCE=1)
+printf '%s' "$out" | grep -q '^skipped' && bad "MAINTAINER_FORCE did not override the gate" \
+    || ok "MAINTAINER_FORCE overrides the gate"
+# The gate must read the profile's number, not a constant compiled into run.sh.
+grep -q 'MIN_HOURS_\$task' "$root/lib/run.sh" && ok "the interval comes from the profile" \
+    || bad "run.sh no longer reads MIN_HOURS_<task> from the profile"
+
+echo "== rehearsal: POST=off does the work and reaches nobody =="
+reh="$wall_dir/settings-rehearsal.json"
+[ -f "$reh" ] && ok "a rehearsal wall is generated beside the live one" || bad "no rehearsal wall generated"
+python3 - "$s" "$reh" <<'PYEOF' && ok "the rehearsal wall is a strict superset of the live wall" || bad "the rehearsal wall is not a superset"
+import json, sys
+live = set(json.load(open(sys.argv[1]))["permissions"]["deny"])
+reh = set(json.load(open(sys.argv[2]))["permissions"]["deny"])
+sys.exit(0 if live < reh else 1)
+PYEOF
+# One assertion per verb. An alternation would let a lost rule hide behind one
+# that still matched, which is how a guard goes vacuous.
+for verb in "gh pr review" "gh pr comment" "gh issue comment" "gh issue create" "gh label" "gh api -X POST"; do
+    grep -qF "Bash($verb:*)" "$reh" && ok "rehearsal blocks '$verb'" || bad "rehearsal does NOT block '$verb'"
+done
+grep -qF "Bash(/usr/bin/gh issue comment:*)" "$reh" && ok "rehearsal blocks the absolute spelling too" \
+    || bad "rehearsal misses /usr/bin spellings"
+# The prompt must say so as well. A wall alone produces a confused run that
+# keeps trying; the sentence is what makes it stop.
+banner=$(PATH="$stub_dir:$PATH" MAINTAINER_POST=off bash "$root/lib/run.sh" --show-prompt sysknife review 2>/dev/null)
+printf '%s' "$banner" | grep -q 'REHEARSAL' && ok "POST=off puts the rehearsal notice in the prompt" \
+    || bad "POST=off does not tell the agent it is rehearsing"
+printf '%s' "$banner" | grep -q 'list what you WOULD have posted' && ok "the rehearsal asks for the drafts it withheld" \
+    || bad "a rehearsal that withholds without recording is not reviewable"
+default=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife review 2>/dev/null)
+printf '%s' "$default" | grep -q 'REHEARSAL' && bad "the rehearsal notice appears when POST is on" \
+    || ok "POST=on carries no rehearsal notice"
+grep -q 'backend_rehearsal' "$root/lib/backends/claude.sh" && ok "claude declares it can enforce POST=off" \
+    || bad "claude no longer declares rehearsal support"
+grep -q 'backend_rehearsal' "$root/lib/backends/codex.sh" && bad "codex claims rehearsal support it cannot enforce" \
+    || ok "codex does not claim rehearsal support (it has no deny list)"
+grep -q 'backend_rehearsal' "$root/lib/run.sh" && ok "run.sh refuses a rehearsal on a backend that cannot enforce it" \
+    || bad "run.sh would hand POST=off to a backend with no per-command control"
+# A new profile must start silent.
+grep -q 'MAINTAINER_POST:-off' "$root/profiles/_template/profile.env" && ok "a scaffolded profile starts at POST=off" \
+    || bad "a new profile would post on its first run"
+
+echo "== the doctrine is not optional =="
+# lib/preamble-core.md carries the injection rule, the screen rule and the
+# evidence rule. A run assembled without it is an unattended agent with none of
+# them, so its absence must stop the run rather than shorten the prompt.
+lay2="$stub_dir/nodoctrine"; mkdir -p "$lay2/profiles/sysknife/prompts"
+cp "$root/lib/run.sh" "$lay2/run.sh"; cp -r "$root/lib/backends" "$lay2/backends"
+cp "$root/profiles/sysknife/profile.env" "$lay2/profiles/sysknife/"
+cp "$root/profiles/sysknife/prompts/"*.md "$lay2/profiles/sysknife/prompts/"
+cp "$root/lib/prose-style.md" "$lay2/prose-style.md"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$lay2/run.sh" --show-prompt sysknife review 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'preamble-core'; then
+    ok "a tree with no core preamble refuses to run"
+else
+    bad "a run assembled a prompt with no doctrine in it (rc=$rc)"
+fi
+cp "$root/lib/preamble-core.md" "$lay2/preamble-core.md"
+PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$lay2/run.sh" --show-prompt sysknife review >/dev/null 2>&1 \
+    && ok "and runs once the core preamble is restored" || bad "the core preamble is not found in the installed layout"
+
+echo "== --show-prompt shows, and changes nothing =="
+snap_before=$(find "$root" -newer "$root/README.md" -type f 2>/dev/null | wc -l)
+lock_before=$(ls "$HOME/.local/state/sysknife-maint/state" 2>/dev/null | wc -l)
+PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife issues >/dev/null 2>&1
+lock_after=$(ls "$HOME/.local/state/sysknife-maint/state" 2>/dev/null | wc -l)
+check "--show-prompt writes no state" "$lock_after" "$lock_before"
+PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife issues 2>/dev/null | grep -q 'preview only' \
+    && ok "--show-prompt marks its context as a preview" || bad "--show-prompt passes off a fake context as real"
+
+echo "== uninstall removes the tool and keeps the audit trail =="
+uh="$stub_dir/unin"; mkdir -p "$uh"
+HOME="$uh" "$root/install.sh" >/dev/null 2>&1
+mkdir -p "$uh/.local/state/sysknife-maint/runs"; echo "a run" > "$uh/.local/state/sysknife-maint/runs/keep.md"
+PATH="$stub_dir:$PATH" HOME="$uh" "$root/install.sh" --uninstall >/dev/null 2>&1
+[ -d "$uh/.local/share/maintainer" ] && bad "uninstall left the deployed tree" || ok "uninstall removes the deployed tree"
+[ -e "$uh/.local/bin/maintainer" ] && bad "uninstall left commands on PATH" || ok "uninstall removes the commands"
+[ -f "$uh/.local/state/sysknife-maint/runs/keep.md" ] \
+    && ok "uninstall keeps the audit trail (it is the record of what was posted in your name)" \
+    || bad "uninstall deleted the audit trail"
+
+echo "== new-profile.sh makes CONTRIBUTING's promise true =="
+np="$stub_dir/np"; mkdir -p "$np"; cp -r "$root"/* "$np/" 2>/dev/null
+rm -rf "$np/.git"
+( cd "$np" && ./new-profile.sh demo acme/widget /tmp/widget acmebot "Ada" ) >/dev/null 2>&1
+[ -f "$np/profiles/demo/profile.env" ] && ok "new-profile scaffolds a profile" || bad "new-profile wrote no profile"
+grep -rq '__[A-Z_]*__' "$np/profiles/demo" && bad "a placeholder survived scaffolding" || ok "every placeholder is substituted"
+grep -q 'REPO_SLUG="acme/widget"' "$np/profiles/demo/profile.env" && ok "the slug lands in profile.env" || bad "the slug did not substitute"
+tasks=$(sed -n 's/^TASKS="\(.*\)"/\1/p' "$np/profiles/demo/profile.env" | wc -w)
+made=$(find "$np/platform/linux" -name 'maintainer@demo-*.timer' | wc -l)
+check "one timer per task" "$made" "$tasks"
+( cd "$np" && ./new-profile.sh demo acme/widget /tmp/widget acmebot ) >/dev/null 2>&1 \
+    && bad "new-profile overwrote an existing profile" || ok "new-profile refuses to overwrite"
+# The scaffolded profile must produce a real prompt, not a template with holes.
+( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null ) | grep -q 'acme/widget' \
+    && ok "a scaffolded profile assembles a prompt naming its own repository" \
+    || bad "a scaffolded profile cannot assemble a prompt"
+# And no code file may carry a repository's name for it to work.
+if grep -q 'MAINTAINER_TASKS' "$root/bin/maintainer" && grep -q 'MAINTAINER_TASKS' "$root/lib/run.sh"; then
+    ok "the task list comes from the profile, not from bin/maintainer"
+else
+    bad "bin/maintainer still hardcodes the task list"
+fi
+
+echo "== status answers the question a maintainer actually has =="
+out=$(MAINTAINER_PROFILE=sysknife python3 "$root/bin/maintainer" status 2>&1)
+for want in "profile" "posting" "task" "review"; do
+    printf '%s' "$out" | grep -qi "$want" && ok "status reports $want" || bad "status does not report $want"
+done
+printf '%s' "$out" | grep -qE 'in [0-9]+' && ok "status converts the next-run time to a duration" \
+    || bad "status does not show when the next run is"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

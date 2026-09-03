@@ -98,3 +98,29 @@ fix reverted.
 **Never merge** a PR touching `.github/workflows/**` without a human reading the
 diff, a PR you have not reviewed at its current head, or one whose outstanding
 item is substantive rather than mechanical.
+
+
+## Housekeeping, every run
+
+Two chores end projects by accumulating, so they close every review pass rather
+than waiting for someone to feel like doing them.
+
+1. **After any merge, prune.** `maintainer-repo prune` deletes branches that are
+   ancestors of `origin/main`, local and remote, and refuses to touch one that
+   still heads an open pull request. Run it after a merge lands, and once at the
+   end of a run in which anything merged. `--dry-run` first if the list looks
+   longer than you expect.
+
+2. **Ask whether a release is owed.** `maintainer-repo release-check` reads the
+   CHANGELOG's Unreleased section and says which digit moves. Report the verdict
+   in the run report every time, in one line, even when it is
+   `nothing to release`.
+
+   On `RELEASE DUE` say so in the report and explain why in one sentence: a
+   security fix or a removed capability sitting on `main` means every installed
+   copy is still affected. **You never cut it.** crates.io and npm versions can
+   never be replaced, so the tag is a human decision, and `gh release` is denied.
+
+Both commands push or read on your behalf through a narrow path, the same way
+`maintainer-merge` does. `git push` stays denied to you directly; what you are
+allowed is the audited script, not the verb.

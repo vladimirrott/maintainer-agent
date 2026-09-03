@@ -7,11 +7,21 @@ Private repository, one maintainer, no CI. The gate runs before a commit exists.
 ```sh
 git config core.hooksPath .githooks   # once
 ./install.sh --dry-run                # see what a deploy would touch
+./install.sh                          # deploy; --uninstall takes it back out
 ```
 
-Required: `bash`, `python3`, `git`, `gh`, `jq`. For a real run you also need one
-backend on `PATH` (`claude`, `codex` or `cursor-agent`) and `podman` if you want
-container verification.
+Required: `bash`, `python3`, `git`, `gh`. For a real run you also need one
+backend on `PATH` (`claude`, `opencode`, `codex` or `cursor-agent`) and `podman`
+for container verification and for the PowerShell parse check.
+
+Read the prompt before you trust the agent:
+
+```sh
+./lib/run.sh --show-prompt sysknife review | less
+```
+
+That is the same assembly a real run uses, not a reconstruction of it. It
+touches no state and marks its context block as a preview.
 
 ## Before every commit
 
@@ -51,13 +61,21 @@ A green suite is not evidence. A suite you have watched fail is.
 ## Layout
 
 ```
-bin/maintainer          refresh, diff, screen, report  (the run's bookkeeping)
+new-profile.sh          scaffold a profile for another repository
+install.sh              deploy, enable timers, uninstall
+bin/maintainer          status, refresh, diff, screen, report (the bookkeeping)
 bin/maintainer-merge    the merge gate; the only path to a merge
+bin/maintainer-repo     prune merged branches; say whether a release is owed
+bin/maintainer-doctor   check the install by running it
 lib/run.sh              orchestrator, platform-independent
-lib/backends/*.sh       claude | codex | cursor
+lib/preamble-core.md    the doctrine, shared by every profile, injected first
 lib/prose-style.md      injected into every prompt unless PROSE_STYLE=raw
-profiles/<name>/        everything site-specific: paths, account, prompts, deny wall
-platform/{linux,macos,windows}/   scheduling only
+lib/backends/*.sh       claude | opencode | codex | cursor
+scripts/render-settings.py  generates the deny walls from a profile's deny.json
+scripts/transcript.py   turns stream-json into a log and a list of commands run
+profiles/_template/     what new-profile.sh copies
+profiles/<name>/        everything site-specific: paths, account, prompts, deny.json
+platform/{linux,macos,windows,posix}/   scheduling only
 evals/scenarios/*.md    adversarial situations with a required behaviour
 docs/maintainer-doctrine.md       why the refusals are the ones they are
 ```
@@ -68,8 +86,36 @@ exactly one executable implementation of the merge gate.
 
 ## Adding a profile
 
-Copy `profiles/sysknife/`, change `profile.env`, and write the prompts. No code
-change should be needed. If one is, that is a bug in `run.sh`.
+```sh
+./new-profile.sh widget acme/widget ~/src/widget acmebot "Ada Lovelace"
+```
+
+No code change should be needed. If one is, that is a bug, and it was one until
+recently: `bin/maintainer` held a skill map keyed to one repository's names, and
+four unit files had to be written by hand.
+
+Three rules for anything added here:
+
+- **Nothing under `bin/` or `lib/` may name a repository.** The task list, the
+  skill each task loads, the cadences, the deny wall and the state directory all
+  come from `profile.env`. A test asserts the task list is read from the
+  environment rather than hardcoded.
+- **A new profile starts at `POST=off`.** It does the whole pass and reaches
+  nobody. Anything that would let a first run post is a defect.
+- **Doctrine goes in `lib/preamble-core.md`, not in a profile.** One copy, so it
+  cannot drift between repositories. A run assembled without it refuses to start.
+
+## Changing the deny wall
+
+Edit `profiles/<name>/deny.json` and add the verb once.
+`scripts/render-settings.py` spells it bare and under `/bin`, `/usr/bin` and
+`/usr/local/bin`, because the matcher keys on the command as written and
+`/usr/bin/touch` was measured evading a rule for `touch`.
+
+Two things in the generated output look like typos and are not: `Read(~/...)` is
+the only form that denies (a single leading slash anchors to the settings
+directory, measured), and the same credential path is denied to `cat` three
+different ways on purpose.
 
 ## Adding a backend
 
@@ -79,3 +125,8 @@ also implement `backend_allowed_tasks` returning only the tasks it is fit for;
 `run.sh` enforces it and exits 78 otherwise. Say what the containment actually
 is in a comment at the top, and add a test that pins the claim. `cursor.sh` is
 the worked example of a weak backend done honestly.
+
+Implement `backend_rehearsal` only if the backend can actually be handed a
+config that blocks every GitHub write verb. `run.sh` refuses `POST=off` on a
+backend that does not declare it, because a rehearsal that silently posts is
+worse than no rehearsal.

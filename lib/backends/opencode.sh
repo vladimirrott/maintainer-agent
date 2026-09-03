@@ -22,9 +22,14 @@
 
 backend_name() { printf 'opencode'; }
 
+# opencode can honour POST=off: the rehearsal config is the same default-deny
+# map with every posting verb appended, and last-match-wins puts them on top.
+backend_rehearsal() { printf 'config'; }
+
 backend_check() {
     command -v opencode >/dev/null || { echo "opencode not on PATH (curl -fsSL https://opencode.ai/install | bash)"; return 1; }
-    [ -f "$PROFILE_DIR/opencode.json" ] || { echo "missing $PROFILE_DIR/opencode.json"; return 1; }
+    [ -f "${MAINTAINER_SETTINGS:-$PROFILE_DIR/opencode.json}" ] \
+        || { echo "missing ${MAINTAINER_SETTINGS:-$PROFILE_DIR/opencode.json}"; return 1; }
     if [ -z "${GROQ_API_KEY:-}" ] && [ ! -f "$HOME/.groq-staging-key" ] \
        && [ ! -f "$HOME/.local/share/opencode/auth.json" ]; then
         echo "no Groq credential: set GROQ_API_KEY, or ~/.groq-staging-key, or run 'opencode auth login'"
@@ -47,7 +52,7 @@ backend_run() {
     # --auto approves what the config does not explicitly deny. That is only
     # safe because the config denies by default; with an allow-by-default config
     # it would be equivalent to --yolo.
-    OPENCODE_CONFIG="$PROFILE_DIR/opencode.json" \
+    OPENCODE_CONFIG="${MAINTAINER_SETTINGS:-$PROFILE_DIR/opencode.json}" \
     opencode run --model "$model" --auto --format default \
         "$(cat "$prompt_file")" >>"$log" 2>&1
 }

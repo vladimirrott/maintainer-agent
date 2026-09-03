@@ -1,21 +1,46 @@
 #!/usr/bin/env bash
-# Register the maintainer tasks with launchd.
+# Register a profile's tasks with launchd.
 #
-# launchd differs from systemd in one way that matters here: there is no
+#   install-launchd.sh [profile]     default: sysknife (or $MAINTAINER_PROFILE)
+#   install-launchd.sh --remove [profile]
+#
+# launchd differs from systemd in one way that matters: there is no
 # Persistent=true. A StartCalendarInterval job missed while the machine was
-# asleep does NOT catch up by default; it fires at the next matching time.
-# `RunAtLoad` is deliberately false, because a catch-up run at login lands a job
-# on top of whatever the user is doing.
+# asleep does NOT catch up; it fires at the next matching time. `RunAtLoad` is
+# deliberately false, because a catch-up run at login lands a job on top of
+# whatever the user is doing.
+#
+# Every job therefore fires DAILY, and the real cadence is MIN_HOURS_<task> in
+# profile.env, which run.sh enforces. An earlier version of this file claimed
+# the since-last-run state already did that. Nothing did: `audit`, nominally a
+# five-day task, would have run every day.
 set -euo pipefail
 share="$HOME/.local/share/maintainer"
 agents="$HOME/Library/LaunchAgents"
-label_prefix="dev.maintainer"
-mkdir -p "$agents"
 
-plist() {  # $1 task, $2 hour, $3 minute, $4 interval-days (0 = daily)
-    local task="$1" hour="$2" min="$3" days="$4"
-    local label="$label_prefix.sysknife-$task"
-    local f="$agents/$label.plist"
+remove=0; [ "${1:-}" = "--remove" ] && { remove=1; shift; }
+profile="${1:-${MAINTAINER_PROFILE:-sysknife}}"
+label_prefix="dev.maintainer.$profile"
+env_file="$share/profiles/$profile/profile.env"
+[ -f "$env_file" ] || { echo "install-launchd: no deployed profile '$profile'; run ./install.sh first" >&2; exit 1; }
+# shellcheck disable=SC1090
+. "$env_file"
+mkdir -p "$agents" "$STATE_DIR/logs"
+
+if [ "$remove" = 1 ]; then
+    for f in "$agents/$label_prefix".*.plist; do
+        [ -e "$f" ] || continue
+        launchctl unload "$f" 2>/dev/null || true
+        rm -f "$f"
+        printf '  removed %s\n' "$(basename "$f")"
+    done
+    exit 0
+fi
+
+hour=9
+for task in $TASKS; do
+    label="$label_prefix.$task"
+    f="$agents/$label.plist"
     cat > "$f" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -26,34 +51,27 @@ plist() {  # $1 task, $2 hour, $3 minute, $4 interval-days (0 = daily)
   <array>
     <string>/bin/bash</string>
     <string>$share/run.sh</string>
-    <string>sysknife</string>
+    <string>$profile</string>
     <string>$task</string>
   </array>
-  <key>WorkingDirectory</key><string>$HOME/Desktop/lacs</string>
+  <key>WorkingDirectory</key><string>$REPO_PATH</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key><string>$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>StartCalendarInterval</key>
-  <dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>$min</integer></dict>
+  <dict><key>Hour</key><integer>$hour</integer><key>Minute</key><integer>17</integer></dict>
   <key>RunAtLoad</key><false/>
-  <key>StandardOutPath</key><string>$HOME/.local/state/sysknife-maint/logs/launchd-$task.out</string>
-  <key>StandardErrorPath</key><string>$HOME/.local/state/sysknife-maint/logs/launchd-$task.err</string>
+  <key>StandardOutPath</key><string>$STATE_DIR/logs/launchd-$task.out</string>
+  <key>StandardErrorPath</key><string>$STATE_DIR/logs/launchd-$task.err</string>
 </dict>
 </plist>
 PLIST
-    # Every-N-days is not expressible in StartCalendarInterval. The job runs
-    # daily and run.sh's own since-last-run state decides whether there is
-    # anything to do, which is the honest way to say "every N days" here.
-    [ "$days" != "0" ] && printf '  note: %s runs daily; cadence is enforced by the since-last-run state\n' "$task"
     launchctl unload "$f" >/dev/null 2>&1 || true
     launchctl load "$f"
-    printf '  loaded %s\n' "$label"
-}
-
-mkdir -p "$HOME/.local/state/sysknife-maint/logs"
-plist review 9  13 0
-plist issues 10 41 2
-plist ci     11 27 3
-plist audit  12 19 5
+    min_var="MIN_HOURS_$task"
+    printf '  loaded %s (fires daily at %02d:17; runs when %sh have passed)\n' \
+        "$label" "$hour" "${!min_var:-0}"
+    hour=$((hour + 1))
+done
 printf '  done. list with: launchctl list | grep %s\n' "$label_prefix"

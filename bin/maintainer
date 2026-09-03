@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Refresh the sysknife checkout and keep an auditable record of each maintenance run.
 
-    maintainer start  <task>                 refresh, diff against the last run, open a report
+    maintainer status                          what has run, what is due, is it posting
+    maintainer start  <task>                   refresh, diff against the last run, open a report
     maintainer finish <run_id>                 close the run and append it to the index
-    maintainer screen <pr>                         may this PR be built on the host?
-    maintainer log    [n]                           show the last n runs
+    maintainer screen <pr>                     may this PR be built on the host?
+    maintainer log    [n]                      show the last n runs
 
 `start` refuses to touch a dirty tree. It never stashes, resets or force-updates
 anything: a run that would have to discard local work is a run that stops and
@@ -32,12 +33,23 @@ ROOT = Path(os.environ.get("MAINTAINER_STATE")
 RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
 INDEX = ROOT / "index.md"
 SENTINEL = "<!-- sysknife-maint: report not yet written -->"
-SKILLS = {
+# The task list belongs to the profile, not to this file. It used to be a dict
+# hardcoded to one repository's skill names, which is why CONTRIBUTING's promise
+# that a second repository needs no code change was not true. run.sh exports
+# both; the defaults keep a direct call working for the original profile.
+TASKS = (os.environ.get("MAINTAINER_TASKS")
+         or "review issues ci audit").split()
+SKILL = os.environ.get("MAINTAINER_SKILL", "")
+DEFAULT_SKILLS = {
     "review": "sysknife-review",
     "issues": "sysknife-issues",
     "ci": "sysknife-ci-live-tests",
     "audit": "sysknife-issue-audit",
 }
+
+
+def skill_for(task: str) -> str:
+    return SKILL or DEFAULT_SKILLS.get(task, task)
 
 
 
@@ -296,8 +308,8 @@ def cmd_screen(pr: str) -> None:
 
 
 def cmd_start(skill: str) -> None:
-    if skill not in SKILLS:
-        raise SystemExit(f"maintainer: unknown skill {skill!r}; expected one of {', '.join(SKILLS)}")
+    if skill not in TASKS:
+        raise SystemExit(f"maintainer: unknown task {skill!r}; this profile runs {', '.join(TASKS)}")
     for d in (RUNS, STATE, DRAFTS):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -334,7 +346,7 @@ def cmd_start(skill: str) -> None:
     (STATE / f"pending-{skill}.json").write_text(json.dumps(snap, indent=2, sort_keys=True) + "\n")
 
     print(f"=== sysknife-maint {run_id} ===")
-    print(f"skill        {SKILLS[skill]}")
+    print(f"skill        {skill_for(skill)}")
     print(f"repo         {REPO}")
     print(f"main         {before[:8]} -> {after[:8]}" + ("  (already current)" if before == after else ""))
     if commits:
@@ -380,6 +392,118 @@ def cmd_finish(run_id: str) -> None:
     print(f"maintainer: recorded {run_id} in {INDEX}")
 
 
+def _profile_env() -> dict:
+    """Read the DEPLOYED profile.env, which is what a scheduled run actually uses.
+
+    Reading the repository copy instead would report the settings someone is
+    editing rather than the ones running in their name at 09:13.
+    """
+    name = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+    path = Path.home() / ".local/share/maintainer/profiles" / name / "profile.env"
+    out: dict[str, str] = {"_profile": name, "_path": str(path)}
+    if not path.exists():
+        return out
+    for line in path.read_text().splitlines():
+        line = line.split("#")[0].strip()
+        if "=" not in line or line.startswith("#"):
+            continue
+        k, _, v = line.partition("=")
+        out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def _next_runs(profile: str) -> dict:
+    """Ask the scheduler when each task fires next. Absent one, say so."""
+    p = subprocess.run(("systemctl", "--user", "list-timers", f"maintainer@{profile}-*",
+                        "--all", "--no-pager", "--output=json"),
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        return {}
+    try:
+        rows = json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return {}
+    out = {}
+    for r in rows:
+        unit = r.get("unit", "")
+        if "-" not in unit:
+            continue
+        task = unit.rsplit("-", 1)[-1].split(".")[0]
+        # In systemctl's JSON output `left` is not a remainder: it carries the
+        # same absolute microsecond timestamp as `next`. Printing it as a
+        # duration put "in 20700 days" in the column. Subtract now.
+        nxt = r.get("next")
+        out[task] = (_duration(nxt / 1e6 - datetime.now().timestamp())
+                     if isinstance(nxt, (int, float)) and nxt > 0 else "-")
+    return out
+
+
+def _duration(sec: float) -> str:
+    if sec < 0:
+        return "overdue"
+    if sec < 3600:
+        return f"in {sec / 60:.0f}m"
+    if sec < 86400:
+        return f"in {sec / 3600:.0f}h"
+    return f"in {sec / 86400:.1f}d"
+
+
+def cmd_status() -> None:
+    env = _profile_env()
+    # profile.env holds POST="${MAINTAINER_POST:-on}", so read the default out
+    # of the parameter expansion rather than trying to evaluate shell here.
+    raw = env.get("POST")
+    if raw is None:
+        post = "on (default; this deployed profile predates POST, re-run ./install.sh)"
+    else:
+        post = "off" if raw.rstrip("}").endswith("off") else "on"
+    print(f"profile   {env['_profile']}  ->  {env.get('REPO_SLUG', SLUG)}")
+    print(f"repo      {REPO}")
+    print("posting   " + ("OFF, rehearsal: it writes reports and drafts, and posts nothing"
+                          if post == "off" else
+                          "ON, this agent writes to GitHub in your name"
+                          if post == "on" else post))
+    if not (Path.home() / ".local/share/maintainer").exists():
+        print("\nnot installed. Run ./install.sh from the repository.")
+        return
+
+    nxt = _next_runs(env["_profile"])
+    held = False
+    print()
+    print(f"{'task':10} {'last run':22} {'age':>6}  {'report':>10}  next")
+    for task in TASKS:
+        f = STATE / f"last-{task}.json"
+        if f.exists():
+            age_h = (datetime.now().timestamp() - f.stat().st_mtime) / 3600
+            try:
+                rid = json.loads(f.read_text()).get("run_id", "?")
+            except json.JSONDecodeError:
+                rid = "unreadable"
+            report = RUNS / f"{rid}.md"
+            lines = f"{len(report.read_text().splitlines())} lines" if report.exists() else "MISSING"
+            age = f"{age_h:.0f}h"
+            min_h = env.get(f"MIN_HOURS_{task}")
+            if min_h and min_h.isdigit() and age_h < int(min_h):
+                age += "*"
+                held = True
+        else:
+            rid, age, lines = "never", "-", "-"
+        print(f"{task:10} {rid:22} {age:>6}  {lines:>10}  {nxt.get(task, '-')}")
+    if held:
+        print("\n* inside its minimum interval; the next scheduled run skips and says so")
+
+    pend = sorted(STATE.glob("pending-*.json"))
+    if pend:
+        print(f"\n{len(pend)} run(s) started and never finished: "
+              + ", ".join(p.stem.replace("pending-", "") for p in pend))
+        print("  a run that died leaves its baseline unpromoted on purpose, so the")
+        print("  next run still sees everything it never reviewed")
+    rec = sorted((ROOT / "receipts").glob("*.json")) if (ROOT / "receipts").exists() else []
+    if rec:
+        print(f"\n{len(rec)} verification receipt(s) open: "
+              + ", ".join("#" + p.stem for p in rec))
+
+
 def cmd_log(n: int) -> None:
     if not INDEX.exists():
         print("maintainer: no runs recorded yet")
@@ -392,7 +516,9 @@ def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     cmd = sys.argv[1]
-    if cmd == "start" and len(sys.argv) == 3:
+    if cmd == "status":
+        cmd_status()
+    elif cmd == "start" and len(sys.argv) == 3:
         cmd_start(sys.argv[2])
     elif cmd == "finish" and len(sys.argv) == 3:
         cmd_finish(sys.argv[2])

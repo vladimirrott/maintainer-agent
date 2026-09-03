@@ -17,6 +17,11 @@
 #      of that task, so the work is not lost, only delayed.
 #   2. cron has no equivalent of a per-unit lock. run.sh takes its own flock, so
 #      overlapping entries serialise rather than race.
+#
+# Every entry fires DAILY and the real cadence is MIN_HOURS_<task> in
+# profile.env, enforced by run.sh. Day-of-month stepping (1-31/2) was the
+# previous approach and it runs on the 31st and again on the 1st, so a two-day
+# task fired twice in a row every other month.
 set -eu
 
 share="$HOME/.local/share/maintainer"
@@ -32,16 +37,21 @@ command -v crontab >/dev/null || { echo "install-cron: no crontab on this system
 # does not exist. Pin it here rather than discovering it in a run report.
 cron_path="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 
-# cron cannot express "every N days" directly. Day-of-month stepping is the
-# closest equivalent and is what the systemd units use, so the cadences match.
+# The task list and the state directory come from the deployed profile, so a
+# second repository needs a profile and no edit here.
+# shellcheck disable=SC1090
+. "$share/profiles/$profile/profile.env" 2>/dev/null \
+    || { echo "install-cron: no deployed profile '$profile'" >&2; exit 1; }
+
 gen() {
     printf '%s\n' "$marker"
     printf 'PATH=%s\n' "$cron_path"
-    printf '13 9 * * *   %s %s review  >/dev/null 2>&1\n'      "$share/run.sh" "$profile"
-    printf '13 21 * * *  %s %s review  >/dev/null 2>&1\n'      "$share/run.sh" "$profile"
-    printf '41 10 1-31/2 * * %s %s issues >/dev/null 2>&1\n'   "$share/run.sh" "$profile"
-    printf '27 11 1-31/3 * * %s %s ci     >/dev/null 2>&1\n'   "$share/run.sh" "$profile"
-    printf '19 12 1-31/5 * * %s %s audit  >/dev/null 2>&1\n'   "$share/run.sh" "$profile"
+    local hour=9
+    for task in $TASKS; do
+        printf '17 %d * * *  %s %s %s >/dev/null 2>&1\n' \
+            "$hour" "$share/run.sh" "$profile" "$task"
+        hour=$((hour + 1))
+    done
     printf '%s end\n' "$marker"
 }
 

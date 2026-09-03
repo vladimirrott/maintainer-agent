@@ -4,6 +4,7 @@
 #   ./install.sh              deploy files, do not touch timers
 #   ./install.sh --timers     deploy and enable the timers
 #   ./install.sh --dry-run    print what would change
+#   ./install.sh --uninstall  remove everything except the audit trail
 #
 # Idempotent. Deploys into ~/.local so nothing needs root.
 set -euo pipefail
@@ -12,11 +13,12 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 share="$HOME/.local/share/maintainer"
 bin="$HOME/.local/bin"
 units="$HOME/.config/systemd/user"
-dry=0; timers=0
+dry=0; timers=0; uninstall=0
 for a in "$@"; do
     case "$a" in
-        --dry-run) dry=1 ;;
-        --timers)  timers=1 ;;
+        --dry-run)   dry=1 ;;
+        --timers)    timers=1 ;;
+        --uninstall) uninstall=1 ;;
         *) echo "install.sh: unknown flag $a" >&2; exit 64 ;;
     esac
 done
@@ -24,10 +26,53 @@ done
 say() { printf '  %s\n' "$*"; }
 run() { if [ "$dry" = 1 ]; then say "would: $*"; else "$@"; fi; }
 
+# --- uninstall -------------------------------------------------------------
+# People try what they can remove. The audit trail is deliberately NOT deleted:
+# it is the record of what the agent published in someone's name, and a tool
+# that erases that on its way out is a tool nobody should have trusted.
+if [ "$uninstall" = 1 ]; then
+    say "removing the maintainer agent"
+    if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+        for t in "$units"/maintainer@*.timer; do
+            [ -e "$t" ] || continue
+            run systemctl --user disable --now "$(basename "$t")"
+        done
+        for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
+            [ -e "$u" ] || continue
+            run rm -f "$u"
+        done
+        run systemctl --user daemon-reload
+    fi
+    if [ "$(uname -s)" = Darwin ]; then
+        for pl in "$HOME"/Library/LaunchAgents/dev.maintainer.*.plist; do
+            [ -e "$pl" ] || continue
+            run launchctl unload "$pl"
+            run rm -f "$pl"
+        done
+    fi
+    command -v crontab >/dev/null 2>&1 && [ -x "$root/platform/posix/install-cron.sh" ] \
+        && run "$root/platform/posix/install-cron.sh" --remove
+    for f in maintainer maintainer-merge maintainer-doctor maintainer-repo; do
+        [ -e "$bin/$f" ] && run rm -f "$bin/$f"
+    done
+    run rm -rf "$share"
+    say ""
+    say "removed: $share, the four commands in $bin, and every scheduler entry."
+    say "kept:    the audit trail. Delete it yourself if you want it gone:"
+    for pe in "$root"/profiles/*/profile.env; do
+        [ -e "$pe" ] || continue
+        say "         $(grep -m1 '^STATE_DIR=' "$pe" | sed 's/.*="//; s/"$//; s|\$HOME|'"$HOME"'|')"
+    done
+    exit 0
+fi
+
 say "deploying from $root"
 run mkdir -p "$share" "$bin" "$units"
 run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
+run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
+run mkdir -p "$share/scripts"
+run cp "$root/scripts/render-settings.py" "$share/scripts/render-settings.py"
 # `cp -r src dst` copies src INTO dst when dst already exists, so a second
 # install nests profiles/profiles and backends/backends. That happened, and the
 # render step below then wrote into the nested copy while the live deny wall
@@ -36,19 +81,22 @@ run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run rm -rf "$share/backends" "$share/profiles"
 run cp -r "$root/lib/backends" "$share/backends"
 run cp -r "$root/profiles" "$share/profiles"
-# Render the deny wall. Its paths must be absolute at runtime, but the repo
-# holds a template so no home path is committed. Substitution happens here.
-for tpl in "$share"/profiles/*/settings.json.template; do
-    [ -e "$tpl" ] || continue
-    out="${tpl%.template}"
+# Generate the deny walls from each profile's deny.json. Two walls come out of
+# one input: the live one, and the rehearsal one that also blocks every GitHub
+# write verb. A hand-kept second copy would drift, and a drifted rehearsal wall
+# is a promise it cannot keep.
+#
+# _template is scaffolding for `./new-profile.sh`, not a runnable profile, so it
+# is not deployed.
+run rm -rf "$share/profiles/_template"
+for spec in "$share"/profiles/*/deny.json; do
+    [ -e "$spec" ] || continue
+    pd="$(dirname "$spec")"
     if [ "$dry" = 1 ]; then
-        say "would render $(basename "$(dirname "$tpl")")/settings.json"
+        say "would generate $(basename "$pd")/settings.json and settings-rehearsal.json"
     else
-        sed "s|__HOME__|$HOME|g" "$tpl" > "$out"
-        rm -f "$tpl"
-        grep -q '__HOME__' "$out" && { echo "install.sh: settings template did not fully render" >&2; exit 1; }
-        python3 -c "import json,sys; json.load(open('$out'))" \
-            || { echo "install.sh: rendered settings.json is not valid JSON" >&2; exit 1; }
+        python3 "$root/scripts/render-settings.py" "$pd" "$HOME" \
+            || { echo "install.sh: generating the deny wall failed" >&2; exit 1; }
     fi
 done
 run cp "$root/bin/maintainer" "$bin/maintainer"
@@ -98,7 +146,14 @@ esac
 
 if [ "$timers" = 1 ]; then
     run systemctl --user daemon-reload
-    for t in "$root"/systemd/*.timer; do
+    # The units live under platform/linux. An earlier version globbed
+    # $root/systemd, which does not exist: with nullglob off the loop ran once
+    # on the literal pattern and `systemctl enable '*.timer'` aborted the
+    # install having enabled nothing. Count what the glob matched and refuse to
+    # report success over an empty set.
+    enabled=0
+    for t in "$root"/platform/linux/*.timer; do
+        [ -e "$t" ] || continue
         name="$(basename "$t")"
         # Write a stamp first. A fresh Persistent=true timer treats "never run"
         # as a missed slot and fires a catch-up run the instant it is enabled,
@@ -107,7 +162,12 @@ if [ "$timers" = 1 ]; then
         run touch "$HOME/.local/share/systemd/timers/stamp-$name"
         run systemctl --user enable --now "$name"
         say "enabled $name"
+        enabled=$((enabled+1))
     done
+    if [ "$enabled" = 0 ]; then
+        echo "install.sh: --timers matched no unit files under $root/platform/linux" >&2
+        exit 1
+    fi
 else
     say "timers not touched (pass --timers to enable them)"
 fi

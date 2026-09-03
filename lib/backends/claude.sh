@@ -11,19 +11,43 @@
 
 backend_name() { printf 'claude'; }
 
+# Declaring this is how a backend says it can honour POST=off. run.sh refuses a
+# rehearsal on any backend that does not, because a rehearsal that silently
+# posts is worse than no rehearsal.
+backend_rehearsal() { printf 'settings'; }
+
 backend_check() {
     command -v claude >/dev/null || { echo "claude not on PATH"; return 1; }
-    [ -f "$PROFILE_DIR/settings.json" ] || { echo "missing $PROFILE_DIR/settings.json"; return 1; }
+    local st="${MAINTAINER_SETTINGS:-$PROFILE_DIR/settings.json}"
+    [ -f "$st" ] || { echo "missing $st"; return 1; }
     return 0
 }
 
 # backend_run <prompt-file> <model> <log-file> <extra-readable-dir>
 backend_run() {
     local prompt_file="$1" model="$2" log="$3" extra_dir="$4"
-    claude -p \
-        --settings "$PROFILE_DIR/settings.json" \
-        --permission-mode bypassPermissions \
-        --model "$model" \
-        --add-dir "$extra_dir" \
-        < "$prompt_file" >>"$log" 2>&1
+    # MAINTAINER_SETTINGS is how run.sh swaps in the rehearsal wall. Defaulting
+    # here rather than requiring it keeps a direct call working.
+    local settings="${MAINTAINER_SETTINGS:-$PROFILE_DIR/settings.json}"
+    # stream-json rather than text, so the log records what the agent RAN and
+    # not only what it said. `--verbose` is required with it in print mode.
+    # A missing filter must not cost a run its output, so fall back to text.
+    local filter="${MAINTAINER_SCRIPTS:-}/transcript.py"
+    if [ -f "$filter" ]; then
+        claude -p \
+            --settings "$settings" \
+            --permission-mode bypassPermissions \
+            --model "$model" \
+            --add-dir "$extra_dir" \
+            --output-format stream-json --verbose \
+            < "$prompt_file" 2>>"$log" \
+            | python3 "$filter" "$log" "${log%.log}.commands"
+    else
+        claude -p \
+            --settings "$settings" \
+            --permission-mode bypassPermissions \
+            --model "$model" \
+            --add-dir "$extra_dir" \
+            < "$prompt_file" >>"$log" 2>&1
+    fi
 }
