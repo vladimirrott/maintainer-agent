@@ -48,11 +48,46 @@ gh issue view N --repo lacs-project/sysknife --json labels --jq '[.labels[].name
 
 The reservation lifts after 2026-09-09. Do not remove the label before then.
 
-## Arming a merge
+## Merging
 
-If your review leaves only a mechanical item (a rebase, a conflict, a test count
-that moved), approve at the head you verified and say the merge is armed, listing
-the conditions. Do not merge unattended. Report it as ready under a
-"ready to merge" heading with the conditions spelled out, and let the interactive
-session close it. You cannot run a mutation in a container, so you cannot satisfy
-condition 2 in the skill, and a merge you cannot verify is not one to make.
+You may merge, and you may only merge through the gate.
+
+`gh pr merge` is denied to you. `maintainer-merge` is not, and it enforces what a
+green board cannot see: that a guard exists which fails when the change is
+removed.
+
+1. **Prove it.** Mutate the guard the PR adds or touches and watch it go red.
+   `maintainer screen <pr>` first; if it says DO NOT EXECUTE, run the mutation in
+   podman, which works here:
+
+   ```sh
+   podman run --rm --network=none -v "$PWD:/repo:z" -v "$HOME/.cargo:/cargo:O" \
+     -w /repo -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
+     -e CARGO_NET_OFFLINE=true docker.io/library/rust:1-slim \
+     cargo test -p <crate> --bins --offline <filter>
+   ```
+
+   The `rust` image sets `CARGO_HOME=/usr/local/cargo`, so the mount is ignored
+   unless you also pass `-e CARGO_HOME`. `sysknife-cli` is a binary crate and
+   needs `--bins`.
+
+2. **Record what you proved**, against the exact head:
+
+   ```sh
+   maintainer-merge receipt <pr> <head-sha> "<what you mutated and what went red>"
+   ```
+
+3. **Merge**: `maintainer-merge merge <pr>`.
+
+It refuses on a missing receipt, a review that is not `APPROVED`, any failing or
+pending check, an empty check list, the wrong GitHub account, and any change to
+production or CI files since the head the receipt names. If it refuses, report
+the refusal; do not work around it.
+
+Quote the mutation output in your review. A merge whose evidence is "CI was
+green" is the failure this repository keeps having: a test that passes with the
+fix reverted.
+
+**Never merge** a PR touching `.github/workflows/**` without a human reading the
+diff, a PR you have not reviewed at its current head, or one whose outstanding
+item is substantive rather than mechanical.

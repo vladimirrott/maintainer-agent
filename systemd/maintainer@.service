@@ -1,5 +1,15 @@
 [Unit]
 Description=maintainer: %i
+# Rootless podman cannot ESTABLISH a user namespace under the hardening
+# below (newuidmap is setuid; NoNewPrivileges and RestrictSUIDSGID block
+# it), but it can REUSE one. Measured on this host: cold + full hardening
+# failed 10/10, warm + full hardening succeeded. So an unhardened unit
+# running one fixed command establishes it first, and this unit stays
+# hardened. Without the ordering, container verification would silently
+# become unavailable after a reboot, and a merge gate that quietly stops
+# verifying still merges.
+Wants=podman-userns-warmup.service
+After=podman-userns-warmup.service
 Documentation=file://%h/.local/state/sysknife-maint/index.md
 OnFailure=maintainer-alert@%n.service
 

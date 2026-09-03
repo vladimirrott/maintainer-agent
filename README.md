@@ -6,20 +6,57 @@ the tracker, and harden CI, and it posts the results to GitHub for real.
 
 It currently maintains [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife).
 
-## Why this exists, and where it differs from the usual advice
+## This is a maintainer, not a PR bot
 
-The prevailing 2026 position on agentic maintenance is that an agent should
-flag, suggest and summarise, while a human owns the merge. Tools like
-[PR-Agent](https://github.com/The-PR-Agent/pr-agent) and
-[pr-review-agent](https://github.com/agentuse/pr-review-agent) are built that
-way, and the argument behind it is sound: an agent that cannot see every gate
-has no business deciding a merge.
+Reviewing diffs is the visible part of maintaining and not the part that ends
+projects. [`docs/maintainer-doctrine.md`](docs/maintainer-doctrine.md) works
+through three documented cases and what each one changes here:
 
-This project takes the argument seriously rather than ignoring it, and answers
-it by making the gates visible. The agent does not merge. It verifies, reports,
-and hands a ready-to-merge verdict to a human, and the one thing it is never
-allowed to do is publish. What makes that safe is not good intentions in a
-prompt; it is a deny list the model cannot argue with.
+- **xz-utils.** An isolated, burnt-out maintainer was socially engineered into
+  granting commit rights, and the backdoor followed. So this agent makes **no
+  trust decisions at all**: it never grants or recommends access, and it never
+  relaxes a gate because someone asks, insists or repeats. Persistence raises
+  suspicion rather than lowering the bar.
+- **curl.** One security submission in five was AI slop that named real
+  functions and contained nothing; the confirmed-vulnerability rate fell from
+  over 15% to under 5% and the project closed a bounty it had run since 2019. An
+  AI maintainer is one design mistake away from being that. So every number it
+  publishes is recounted with a command, every path resolves against the tree,
+  every guard is mutated before it is called a guard, and a run that found
+  nothing posts nothing.
+- **Everyone.** Most maintainer time goes to questions the documentation should
+  have answered, and nearly 60% of maintainers have quit or considered it. The
+  tasks target volume, not just diffs.
+
+## Merging: a receipt, not a rule
+
+The prevailing 2026 position is that agents should recommend and humans should
+merge ([PR-Agent](https://github.com/The-PR-Agent/pr-agent),
+[pr-review-agent](https://github.com/agentuse/pr-review-agent)), because an agent
+that cannot see every gate should not decide. The reasoning is right; "never
+merge" is a proxy for it. What actually makes a merge safe is evidence that a
+guard fails when the change is removed, and a green board cannot show that. This
+repository's recurring defect is a test that passes with the fix reverted.
+
+So `gh pr merge` stays denied and `maintainer-merge` is the only path. It
+refuses unless **all** of these hold:
+
+| Condition | Why |
+|---|---|
+| a **verification receipt** exists for the PR | somebody mutated the guard and watched it go red |
+| **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved `crates/*/src`, `.github` or a manifest, the receipt describes a tree that is gone |
+| `reviewDecision` is `APPROVED` | a force-push can dismiss it |
+| zero failing **and zero pending** checks | pending is not green |
+| the check list is **non-empty** | an empty board is a failure, not a pass |
+| `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
+
+```sh
+maintainer-merge receipt 348 0e37a664 "dropped GetSystemState from the allowlist; drift test went red"
+maintainer-merge merge 348
+```
+
+Every refusal path is tested, including both directions of the production-diff
+rule against a real git repository.
 
 ## Containment, layer by layer
 
@@ -49,10 +86,17 @@ DO NOT EXECUTE for any diff touching `.rs`, `.sh`, `.py`, `.js`, `.ts`, a
 dependency or a workflow, which is most of them. Unattended runs have no
 fallback and must review by reading.
 
-**4. podman, interactively only.** Anything that must actually run untrusted
-code goes in a container with `--network=none`. Rootless podman works here; it
-breaks under every systemd hardening directive tried, so the timers cannot use
-it.
+**4. podman, including from the timers.** Anything that must actually run
+untrusted code goes in a container with `--network=none`. Rootless podman cannot
+*establish* a user namespace under this hardening, because `newuidmap` is setuid
+and both `NoNewPrivileges` and `RestrictSUIDSGID` block it, but it can *reuse*
+one. Measured here: cold plus full hardening failed 10 times out of 10; warm
+plus full hardening succeeded. So `podman-userns-warmup.service`, deliberately
+unhardened and running one fixed command with no model output, establishes the
+namespace, and the maintainer unit is ordered after it and stays hardened.
+Verified from cold three times with the warm-up and once without: 3/3 versus a
+failure. Without that ordering, container verification would silently vanish
+after a reboot, and a merge gate that quietly stops verifying still merges.
 
 **What is NOT containment.** Mount isolation is unavailable on this host and the
 directives for it were removed rather than left in looking protective. On

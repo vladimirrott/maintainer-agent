@@ -101,5 +101,115 @@ python3 -c "import ast;ast.parse(open('$root/bin/maintainer').read())" 2>/dev/nu
 grep -q 'report not yet written' "$root/bin/maintainer" \
   && ok "report sentinel intact" || bad "report sentinel gone (finish can no longer reject an empty run)"
 
+echo "== the merge gate refuses without a valid receipt =="
+mg="$root/bin/maintainer-merge"
+export MAINTAINER_STATE="$stub_dir/state" MAINTAINER_ACCOUNT="testuser" MAINTAINER_SLUG="o/r" MAINTAINER_REPO="$stub_dir/repo"
+mkdir -p "$MAINTAINER_STATE" "$MAINTAINER_REPO"
+
+# Identity is checked before anything else.
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo wronguser; exit 0;; esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not testuser'; then ok "merge refuses under the wrong gh account"; else bad "merge did not refuse a wrong account (rc=$rc)"; fi
+
+# Right account, but no receipt exists.
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo testuser; exit 0;; esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no verification receipt'; then ok "merge refuses with no receipt"; else bad "merge did not refuse a missing receipt (rc=$rc)"; fi
+
+# Receipt exists, but the review is not approved.
+PATH="$stub_dir:$PATH" bash "$mg" receipt 1 abcdef1234 "drift guard mutated, went red" >/dev/null 2>&1
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo CHANGES_REQUESTED;;
+  *headRefOid*) echo abcdef1234;;
+  *mergeStateStatus*) echo CLEAN;;
+esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not APPROVED'; then ok "merge refuses an unapproved PR"; else bad "merge did not refuse an unapproved PR (rc=$rc)"; fi
+
+# Approved, but a check is failing.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *headRefOid*) echo abcdef1234;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"fail\"}]';;
+esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'failing check'; then ok "merge refuses a failing board"; else bad "merge did not refuse a failing board (rc=$rc)"; fi
+
+# Approved, board green, but zero checks reported at all.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *headRefOid*) echo abcdef1234;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '';;
+esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no checks at all'; then ok "merge refuses when no checks reported (empty is not green)"; else bad "merge treated an empty board as green (rc=$rc)"; fi
+
+echo "== a receipt dies when production code moves under it =="
+# The condition the whole gate rests on. Built against a real git repo, because
+# the check is a real `git diff` and a stub would prove nothing.
+gr="$stub_dir/repo"
+git -C "$gr" init -q -b main 2>/dev/null
+git -C "$gr" config user.email t@t; git -C "$gr" config user.name t
+mkdir -p "$gr/crates/x/src" "$gr/docs"
+echo "fn main() {}" > "$gr/crates/x/src/lib.rs"; echo "hello" > "$gr/docs/a.md"
+git -C "$gr" add -A >/dev/null; git -C "$gr" commit -qm base
+verified=$(git -C "$gr" rev-parse HEAD)
+
+# Case A: only docs moved after the verified head. The receipt must survive.
+echo "changed" > "$gr/docs/a.md"; git -C "$gr" add -A >/dev/null; git -C "$gr" commit -qm docs-only
+docs_head=$(git -C "$gr" rev-parse HEAD)
+git -C "$gr" branch -f "pr-7" "$docs_head" >/dev/null 2>&1
+# Case B: production moved. The receipt must die.
+echo "fn main() { changed() }" > "$gr/crates/x/src/lib.rs"; git -C "$gr" add -A >/dev/null; git -C "$gr" commit -qm prod
+prod_head=$(git -C "$gr" rev-parse HEAD)
+git -C "$gr" branch -f "pr-8" "$prod_head" >/dev/null 2>&1
+
+# `git fetch origin refs/pull/N/head` has no origin here, so point the gate at
+# local refs by giving it an origin that is the repo itself.
+git -C "$gr" remote add origin "$gr" 2>/dev/null
+git -C "$gr" update-ref "refs/pull/7/head" "$docs_head"
+git -C "$gr" update-ref "refs/pull/8/head" "$prod_head"
+
+gate_case() {  # $1 pr, $2 head, $3 expect-substring, $4 label
+    PATH="$stub_dir:$PATH" bash "$mg" receipt "$1" "$verified" "mutation proved" >/dev/null 2>&1
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $2;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]';;
+      *'pr merge'*) echo MERGED_STUB;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "$1" 2>&1)
+    if printf '%s' "$out" | grep -q "$3"; then ok "$4"; else bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"; fi
+}
+gate_case 7 "$docs_head" "receipt still applies" "docs-only movement keeps the receipt valid"
+gate_case 8 "$prod_head" "production code changed" "production movement invalidates the receipt"
+
+echo "== the doctrine reaches a run, not just a reader =="
+pre="$root/profiles/sysknife/prompts/common-preamble.md"
+for needle in "Trust is the attack surface" "slop" "Persistence"; do
+    if grep -qi "$needle" "$pre"; then ok "preamble carries: $needle"; else bad "preamble lost: $needle"; fi
+done
+if grep -q 'maintainer-merge' "$root/profiles/sysknife/prompts/review.md"; then
+    ok "review prompt routes merges through the gate"
+else
+    bad "review prompt no longer names the merge gate"
+fi
+if grep -q 'Bash(gh pr merge:\*)' "$root/profiles/sysknife/settings.json.template"; then
+    ok "direct gh pr merge is still denied (the gate is the only path)"
+else
+    bad "gh pr merge is no longer denied; the gate can be bypassed"
+fi
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

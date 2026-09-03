@@ -1,0 +1,26 @@
+[Unit]
+Description=maintainer: establish the rootless podman user namespace
+Documentation=man:podman(1)
+
+[Service]
+Type=oneshot
+RemainAfterExit=no
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# `podman info` is enough to make podman create its pause process and map the
+# subuid range. Nothing untrusted runs here.
+ExecStart=/usr/bin/podman info --format {{.Host.Security.Rootless}}
+
+# DELIBERATELY UNHARDENED, and this is the whole point of the unit.
+#
+# Rootless podman maps its user namespace through /usr/bin/newuidmap, which is
+# setuid. NoNewPrivileges and RestrictSUIDSGID both block that, so a hardened
+# unit cannot ESTABLISH a namespace. Measured on this host: cold + full
+# hardening fails 10/10 with "newuidmap: write to uid_map failed"; warm + full
+# hardening succeeds, because podman reuses the pause process rather than
+# remapping.
+#
+# So the split is: this unit, which runs one fixed command and no model output,
+# establishes the namespace. The maintainer unit stays fully hardened and
+# reuses it. Relying on a warm namespace without this would make container
+# verification silently unavailable after a reboot, which is worse than not
+# having it: a merge gate that quietly stops verifying still merges.

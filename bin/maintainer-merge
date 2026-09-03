@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Merge a pull request, but only against a recorded verification.
+#
+#   maintainer-merge receipt <pr> <head-sha> <what-was-proved>
+#   maintainer-merge merge   <pr>
+#   maintainer-merge show    [pr]
+#
+# The point is not to merge. The point is that a merge is impossible unless
+# somebody proved the guard bites, at a head whose production code is identical
+# to the one being merged. A green board is not that proof: this repository's
+# recurring defect is a test that stays green with the fix reverted.
+set -uo pipefail
+
+REPO_SLUG="${MAINTAINER_SLUG:-lacs-project/sysknife}"
+REPO_PATH="${MAINTAINER_REPO:-$HOME/Desktop/lacs}"
+STATE="${MAINTAINER_STATE:-$HOME/.local/state/sysknife-maint}"
+ACCOUNT="${MAINTAINER_ACCOUNT:-vladimirrott}"
+RECEIPTS="$STATE/receipts"
+# Paths whose change invalidates a receipt. Tests, docs and the evidence
+# artifact may move between the verified head and the merged one; production
+# code and CI configuration may not.
+PROD_GLOBS=('crates/*/src/*' 'apps/*/src/*' 'packaging/*' '.github/*' '*/Cargo.toml' 'Cargo.lock')
+
+die() { printf 'maintainer-merge: %s\n' "$1" >&2; exit 1; }
+say() { printf '  %s\n' "$1"; }
+
+identity() {
+    gh auth switch --hostname github.com --user "$ACCOUNT" >/dev/null 2>&1
+    local who; who="$(gh api user --jq .login 2>/dev/null)"
+    [ "$who" = "$ACCOUNT" ] || die "gh is authenticated as '${who:-unknown}', not $ACCOUNT"
+}
+
+cmd_receipt() {
+    local pr="${1:?pr}" sha="${2:?head sha}" proof="${3:?what was proved}"
+    mkdir -p "$RECEIPTS"
+    [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
+    cat > "$RECEIPTS/$pr.json" <<EOF
+{
+  "pr": $pr,
+  "head": "$sha",
+  "proof": "$proof",
+  "recorded_at": "$(date -Is)",
+  "recorded_by": "$(id -un)"
+}
+EOF
+    say "receipt recorded for #$pr at $sha"
+}
+
+cmd_show() {
+    mkdir -p "$RECEIPTS"
+    if [ $# -ge 1 ]; then cat "$RECEIPTS/$1.json" 2>/dev/null || die "no receipt for #$1"; return; fi
+    local n=0
+    for f in "$RECEIPTS"/*.json; do [ -e "$f" ] || continue; n=$((n+1)); printf '  %s\n' "$(basename "$f" .json): $(python3 -c "import json,sys;d=json.load(open('$f'));print(d['head'][:8], d['proof'][:60])")"; done
+    [ "$n" = 0 ] && say "no receipts recorded"
+    return 0
+}
+
+cmd_merge() {
+    local pr="${1:?pr}"
+    identity
+
+    local receipt="$RECEIPTS/$pr.json"
+    [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
+    local verified_head; verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+
+    local head state review
+    head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
+    state="$(gh pr view "$pr" --repo "$REPO_SLUG" --json mergeStateStatus --jq .mergeStateStatus)"
+    review="$(gh pr view "$pr" --repo "$REPO_SLUG" --json reviewDecision --jq .reviewDecision)"
+
+    [ "$review" = "APPROVED" ] || die "#$pr reviewDecision is '$review', not APPROVED"
+
+    local checks fails pend
+    checks="$(gh pr checks "$pr" --repo "$REPO_SLUG" --json name,bucket 2>/dev/null)"
+    [ -n "$checks" ] || die "#$pr reported no checks at all; refusing"
+    fails="$(printf '%s' "$checks" | jq '[.[]|select(.bucket=="fail")]|length')"
+    pend="$(printf '%s' "$checks"  | jq '[.[]|select(.bucket=="pending")]|length')"
+    [ "$fails" = 0 ] || die "#$pr has $fails failing check(s)"
+    [ "$pend"  = 0 ] || die "#$pr has $pend pending check(s)"
+
+    # The condition that carries the weight. A rebase may move tests, docs and
+    # the evidence artifact; if it moved production code, the receipt describes
+    # a tree that no longer exists.
+    git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:mm-$pr" --force || die "cannot fetch #$pr"
+    if [ "$head" != "$verified_head" ]; then
+        local diff
+        diff="$(git -C "$REPO_PATH" diff --name-only "$verified_head".."mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        if [ -n "$diff" ]; then
+            git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
+            die "production code changed since the verified head $verified_head:
+$(printf '%s' "$diff" | sed 's/^/    /')
+  The receipt no longer describes this tree. Re-verify and record a new one."
+        fi
+        say "head moved $verified_head -> ${head:0:8}, no production diff; receipt still applies"
+    fi
+    git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
+
+    say "#$pr: approved, $(printf '%s' "$checks" | jq '[.[]|select(.bucket=="pass")]|length') checks pass, 0 fail, 0 pending, receipt valid"
+    gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch || die "merge failed"
+    say "merged #$pr"
+    rm -f "$receipt"
+}
+
+case "${1:-}" in
+    receipt) shift; cmd_receipt "$@" ;;
+    merge)   shift; cmd_merge "$@" ;;
+    show)    shift; cmd_show "$@" ;;
+    *) printf 'usage: maintainer-merge {receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
+esac

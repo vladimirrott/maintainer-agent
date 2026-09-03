@@ -46,7 +46,8 @@ for tpl in "$share"/profiles/*/settings.json.template; do
     fi
 done
 run cp "$root/bin/maintainer" "$bin/maintainer"
-run chmod +x "$share/run.sh" "$share/run-instance.sh" "$bin/maintainer"
+run cp "$root/bin/maintainer-merge" "$bin/maintainer-merge"
+run chmod +x "$share/run.sh" "$share/run-instance.sh" "$bin/maintainer" "$bin/maintainer-merge"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.
@@ -55,7 +56,7 @@ if [ "$dry" = 0 ] && [ ! -d "$share/profiles/sysknife" ]; then
     exit 1
 fi
 
-for u in "$root"/systemd/maintainer@.service "$root"/systemd/maintainer-alert@.service "$root"/systemd/*.timer; do
+for u in "$root"/systemd/podman-userns-warmup.service "$root"/systemd/maintainer@.service "$root"/systemd/maintainer-alert@.service "$root"/systemd/*.timer; do
     run cp "$u" "$units/$(basename "$u")"
 done
 
