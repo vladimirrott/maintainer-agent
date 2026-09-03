@@ -284,5 +284,35 @@ else
     ok "cursor backend never passes --force outside comments"
 fi
 
+echo "== the receipt cannot be asserted by the agent, only observed =="
+if grep -q 'Bash(maintainer-merge receipt:\*)' "$s"; then
+    ok "hand-written receipts are denied to the agent"
+else
+    bad "the agent can write its own receipt; the merge gate proves nothing"
+fi
+if grep -q 'cmd_verify' "$mg" && grep -q 'THE GUARD DOES NOT BITE' "$mg"; then
+    ok "verify runs the mutation and refuses a guard that stays green"
+else
+    bad "there is no observed-verification path"
+fi
+if grep -q '"kind": "observed"' "$mg" || grep -q 'observed' "$mg"; then
+    ok "receipts record whether they were observed or merely asserted"
+else
+    bad "receipts do not distinguish observation from assertion"
+fi
+
+echo "== absolute-path spellings of every blocked verb are denied =="
+# MEASURED: /usr/bin/touch evaded a rule written for touch. The matcher keys on
+# the command as written, so each verb needs its absolute forms too.
+for verb in "git push" "git tag" "gh pr merge" "cargo publish" "npm publish"; do
+    cmd=${verb%% *}
+    if grep -q "Bash(/usr/bin/$verb:\*)" "$s"; then
+        ok "absolute form denied: /usr/bin/$verb"
+    else
+        bad "absolute form NOT denied: /usr/bin/$verb"
+    fi
+done
+grep -q 'Bash(git -C:\*)' "$s" && ok "git -C (flags before the verb) is denied" || bad "git -C evades the push/tag rules"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

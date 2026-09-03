@@ -30,6 +30,15 @@ identity() {
     [ "$who" = "$ACCOUNT" ] || die "gh is authenticated as '${who:-unknown}', not $ACCOUNT"
 }
 
+# `receipt` records a claim. `verify` produces one by running the mutation and
+# observing the outcome, and it is the only form an unattended agent may use.
+#
+# The distinction is the whole gate. A hand-written receipt asserts "I mutated
+# the guard and it went red"; nothing checks that. An agent under pressure, or
+# one that simply skipped a step, can write that sentence as easily as a true
+# one. `verify` runs the test twice, unmutated and mutated, and records what it
+# saw. The agent still chooses a weak mutation if it wants to, but it cannot
+# fabricate the result.
 cmd_receipt() {
     local pr="${1:?pr}" sha="${2:?head sha}" proof="${3:?what was proved}"
     mkdir -p "$RECEIPTS"
@@ -39,11 +48,75 @@ cmd_receipt() {
   "pr": $pr,
   "head": "$sha",
   "proof": "$proof",
+  "kind": "asserted",
   "recorded_at": "$(date -Is)",
   "recorded_by": "$(id -un)"
 }
 EOF
-    say "receipt recorded for #$pr at $sha"
+    say "receipt recorded for #$pr at $sha (asserted, not observed)"
+}
+
+# maintainer-merge verify <pr> <head-sha> <test-filter> <sed-mutation> [crate]
+#
+# Runs the test filter in podman against the PR head, then again with the
+# mutation applied, and records a receipt only if it passed clean and failed
+# mutated. Either other outcome is a refusal, including the one that matters
+# most: a test that stays green when the guard is removed.
+cmd_verify() {
+    local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
+    local crate="${5:-}"
+    command -v podman >/dev/null || die "podman is required for verify; no container, no receipt"
+
+    local work; work="$(mktemp -d)"
+    trap 'rm -rf "$work"' RETURN
+    git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:v-$pr" --force || die "cannot fetch #$pr"
+    local real_head; real_head="$(git -C "$REPO_PATH" rev-parse "v-$pr")"
+    case "$real_head" in "$sha"*) ;; *) git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
+        die "head is $real_head, not the $sha you named" ;; esac
+    git -C "$REPO_PATH" archive "v-$pr" | tar -x -C "$work"
+    git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
+    mkdir -p "$work/.container-target"
+
+    local pkg=(); [ -n "$crate" ] && pkg=(-p "$crate")
+    run_in_container() {
+        podman run --rm --network=none -v "$work:/repo:z" -v "$HOME/.cargo:/cargo:O" \
+            -w /repo -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
+            -e CARGO_NET_OFFLINE=true docker.io/library/rust:1-slim \
+            cargo test "${pkg[@]}" --bins --offline "$filter" >>"$1" 2>&1
+    }
+
+    local clean_log="$work/clean.log" mut_log="$work/mutated.log"
+    say "running '$filter' unmutated"
+    run_in_container "$clean_log"; local clean_rc=$?
+    [ "$clean_rc" = 0 ] || die "the test does not pass unmutated (rc=$clean_rc); nothing to prove yet
+$(tail -5 "$clean_log" | sed 's/^/    /')"
+
+    say "applying the mutation and re-running"
+    # The mutation is applied inside the extracted tree only. The real
+    # repository is never touched.
+    ( cd "$work" && find . -name '*.rs' -not -path './.container-target/*' -print0 \
+        | xargs -0 sed -i "$mutation" ) || die "mutation failed to apply"
+    run_in_container "$mut_log"; local mut_rc=$?
+
+    if [ "$mut_rc" = 0 ]; then
+        die "THE GUARD DOES NOT BITE: '$filter' still passes with the mutation applied.
+  This is the defect the gate exists for. No receipt written."
+    fi
+
+    mkdir -p "$RECEIPTS"
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$filter" "$mutation" "$mut_rc" \
+        "$(grep -m1 -E 'panicked at|assertion|FAILED' "$mut_log" | cut -c1-200)" <<'PYEOF'
+import json, sys, datetime, getpass
+out, pr, head, filt, mut, rc, msg = sys.argv[1:8]
+json.dump({
+    "pr": int(pr), "head": head, "kind": "observed",
+    "proof": f"`{filt}` passes clean and fails under `{mut}` (rc={rc})",
+    "mutation": mut, "filter": filt, "observed_failure": msg,
+    "recorded_at": datetime.datetime.now().astimezone().isoformat(),
+    "recorded_by": getpass.getuser(),
+}, open(out, "w"), indent=2)
+PYEOF
+    say "receipt recorded for #$pr at ${real_head:0:8} (observed: clean pass, mutated fail)"
 }
 
 cmd_show() {
@@ -103,7 +176,8 @@ $(printf '%s' "$diff" | sed 's/^/    /')
 
 case "${1:-}" in
     receipt) shift; cmd_receipt "$@" ;;
+    verify)  shift; cmd_verify "$@" ;;
     merge)   shift; cmd_merge "$@" ;;
     show)    shift; cmd_show "$@" ;;
-    *) printf 'usage: maintainer-merge {receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
+    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [crate]|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
 esac

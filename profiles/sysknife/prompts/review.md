@@ -71,11 +71,18 @@ removed.
    unless you also pass `-e CARGO_HOME`. `sysknife-cli` is a binary crate and
    needs `--bins`.
 
-2. **Record what you proved**, against the exact head:
+2. **Have the gate observe it.** You cannot write your own receipt; that
+   command is denied to you, because an asserted proof is exactly what the gate
+   exists to replace. Instead:
 
    ```sh
-   maintainer-merge receipt <pr> <head-sha> "<what you mutated and what went red>"
+   maintainer-merge verify <pr> <head-sha> "<test filter>" "<sed mutation>" [crate]
    ```
+
+   It runs the filter in podman unmutated, applies the mutation, runs it again,
+   and writes a receipt only if the test passed clean and failed mutated. If the
+   test stays green under the mutation it refuses and says
+   `THE GUARD DOES NOT BITE`, which is the finding, not an obstacle: report it.
 
 3. **Merge**: `maintainer-merge merge <pr>`.
 

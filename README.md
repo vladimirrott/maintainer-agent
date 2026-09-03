@@ -62,14 +62,30 @@ rule against a real git repository.
 
 Stated precisely, because a vague claim here is worse than none.
 
-**1. The backend deny list.** Under the Claude backend, `--settings` carries
-about forty deny rules that outrank `--permission-mode bypassPermissions`. The
-agent runs with no approval prompts and still cannot reach `git push`,
-`git tag`, `gh pr merge`, `gh release`, `cargo publish`, `npm publish`,
-`gh workflow run`, `curl`, `wget`, or any read of `~/.ssh`, `~/.config/gh`,
-`~/.aws`, `~/.gnupg`, `~/.netrc` or a credentials file. `tests/run-tests.sh`
-pins every one of those and is mutation-proved: delete a rule and the suite goes
-red naming it.
+**1. The backend deny list, and precisely what it is worth.** Under the Claude
+backend, `--settings` carries 72 deny rules covering `git push`, `git tag`,
+`gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
+`curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`, `~/.aws`, `~/.gnupg`,
+`~/.netrc` and credentials files. `tests/run-tests.sh` pins them and is
+mutation-proved: delete a rule and the suite goes red naming it.
+
+Two properties, both measured on 2026-09-03 rather than assumed:
+
+- **Deny does outrank `bypassPermissions`.** A differential run with one denied
+  path and one control: the denied `touch` was blocked and the control
+  succeeded, and the agent reported "First command hit permission restriction".
+- **The matcher keys on the command as written, so equivalent spellings evade
+  it.** `/usr/bin/touch /tmp/mt-y` succeeded against a rule denying
+  `touch /tmp/mt-y`. Absolute-path forms of every blocked verb are now denied
+  too, which is why there are 72 rules and not 40.
+
+That second measurement bounds the claim honestly. **A deny list is not a
+boundary against an adversarial agent**, because enumeration cannot be complete;
+a shell has more ways to spell a command than a list has entries. What it does
+reliably is stop a cooperative agent from reaching a destructive verb by
+accident or by being talked into it, which is the realistic failure. The
+boundaries that do not depend on enumeration are the screen, the container, and
+the receipt.
 
 **2. The identity gate.** `run.sh` switches `gh` to the configured account,
 reads the login back, and refuses to start if it is anything else. This is not
@@ -238,14 +254,14 @@ aborted run cannot make the next one skip unreviewed changes.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 66 offline tests
+./tests/run-tests.sh        # 75 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-66 offline tests: no network, no GitHub, no model call. Every case tests a
+75 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
-mutation-proved; removing one of the 40 deny rules turns it red naming that
+mutation-proved; removing one of the 72 deny rules turns it red naming that
 rule, and planting a home path turns the leak check red.
 
 There is no CI. This is a private repository with one maintainer, so the gate
