@@ -990,5 +990,36 @@ printf 'REPO_SLUG="o/r"\nTASKS="review"\nSTATE_DIR="$HOME/st"\nPOST="off"\n' \
 HOME="$ok2" MAINTAINER_PROFILE=plain python3 "$root/bin/maintainer" status 2>&1 | grep -q 'o/r' \
     && ok "a plain profile name still works" || bad "the name check rejects a valid profile"
 
+echo "== the social preview is the size GitHub actually accepts =="
+# GitHub's own docs: at least 640x320, 1280x640 for best display, under 1MB,
+# cropped to 2:1. Read from the PNG's IHDR chunk so this needs no image library:
+# an optional dependency that is absent turns a gate green, which this project
+# has been bitten by before.
+python3 - "$root/assets/social-preview.png" <<'PYEOF' && ok "social preview is 1280x640 and under 1MB" || bad "the social preview would be rejected or cropped badly"
+import struct, sys, os
+p = sys.argv[1]
+if not os.path.exists(p):
+    print("  no social preview at", p); sys.exit(1)
+b = open(p, "rb").read()
+if b[:8] != b"\x89PNG\r\n\x1a\n":
+    print("  not a PNG; GitHub takes PNG, JPG or GIF"); sys.exit(1)
+w, h = struct.unpack(">II", b[16:24])
+bad = []
+if (w, h) != (1280, 640):
+    bad.append(f"{w}x{h}, wanted 1280x640")
+if len(b) > 1_000_000:
+    bad.append(f"{len(b)} bytes, over the 1MB limit")
+for m in bad:
+    print("  " + m)
+sys.exit(1 if bad else 0)
+PYEOF
+[ -f "$root/assets/logo.svg" ] && ok "the mark is in the tree" || bad "assets/logo.svg is missing"
+grep -q 'assets/logo.svg' "$root/README.md" && ok "the README shows the mark" || bad "the README does not reference the mark"
+# The PNG is generated from the SVG. If someone edits the PNG alone the two
+# drift, and the thing people see is the one nobody reviewed.
+grep -q 'social-preview.svg' "$root/assets/social-preview.html" \
+    && ok "the preview page renders the SVG, so the PNG has one source" \
+    || bad "the PNG has no reproducible source"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
