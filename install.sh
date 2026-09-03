@@ -54,7 +54,8 @@ done
 run cp "$root/bin/maintainer" "$bin/maintainer"
 run cp "$root/bin/maintainer-merge" "$bin/maintainer-merge"
 run cp "$root/bin/maintainer-doctor" "$bin/maintainer-doctor"
-run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor"
+run cp "$root/bin/maintainer-repo" "$bin/maintainer-repo"
+run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor" "$bin/maintainer-repo"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.

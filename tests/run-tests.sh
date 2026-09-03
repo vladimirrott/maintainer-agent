@@ -376,5 +376,19 @@ else
     ok "doctor fails against an empty home"
 fi
 
+echo "== housekeeping: prune and release-check =="
+mr="$root/bin/maintainer-repo"
+[ -x "$mr" ] && ok "maintainer-repo present and executable" || bad "maintainer-repo missing"
+grep -q 'gh pr list' "$mr" && ok "prune consults open PRs before deleting a branch" || bad "prune could delete a branch that still has an open PR"
+grep -q 'merge-base --is-ancestor' "$mr" && ok "prune defines merged as an ancestor of origin/main" || bad "prune uses a weaker merged test"
+grep -qE 'case "\$br" in main\|master' "$mr" && ok "prune never touches main" || bad "prune does not exclude main"
+# The release verdict must come from the CHANGELOG, not from commit subjects.
+# An earlier version read subject lines for the word "security" and scored a
+# genuine authorization fix as zero, because its subject said "gate mutating
+# query actions".
+grep -q 'Unreleased' "$mr" && ok "release-check reads the CHANGELOG Unreleased section" || bad "release-check no longer reads the CHANGELOG"
+grep -q 'rests on file counts alone' "$mr" && ok "release-check warns when the CHANGELOG is unreadable" || bad "release-check would pass silently over a missing CHANGELOG"
+if grep -q "format=%s.*grep -ciE 'security" "$mr"; then bad "release-check still guesses from commit subjects"; else ok "release-check does not guess from commit subjects"; fi
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -78,18 +78,32 @@ cmd_verify() {
     mkdir -p "$work/.container-target"
 
     local pkg=(); [ -n "$crate" ] && pkg=(-p "$crate")
+    # No target filter. `--bins` misses integration tests under tests/, which is
+    # how this gate once refused a good pull request after running zero tests.
     run_in_container() {
         podman run --rm --network=none -v "$work:/repo:z" -v "$HOME/.cargo:/cargo:O" \
             -w /repo -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
             -e CARGO_NET_OFFLINE=true docker.io/library/rust:1-slim \
-            cargo test "${pkg[@]}" --bins --offline "$filter" >>"$1" 2>&1
+            cargo test "${pkg[@]}" --offline "$filter" >>"$1" 2>&1
     }
+
+    # How many tests actually executed, summed across every target.
+    tests_run() { awk '/^test result:/ { for (i=1;i<=NF;i++) if ($i=="passed;") s+=$(i-1) } END { print s+0 }' "$1"; }
 
     local clean_log="$work/clean.log" mut_log="$work/mutated.log"
     say "running '$filter' unmutated"
     run_in_container "$clean_log"; local clean_rc=$?
     [ "$clean_rc" = 0 ] || die "the test does not pass unmutated (rc=$clean_rc); nothing to prove yet
 $(tail -5 "$clean_log" | sed 's/^/    /')"
+
+    # A filter that matches nothing "passes". Without this the gate can write a
+    # receipt having executed zero tests: the clean run passes vacuously, and a
+    # mutation that merely breaks compilation makes the second run fail, which
+    # reads as proof. Refuse before that can happen.
+    local ran; ran="$(tests_run "$clean_log")"
+    [ "${ran:-0}" -ge 1 ] || die "the filter '$filter' matched no tests; a vacuous pass proves nothing
+$(grep -m2 'filtered out' "$clean_log" | sed 's/^/    /')"
+    say "$ran test(s) matched and passed unmutated"
 
     say "applying the mutation and re-running"
     # The mutation is applied inside the extracted tree only. The real

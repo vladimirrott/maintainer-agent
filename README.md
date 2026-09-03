@@ -178,6 +178,27 @@ The PowerShell is checked statically here (balanced blocks, real cmdlets, a
 `param` block) because `pwsh` is not installed on the development machine. That
 is a weaker check than parsing and is labelled as such in the suite.
 
+## Housekeeping and releases
+
+Two chores a solo maintainer stops doing first, so they are commands rather than
+intentions.
+
+```sh
+maintainer-repo prune --dry-run   # branches merged into main, local and remote
+maintainer-repo release-check     # is a release owed, and which digit moves
+```
+
+`prune` refuses to touch a branch that still heads an open pull request, and
+defines "merged" as an ancestor of `origin/main` rather than trusting a name.
+
+`release-check` reads the **CHANGELOG's Unreleased section**, because that is
+where a human deliberately said what changed. An earlier version read commit
+subjects for the word "security" and scored a genuine authorization fix as zero,
+because its subject was `fix(daemon): gate mutating query actions`. It warns
+loudly when the section is missing rather than passing over nothing, and it
+never cuts the release: crates.io and npm versions can never be replaced, so
+that stays a human decision.
+
 ## Evals
 
 7 adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
@@ -281,12 +302,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 93 offline tests
+./tests/run-tests.sh        # 100 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-93 offline tests: no network, no GitHub, no model call. Every case tests a
+100 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing one of the 72 deny rules turns it red naming that
 rule, and planting a home path turns the leak check red.
