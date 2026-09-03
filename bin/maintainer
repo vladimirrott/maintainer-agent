@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -32,6 +33,16 @@ from pathlib import Path
 # profile's repository and run history. An adopter would have read another
 # project's runs and believed they were theirs.
 PROFILE = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+# A profile name becomes a path AND, below, part of a shell command. Both need
+# it to be a plain name. Measured on 2026-09-03: MAINTAINER_PROFILE set to
+# `pwn"; touch /tmp/INJECTED; :"` with a matching directory ran the touch,
+# because the name was interpolated into `bash -c` and `path.exists()` guards
+# nothing when whoever sets the variable also creates the directory. That is
+# arbitrary shell inside a subprocess the deny wall never sees.
+_SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+if not _SAFE_NAME.match(PROFILE):
+    raise SystemExit(f"maintainer: refusing a profile name that is not a plain "
+                     f"word: {PROFILE!r}")
 
 
 def _profile_env(profile: str = PROFILE) -> dict:
@@ -48,17 +59,26 @@ def _profile_env(profile: str = PROFILE) -> dict:
         return out
     keys = ("REPO_PATH", "REPO_SLUG", "STATE_DIR", "TASKS", "POST", "GH_ACCOUNT",
             "MAINTAINER_NAME", "REQUIRED_COMMANDS")
-    script = f'. "{path}" >/dev/null 2>&1; ' + "".join(
+    # The path goes in as an ARGUMENT, never interpolated into the script. The
+    # key names are a literal tuple in this file, so they are the only thing
+    # that reaches the command text.
+    script = '. "$1" >/dev/null 2>&1; ' + "".join(
         f'printf "%s\\n" "${{{k}:-}}"; ' for k in keys)
-    p = subprocess.run(("bash", "-c", script), capture_output=True, text=True)
+    p = subprocess.run(("bash", "-c", script, "_", str(path)),
+                       capture_output=True, text=True)
     if p.returncode != 0:
         return out
     values = p.stdout.split("\n")
     out.update({k: v for k, v in zip(keys, values)})
     # Every MIN_HOURS_<task>, for the "held back" marker in status.
     for task in (out.get("TASKS") or "").split():
+        # TASKS comes from the file, so a task name reaches the command text.
+        # Same rule as the profile name: a plain word or it is not used.
+        if not _SAFE_NAME.match(task):
+            continue
         q = subprocess.run(
-            ("bash", "-c", f'. "{path}" >/dev/null 2>&1; printf "%s" "${{MIN_HOURS_{task}:-}}"'),
+            ("bash", "-c", f'. "$1" >/dev/null 2>&1; printf "%s" "${{MIN_HOURS_{task}:-}}"',
+             "_", str(path)),
             capture_output=True, text=True)
         if q.returncode == 0 and q.stdout.strip():
             out[f"MIN_HOURS_{task}"] = q.stdout.strip()
@@ -80,19 +100,28 @@ ROOT = Path(_setting("MAINTAINER_STATE", "STATE_DIR",
                                     str(Path.home() / ".local/state/sysknife-maint"))))
 RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
 INDEX = ROOT / "index.md"
-SENTINEL = "<!-- sysknife-maint: report not yet written -->"
+# `start` writes this as the FIRST line and nowhere else, so `finish` anchors to
+# line 1. It used to search the whole file, and on 2026-09-03 it threw away a
+# finished 262-line report because the report quoted this string while writing
+# up a finding about it. The run went unaudited, its baseline never promoted,
+# and a critical desktop alert fired. Same shape as docs/lessons.md §5: a check
+# must not match its own subject.
+SENTINEL = "<!-- maintainer: report not yet written -->"
+# A report opened by an older `start` carries the previous spelling on line 1.
+SENTINELS = (SENTINEL, "<!-- sysknife-maint: report not yet written -->")
 TASKS = _setting("MAINTAINER_TASKS", "TASKS", "review issues ci audit").split()
 SKILL = os.environ.get("MAINTAINER_SKILL", "")
-DEFAULT_SKILLS = {
-    "review": "sysknife-review",
-    "issues": "sysknife-issues",
-    "ci": "sysknife-ci-live-tests",
-    "audit": "sysknife-issue-audit",
-}
 
 
 def skill_for(task: str) -> str:
-    return SKILL or DEFAULT_SKILLS.get(task, task)
+    """The skill this task loads, or a plain statement that none is declared.
+
+    There used to be a fallback map here keyed to one repository's skill names,
+    so a second profile with no SKILL_<task> was told to load `sysknife-review`,
+    a skill written for another project's gates. Inventing a skill name is worse
+    than admitting there is none.
+    """
+    return SKILL or f"(none declared; set SKILL_{task} in profile.env)"
 
 
 
@@ -388,7 +417,7 @@ def cmd_start(skill: str) -> None:
     # report.
     (STATE / f"pending-{skill}.json").write_text(json.dumps(snap, indent=2, sort_keys=True) + "\n")
 
-    print(f"=== sysknife-maint {run_id} ===")
+    print(f"=== maintainer {run_id} ===")
     print(f"skill        {skill_for(skill)}")
     print(f"repo         {REPO}")
     print(f"main         {before[:8]} -> {after[:8]}" + ("  (already current)" if before == after else ""))
@@ -404,7 +433,7 @@ def cmd_start(skill: str) -> None:
         print(f"  - {c}")
     print(f"\nwrite the run report to  {report}")
     print(f"put any drafts under     {draft_dir}/")
-    print("run.sh closes the run for you; do not call `sysknife-maint finish` yourself")
+    print("run.sh closes the run for you; do not call `maintainer finish` yourself")
 
 
 def cmd_finish(run_id: str) -> None:
@@ -414,9 +443,10 @@ def cmd_finish(run_id: str) -> None:
         raise SystemExit(
             f"maintainer: {report} is missing or empty. A run with no report is not "
             f"auditable; write the report, then finish.")
-    if SENTINEL in report.read_text():
+    first = report.read_text().splitlines()[0] if report.read_text().splitlines() else ""
+    if any(sent in first for sent in SENTINELS):
         raise SystemExit(
-            f"maintainer: {report} still carries the placeholder line, so the run "
+            f"maintainer: {report} still opens with the placeholder line, so the run "
             f"wrote no report. Replace the whole file, then finish.")
     # Idempotent: both the agent and run.sh call this, and a run counted twice is
     # a wrong audit trail just as surely as a run counted zero times.
@@ -473,9 +503,12 @@ def _duration(sec: float) -> str:
 
 def cmd_status() -> None:
     env = _ENV
-    # profile.env holds POST="${MAINTAINER_POST:-on}", so read the default out
-    # of the parameter expansion rather than trying to evaluate shell here.
-    post = (env.get("POST") or "on").strip() or "on"
+    # _profile_env sources the file, so this is the evaluated value. A profile
+    # that fails to source yields "", and the safe reading of an unknown state
+    # is that the agent might post: say so rather than implying a rehearsal.
+    post = (env.get("POST") or "").strip()
+    if not post:
+        post = "unknown (profile.env did not source; assume it can post)"
     print(f"profile   {env['_profile']}  ->  {SLUG}")
     print(f"repo      {REPO}")
     print("posting   " + ("OFF, rehearsal: it writes reports and drafts, and posts nothing"

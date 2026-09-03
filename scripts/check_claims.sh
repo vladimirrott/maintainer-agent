@@ -18,18 +18,39 @@ evals_actual=$(find "$root/evals/scenarios" -name '*.md' 2>/dev/null | wc -l | t
 backends_actual=$(find "$root/lib/backends" -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
 # Generated, then counted. Counting the spec would let a generator bug that
 # drops every absolute spelling pass unnoticed.
+#
+# Every profile generates, not only the one the README quotes: a profile whose
+# wall fails to render is a profile with no containment, and this check used to
+# name profiles/sysknife and look no further.
 gen_dir="$(mktemp -d)"; trap 'rm -rf "$gen_dir"' EXIT
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    mkdir -p "$gen_dir/$pn"; cp "$pdj" "$gen_dir/$pn/"
+    python3 "$root/scripts/render-settings.py" "$gen_dir/$pn" /home/claimcheck >/dev/null 2>&1 \
+        || bad "profile '$pn' does not generate a deny wall"
+    note "profile $pn: $(python3 -c "
+import json;print(len(json.load(open('$gen_dir/$pn/settings.json'))['permissions']['deny']))" 2>/dev/null) rules"
+done
 cp "$root/profiles/sysknife/deny.json" "$gen_dir/" 2>/dev/null
 python3 "$root/scripts/render-settings.py" "$gen_dir" /home/claimcheck >/dev/null 2>&1
+# The VERB count, not the rule count. The generator resolves each verb with
+# `which` and spells it from wherever the binary actually lives, so the number
+# of rules depends on what is installed on the machine generating them: this
+# check read 998 and then 1030 on the same tree, because installing the
+# maintainer commands added a directory to spell from. A published number has to
+# be derivable the same way twice, so the README pins the input a human writes
+# and the rule count is printed as an observation.
 deny_actual=$(python3 -c "
 import json
-print(len(json.load(open('$gen_dir/settings.json'))['permissions']['deny']))" 2>/dev/null)
-rehearsal_actual=$(python3 -c "
+d=json.load(open('$root/profiles/sysknife/deny.json'))
+print(len(d.get('spelled_everywhere',[])) + len(d.get('bare_exact',[])))" 2>/dev/null)
+[ -n "$deny_actual" ] || { bad "could not read the deny spec; refusing to pass over nothing"; exit 1; }
+rules_here=$(python3 -c "
 import json
-print(len(json.load(open('$gen_dir/settings-rehearsal.json'))['permissions']['deny']))" 2>/dev/null)
-[ -n "$deny_actual" ] || { bad "could not generate the deny wall; refusing to pass over nothing"; exit 1; }
+print(len(json.load(open('$gen_dir/settings.json'))['permissions']['deny']))" 2>/dev/null)
+note "those verbs generate $rules_here rules on this machine"
 
-note "measured: $tests_actual tests, $evals_actual eval scenarios, $backends_actual backends, $deny_actual deny rules, $rehearsal_actual in rehearsal"
+note "measured: $tests_actual tests, $evals_actual eval scenarios, $backends_actual backends, $deny_actual denied verbs"
 
 claim() {  # $1 = regex capturing a number in README, $2 = actual, $3 = label
     local claimed
@@ -46,7 +67,6 @@ claim() {  # $1 = regex capturing a number in README, $2 = actual, $3 = label
 }
 claim '[0-9]+ (offline )?tests'     "$tests_actual"    "tests"
 claim '[0-9]+ (adversarial )?eval'  "$evals_actual"    "eval scenarios"
-claim '[0-9]+ deny rules'           "$deny_actual"     "deny rules"
-claim '[0-9]+ in rehearsal'        "$rehearsal_actual" "rehearsal rules"
+claim '[0-9]+ denied verbs'         "$deny_actual"     "denied verbs"
 
 exit "$fail"

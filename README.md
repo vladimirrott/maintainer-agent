@@ -85,27 +85,46 @@ rule against a real git repository.
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries 132 deny rules covering `git push`, `git tag`,
+backend, `--settings` carries **32 denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
-`curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`, `~/.aws`, `~/.gnupg`,
-`~/.netrc` and credentials files. Rehearsal adds every GitHub write verb on top,
-216 in rehearsal. `tests/run-tests.sh` pins them and is mutation-proved: delete
-a rule and the suite goes red naming it.
+`gh repo delete`, `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
+`~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.
+Rehearsal adds every GitHub write verb on top. `tests/run-tests.sh` pins them
+for **every** profile and is mutation-proved: delete a verb from any profile's
+spec and the suite goes red naming the profile and the verb.
+
+The **rule** count is deliberately not published. Each verb is spelled from
+every directory it could be run from, including wherever `which` finds it on the
+machine generating the wall, so the total depends on what is installed there.
+It came out at 998 here, and at 1030 an hour later because installing the
+maintainer commands added a directory to spell from. `check_claims.sh` pins the
+verb count, which is what a human writes, and prints the rule count as an
+observation.
 
 The wall is **generated** from `profiles/<name>/deny.json`, one line per verb,
-spelled four ways on the way out. It was hand-written until the spelling
-measurement below forced 40 rules to 72 one line at a time, and the next verb
-anyone added would have had the same hole.
+spelled from every directory that verb could be run from. That includes the
+directory each tool is *actually installed in*, resolved at generation time.
+A run against this repository found why that matters: `cargo` lives in
+`~/.cargo/bin`, `npm` under `~/.local/lib/nodejs/…/bin`, and `maintainer-merge`
+in `~/.local/bin`. The wall listed `/bin`, `/usr/bin` and `/usr/local/bin`, so
+the two publishing verbs had no absolute rule at all, and the single rule
+protecting the merge gate's receipt was walked past by writing the full path.
 
-Three properties, all measured rather than assumed:
+Four properties, all measured rather than assumed:
 
 - **Deny does outrank `bypassPermissions`.** A differential run with one denied
   path and one control: the denied `touch` was blocked and the control
   succeeded, and the agent reported "First command hit permission restriction".
 - **The matcher keys on the command as written, so equivalent spellings evade
   it.** `/usr/bin/touch /tmp/mt-y` succeeded against a rule denying
-  `touch /tmp/mt-y`. Every blocked verb now comes out bare and under `/bin`,
-  `/usr/bin` and `/usr/local/bin`.
+  `touch /tmp/mt-y`. Every blocked verb now comes out from every static prefix,
+  from `~/`, `$HOME/` and expanded forms of the usual user-local directories,
+  and from wherever `shutil.which` finds it on the machine generating the wall.
+- **The receipt is unforgeable by full path, measured.** Asked to run
+  `/home/…/.local/bin/maintainer-merge receipt 1 abcdef1234 "probe"`, the agent
+  reported the command "never ran" and no receipt file appeared, while the
+  control command executed. Before the install directory was covered, that same
+  line wrote a receipt.
 - **A `Read` rule needs `~/` or `//`, and a single leading slash denies
   nothing.** Measured with a control: `Read(/tmp/x/f)` let the file through
   while `Read(//tmp/x/f)` and `Read(~/f)` blocked it. Claude Code resolves one
@@ -204,6 +223,10 @@ days" at all, and cron's day-of-month stepping fires on the 31st and again on
 the 1st. Before the gate existed, `install-launchd.sh` claimed the since-last-run
 state enforced the cadence and nothing did: a five-day audit would have run daily
 on macOS. Now every scheduler fires daily and the gate decides.
+
+On Apple Silicon this is the difference between a rehearsal and a post:
+Homebrew installs `gh` to `/opt/homebrew/bin`, which the three-prefix wall never
+spelled, so `POST=off` would not have blocked a single GitHub write verb there.
 
 | Platform | Scheduler | Notes |
 |---|---|---|
@@ -379,8 +402,8 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the eighteen defects that reached
-a working system, each with the measurement that found it and the guard that now stops it.
+[`docs/lessons.md`](docs/lessons.md) has the twenty entries that reached a
+working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
 ## Operational traps, each one paid for
@@ -407,12 +430,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 180 offline tests
+./tests/run-tests.sh        # 242 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-180 offline tests: no network, no GitHub, no model call. Every case tests a
+242 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

@@ -41,24 +41,35 @@ gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc
 gate_test "someone-else" 1
 gate_test ""             1
 
-echo "== the Claude deny wall still names the verbs that matter =="
+echo "== every profile's deny wall names the verbs that matter =="
 # Generated, then asserted. The tests read the artifact the agent is handed, not
 # the spec it came from: a generator bug that drops every absolute spelling is
 # invisible to a test that reads the input.
-wall_dir="$stub_dir/wall"; mkdir -p "$wall_dir"
-cp "$root/profiles/sysknife/deny.json" "$root/profiles/sysknife/opencode.json" "$wall_dir/"
-python3 "$root/scripts/render-settings.py" "$wall_dir" /home/fakeuser >/dev/null 2>&1 \
-    && ok "the deny wall generates from deny.json" || bad "render-settings.py failed"
+#
+# EVERY profile. This block pinned profiles/sysknife by name, so deleting a rule
+# from a second profile's deny.json left all three gates green and that
+# profile's containment was unguarded.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    wd="$stub_dir/wall-$pn"; mkdir -p "$wd"
+    cp "$pdj" "$wd/"
+    [ -f "$(dirname "$pdj")/opencode.json" ] && cp "$(dirname "$pdj")/opencode.json" "$wd/"
+    python3 "$root/scripts/render-settings.py" "$wd" /home/fakeuser >/dev/null 2>&1 \
+        && ok "$pn: the deny wall generates from deny.json" || bad "$pn: render-settings.py failed"
+    w="$wd/settings.json"
+    for verb in "git push" "gh pr merge" "cargo publish" "npm publish" "gh release" "git tag" \
+                "gh repo delete" "gh secret" "maintainer-merge receipt"; do
+        grep -qF "Bash($verb:*)" "$w" && ok "$pn: denies '$verb'" || bad "$pn: LOST '$verb'"
+        grep -qF "Bash(/usr/bin/$verb:*)" "$w" \
+            && ok "$pn: denies '/usr/bin/$verb'" || bad "$pn: no absolute spelling of '$verb'"
+    done
+    for path in ".ssh" ".config/gh/" ".aws" ".gnupg" ".netrc" ".credentials.json"; do
+        grep -qF "$path" "$w" && ok "$pn: protects $path" || bad "$pn: LOST $path"
+    done
+done
+# The primary profile's artifact stays available to the assertions below.
+wall_dir="$stub_dir/wall-sysknife"
 s="$wall_dir/settings.json"
-for verb in "git push" "gh pr merge" "cargo publish" "npm publish" "gh release" "git tag"; do
-    if grep -q "$verb" "$s"; then ok "deny list names '$verb'"; else bad "deny list LOST '$verb'"; fi
-done
-# Checked one path per assertion. A single alternation would let one lost rule
-# hide behind another that still matches, which is how a guard goes vacuous.
-for path in ".ssh" ".config/gh/" ".config/gh-personal/" ".aws" ".gnupg" ".netrc" ".credentials.json"; do
-    if grep -qF "$path" "$s"; then ok "deny list protects $path"; else bad "deny list LOST $path"; fi
-done
-
 echo "== the Codex backend documents its weaker containment =="
 # Codex has no per-command deny list. If someone swaps the default backend
 # without reading that, publishing verbs stop being blocked. Pin the warning.
@@ -72,6 +83,31 @@ if grep -q 'BACKEND="\${MAINTAINER_BACKEND:-claude}"' "$root/profiles/sysknife/p
 else
     bad "default backend is no longer claude"
 fi
+
+echo "== the wall covers the directories the tools are really installed in =="
+# The wall listed three FHS prefixes. On this machine `cargo` is in ~/.cargo/bin,
+# `npm` under ~/.local/lib/nodejs/.../bin and `maintainer-merge` in ~/.local/bin,
+# so the publishing verbs had no absolute rule and the single rule protecting
+# the merge gate's receipt was bypassable by writing the full path.
+real_wall="$stub_dir/wall-real"; mkdir -p "$real_wall"
+cp "$root/profiles/sysknife/deny.json" "$real_wall/"
+python3 "$root/scripts/render-settings.py" "$real_wall" "$HOME" >/dev/null 2>&1
+python3 - "$real_wall/settings.json" <<'PYEOF' && ok "every verb is denied at its real install directory" || bad "a verb has no rule where its binary actually lives"
+import json, os, shutil, sys
+deny = set(json.load(open(sys.argv[1]))["permissions"]["deny"])
+missing = []
+for verb in ("cargo publish", "npm publish", "git push", "gh pr merge",
+             "gh repo delete", "maintainer-merge receipt"):
+    real = shutil.which(verb.split()[0])
+    if not real:
+        continue
+    rule = f"Bash({os.path.dirname(real)}/{verb}:*)"
+    if rule not in deny:
+        missing.append(rule)
+for m in missing:
+    print("  missing:", m)
+sys.exit(1 if missing else 0)
+PYEOF
 
 echo "== the generated wall is valid, absolute, and home-relative where it must be =="
 if python3 -c "import json;json.load(open('$s'))" 2>/dev/null; then ok "generated deny wall is valid JSON"; else bad "generated deny wall is not valid JSON"; fi

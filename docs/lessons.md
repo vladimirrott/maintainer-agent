@@ -280,3 +280,84 @@ adopter asks whether what it was written to do is enough.
 taking precedence, paths under `$HOME` are written relative, the prompt
 declaration check runs for every profile rather than the first one, and a test
 asserts the closing instructions name a command that exists.
+
+## 19. Eight defects the agent found by reviewing its own repository
+
+Issue #8 said pointing the agent at this repository was the only honest test of
+the onboarding. One rehearsal run, 487 tool calls, `POST=off` so it published
+nothing. Every finding below was reproduced by hand before it was believed.
+
+**The wall enumerated three directories and missed the ones that mattered.**
+`/bin`, `/usr/bin`, `/usr/local/bin`. On this machine `cargo` is in
+`~/.cargo/bin`, `npm` under `~/.local/lib/nodejs/…/bin`, `maintainer-merge` in
+`~/.local/bin`. So `cargo publish` and `npm publish` had no absolute-path rule,
+and `maintainer-merge receipt` was protected by exactly one bare-name rule
+guarding a binary that lives where the wall does not look. Writing the full path
+forged a receipt, which is the one thing the merge gate exists to prevent.
+Measured after the fix: the agent reports the command "never ran" and no receipt
+file appears. On Apple Silicon the same gap would have made `POST=off` post,
+because Homebrew puts `gh` in `/opt/homebrew/bin`.
+
+**The `bare` list had no stated criterion**, so verbs were sorted into it by
+guesswork and got one spelling each. `gh repo delete`, `gh repo edit`,
+`gh secret` and `gh pr create` were all in it, and the preamble promises the
+agent cannot delete anything, change repository settings, or open a pull request
+elsewhere. There is one list now.
+
+**A profile name reached `bash -c` unquoted.** `MAINTAINER_PROFILE` set to
+`pwn"; touch /tmp/INJECTED; :"`, with a matching directory, ran the `touch`.
+`path.exists()` guarded nothing, because whoever sets the variable can create
+the directory. Arbitrary shell inside a subprocess, where no deny rule is
+evaluated.
+
+**`POST=off` never reached the tools.** `run.sh` set `POST` and did not export
+it, and `maintainer-repo prune` pushes branch deletions from inside a script,
+which no Bash deny rule can see. A rehearsal on a repository with merged
+branches would have deleted them remotely while reporting it reached nobody.
+
+**The eval gate was red for every profile except the first.** The corpus was
+already per-profile; the scenario-to-rule map was global, so `magent` inherited
+an assertion about sysknife's TWiR label. The hook never saw it because git runs
+hooks with the ambient environment and the hook took the default profile. The
+map now lives in `profiles/<name>/evals.json`, and a scenario with no entry
+fails: retiring one takes an explicit `"n/a"` with a reason.
+
+**A second profile's containment was unguarded.** Deleting a rule from
+`profiles/magent/deny.json` left all three gates green, because the suite named
+`profiles/sysknife` in seventeen places.
+
+**The helper named one repository in output every profile reads.** The run
+header said `sysknife-maint`, the closing line named `sysknife-maint finish`
+after that command was renamed away, and a profile with no `SKILL_<task>` was
+told to load `sysknife-review`, a skill written for another project's gates.
+Inventing a skill name is worse than admitting there is none.
+
+**`finish` threw away the report that found all of this.** The check for the
+placeholder sentinel searched the whole file, and the report quoted the sentinel
+while writing up a finding about it. A finished 262-line report was rejected as
+"no report", the baseline never promoted, and a critical alert fired. Same shape
+as §5, in the guard that decides whether a run is auditable. It anchors to line
+one now, which is where `start` writes it.
+
+The through-line: **code written when there was one profile generalised its
+corpus without generalising its assertions**, and a wall written from an FHS
+mental model never asked where the binaries were. Neither is visible to a suite
+that passes.
+
+## 20. A published number must be derivable the same way twice
+
+Making the deny wall adapt to the machine fixed a real hole and broke a claim.
+The generator resolves each verb with `which`, so the rule total depends on what
+is installed where it runs. `check_claims.sh` read **998**, then **1030** on the
+same tree an hour later, because installing the maintainer commands added a
+directory to spell verbs from. The commit was refused by the gate that holds the
+README to the tree, which is the gate working.
+
+The fix is not a looser check. The README now pins the **verb** count, which is
+what a person writes into `deny.json`, and prints the rule count as an
+observation of this machine. A test separately asserts that every verb is denied
+at the directory `which` actually finds it in, which is the property that
+matters and does not move.
+
+**Guard:** claim the input, observe the output, and test the invariant that
+connects them.

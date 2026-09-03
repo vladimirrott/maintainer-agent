@@ -116,6 +116,11 @@ alert() {
 # rather than retrying around a refusal it does not expect. Both, because the
 # prompt alone is a request and the wall alone produces a confused run.
 POST="${POST:-on}"
+# Exported, because the wall governs what the AGENT types and not what the
+# tools it may call then do. `maintainer-repo prune` pushes branch deletions
+# from inside a script, which no Bash deny rule can see, so a rehearsal would
+# have deleted remote branches while reporting that it reached nobody.
+export MAINTAINER_POST="$POST"
 if [ "$POST" = off ]; then
     if [ -f "$PROFILE_DIR/settings-rehearsal.json" ]; then
         export MAINTAINER_SETTINGS="$PROFILE_DIR/settings-rehearsal.json"

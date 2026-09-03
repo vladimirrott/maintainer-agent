@@ -5,8 +5,11 @@ set -uo pipefail
 root="$(git rev-parse --show-toplevel)"
 fail=0
 step() {
-    printf '[pre-commit] %s\n' "$1"; shift
-    if ! "$@"; then printf '[pre-commit] FAILED: %s\n' "$1" >&2; fail=1; fi
+    # Keep the label. It used to `shift` first and then print "$1" on failure,
+    # so a failing gate announced `FAILED: bash` instead of naming itself.
+    local label="$1"; shift
+    printf '[pre-commit] %s\n' "$label"
+    if ! "$@"; then printf '[pre-commit] FAILED: %s\n' "$label" >&2; fail=1; fi
 }
 # Check by shebang, not by path. bin/maintainer is Python, and globbing bin/*
 # into `bash -n` reported a syntax error in a perfectly good file.
@@ -22,6 +25,15 @@ step "syntax: every shell script"  bash -c '
     done
     exit $rc'
 step "offline test suite"          bash "$root/tests/run-tests.sh"
-step "eval rules still present"    bash "$root/evals/run-evals.sh"
+# Every profile, with the ambient MAINTAINER_PROFILE cleared. git runs hooks
+# with the caller's environment, and new-profile.sh tells the adopter to export
+# that variable, so the hook once validated whichever profile happened to be
+# exported and passed while the gate was red for another one.
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    [ "$pn" = "_template" ] && continue
+    step "eval rules still present ($pn)" \
+        env -u MAINTAINER_PROFILE MAINTAINER_PROFILE="$pn" bash "$root/evals/run-evals.sh"
+done
 step "README numbers are derived"  bash "$root/scripts/check_claims.sh"
 exit "$fail"
