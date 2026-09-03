@@ -254,12 +254,12 @@ aborted run cannot make the next one skip unreviewed changes.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 75 offline tests
+./tests/run-tests.sh        # 82 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-75 offline tests: no network, no GitHub, no model call. Every case tests a
+82 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing one of the 72 deny rules turns it red naming that
 rule, and planting a home path turns the leak check red.

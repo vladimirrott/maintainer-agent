@@ -314,5 +314,27 @@ for verb in "git push" "git tag" "gh pr merge" "cargo publish" "npm publish"; do
 done
 grep -q 'Bash(git -C:\*)' "$s" && ok "git -C (flags before the verb) is denied" || bad "git -C evades the push/tag rules"
 
+echo "== install is idempotent (a second run must replace, not accumulate) =="
+ih="$stub_dir/inst"; mkdir -p "$ih"
+HOME="$ih" "$root/install.sh" >/dev/null 2>&1
+HOME="$ih" "$root/install.sh" >/dev/null 2>&1
+nested=$(find "$ih/.local/share/maintainer" -type d \( -name profiles -o -name backends \) 2>/dev/null | wc -l)
+if [ "$nested" = "2" ]; then ok "two installs leave one profiles/ and one backends/"; else bad "two installs left $nested such dirs (cp -r nested them)"; fi
+want=$(python3 -c "import json;print(len(json.load(open('$root/profiles/sysknife/settings.json.template'))['permissions']['deny']))")
+got=$(python3 -c "import json;print(len(json.load(open('$ih/.local/share/maintainer/profiles/sysknife/settings.json'))['permissions']['deny']))" 2>/dev/null)
+if [ "$got" = "$want" ]; then ok "reinstall refreshes the deny wall ($got rules)"; else bad "deployed deny wall has $got rules, the repo has $want"; fi
+if [ -e "$ih/.local/share/maintainer/profiles/sysknife/settings.json.template" ]; then bad "template left in the deployed tree"; else ok "template consumed on reinstall"; fi
+# Every deployed entry point must be executable. A clean install once left
+# run-instance.sh unexecutable because chmod ran before the platform dispatch
+# that copies it, and systemd would have failed with a permission error.
+for f in run.sh run-instance.sh; do
+    d="$ih/.local/share/maintainer/$f"
+    if [ ! -e "$d" ]; then bad "$f was not deployed"; elif [ -x "$d" ]; then ok "$f deployed executable"; else bad "$f deployed NOT executable"; fi
+done
+for f in maintainer maintainer-merge; do
+    d="$ih/.local/bin/$f"
+    if [ -x "$d" ]; then ok "$f deployed executable"; else bad "$f missing or not executable"; fi
+done
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -28,6 +28,12 @@ say "deploying from $root"
 run mkdir -p "$share" "$bin" "$units"
 run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
+# `cp -r src dst` copies src INTO dst when dst already exists, so a second
+# install nests profiles/profiles and backends/backends. That happened, and the
+# render step below then wrote into the nested copy while the live deny wall
+# stayed stale at its previous size. Remove the destination first so a re-install
+# is a replacement rather than an accumulation.
+run rm -rf "$share/backends" "$share/profiles"
 run cp -r "$root/lib/backends" "$share/backends"
 run cp -r "$root/profiles" "$share/profiles"
 # Render the deny wall. Its paths must be absolute at runtime, but the repo
@@ -47,7 +53,7 @@ for tpl in "$share"/profiles/*/settings.json.template; do
 done
 run cp "$root/bin/maintainer" "$bin/maintainer"
 run cp "$root/bin/maintainer-merge" "$bin/maintainer-merge"
-run chmod +x "$share/run.sh" "$share/run-instance.sh" "$bin/maintainer" "$bin/maintainer-merge"
+run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.
@@ -67,6 +73,7 @@ case "$(uname -s)" in
         run cp "$u" "$units/$(basename "$u")"
     done
     run cp "$root/platform/linux/run-instance.sh" "$share/run-instance.sh"
+    run chmod +x "$share/run-instance.sh"
     say "platform: Linux (systemd user units)"
     ;;
   Darwin)
