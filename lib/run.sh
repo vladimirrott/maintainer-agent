@@ -90,9 +90,16 @@ min_gate() {
 }
 [ "$show" = 1 ] || min_gate
 
-logs="$STATE_DIR/logs"; mkdir -p "$logs"
 stamp="$(date +%Y-%m-%dT%H-%M)"
-log="$logs/$stamp-$task.log"
+if [ "$show" = 1 ]; then
+    # A preview leaves no trace. Without this the suite's --show-prompt calls
+    # opened a log file per task in the live state directory, and 22 empty logs
+    # landed in the real audit trail during a single test run.
+    log=/dev/null
+else
+    logs="$STATE_DIR/logs"; mkdir -p "$logs"
+    log="$logs/$stamp-$task.log"
+fi
 export PATH="$HOME/.local/bin:$PATH"
 
 alert() {

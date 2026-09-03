@@ -12,6 +12,10 @@ check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2'
 
 # A fake PATH: gh, claude, codex and notify-send never reach the real ones.
 stub_dir="$(mktemp -d)"
+# And a scratch state directory, so a test run cannot append to the real audit
+# trail. It did: 22 empty logs from --show-prompt calls landed in the live one.
+export MAINTAINER_STATE_DIR="$stub_dir/state-root"
+mkdir -p "$MAINTAINER_STATE_DIR/state"
 trap 'rm -rf "$stub_dir"' EXIT
 make_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$stub_dir/$1"; chmod +x "$stub_dir/$1"; }
 make_stub notify-send 'exit 0'
@@ -600,6 +604,13 @@ lock_after=$(ls "$HOME/.local/state/sysknife-maint/state" 2>/dev/null | wc -l)
 check "--show-prompt writes no state" "$lock_after" "$lock_before"
 PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife issues 2>/dev/null | grep -q 'preview only' \
     && ok "--show-prompt marks its context as a preview" || bad "--show-prompt passes off a fake context as real"
+# A preview must leave no trace at all. It opened a log file per call before this
+# was asserted, and 22 empty logs from one test run landed in the live trail.
+fresh="$stub_dir/fresh-state"; rm -rf "$fresh"; mkdir -p "$fresh"
+MAINTAINER_STATE_DIR="$fresh" PATH="$stub_dir:$PATH" \
+    bash "$root/lib/run.sh" --show-prompt sysknife review >/dev/null 2>&1
+left=$(find "$fresh" -type f 2>/dev/null | wc -l)
+check "--show-prompt writes no log into the audit trail" "$left" "0"
 
 echo "== uninstall removes the tool and keeps the audit trail =="
 uh="$stub_dir/unin"; mkdir -p "$uh"

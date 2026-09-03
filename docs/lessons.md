@@ -215,3 +215,19 @@ audit would have run every single day, and the README repeated the claim.
 platform, with the skip printed and the override named. Every scheduler now
 fires daily and the gate decides, which also removes cron's day-of-month
 stepping firing on the 31st and again on the 1st.
+
+## 16. A preview is not free if it opens a file
+
+`--show-prompt` was added so a maintainer can read the exact prompt before
+trusting the agent. It skips the identity gate, the lock and the refresh, and it
+writes no report. It still opened a log file, because the log path was resolved
+before the branch that decides whether this is a real run.
+
+The suite calls it once per task in several places. One test run left **22 empty
+logs in the live audit trail**, dated as if runs had happened. An audit trail
+that records runs which did not happen is as wrong as one that misses runs which
+did.
+
+**Guard:** a preview logs to `/dev/null`, the suite exports its own
+`MAINTAINER_STATE_DIR`, and a test runs `--show-prompt` against an empty state
+directory and asserts nothing was created. Put the log back and it goes red.
