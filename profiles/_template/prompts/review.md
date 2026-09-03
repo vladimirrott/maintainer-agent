@@ -3,6 +3,17 @@
 Read the context block at the end first. It lists what moved since your last
 review run. A PR whose head has not moved since you reviewed it gets nothing.
 
+Two lines there answer different questions, and only one of them is yours.
+`main moved <old> -> <new> ... commit(s) YOU HAVE NOT REVIEWED` is the range
+this task has not seen, and it is the one to use. The `main <before> -> <after>`
+line reports what this run's own fetch pulled in, and says `(already current)`
+when a commit was made on the machine rather than fetched, which is not the same
+as "nothing to review".
+
+On the very first run there is no previous baseline and the block says so.
+Review the last few commits instead, and say in the report that this run set the
+baseline.
+
 ## Pin the head before you read
 
 ```sh

@@ -721,6 +721,20 @@ printf '%s' "$nextsteps" | grep -q 'MAINTAINER_PROFILE' && ok "the next steps sa
 ( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null ) | grep -q 'acme/widget' \
     && ok "a scaffolded profile assembles a prompt naming its own repository" \
     || bad "a scaffolded profile cannot assemble a prompt"
+# Two carve-outs an adopter had to discover by hitting them. Both were written
+# for profiles/magent first and stayed there, so the next adopter would have hit
+# them again: the screen rule reading as a ban on running your own gates, and a
+# first run having no previous baseline to diff against.
+scaffolded=$( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null )
+printf '%s' "$scaffolded" | grep -q 'about code arriving' \
+    && ok "the template says whose code the agent may run" \
+    || bad "the template leaves the screen rule reading as a ban on its own gates"
+printf '%s' "$scaffolded" | grep -q 'YOU HAVE NOT REVIEWED' \
+    && ok "the template points at the unreviewed range, not the fetch delta" \
+    || bad "the template still points the agent at the fetch delta"
+printf '%s' "$scaffolded" | grep -q 'first run there is no previous baseline' \
+    && ok "the template handles a first run with no baseline" \
+    || bad "a scaffolded first run has no instruction for an empty baseline"
 # And no code file may carry a repository's name for it to work.
 if grep -q 'MAINTAINER_TASKS' "$root/bin/maintainer" && grep -q 'MAINTAINER_TASKS' "$root/lib/run.sh"; then
     ok "the task list comes from the profile, not from bin/maintainer"
