@@ -231,3 +231,24 @@ did.
 **Guard:** a preview logs to `/dev/null`, the suite exports its own
 `MAINTAINER_STATE_DIR`, and a test runs `--show-prompt` against an empty state
 directory and asserts nothing was created. Put the log back and it goes red.
+
+## 17. A graceful fallback can hide the thing it falls back from
+
+The Claude backend runs `--output-format stream-json` through
+`scripts/transcript.py`, and falls back to plain text when the filter is
+missing, so a parser problem can never cost a run its output. Sound reasoning.
+
+`install.sh` copied `render-settings.py` by name and never copied
+`transcript.py`. The deployed agent therefore took the fallback on every run.
+Runs kept succeeding, reports kept appearing, and the `.commands` file that
+lesson 12 exists to produce was never written once. The only visible symptom was
+a file that was not there.
+
+Found by running `backend_run` directly against a two-line prompt rather than by
+reading the code, which is lesson 1 in a new costume: the file existed in the
+repository, the tests read the repository, and the deployment had neither.
+
+**Guard:** `install.sh` deploys `scripts/*.py` as a glob rather than by name, a
+test asserts every shipped script reaches the deployed tree, and the fallback
+now writes a line into the log saying the transcript is unavailable. A fallback
+that stays quiet is a fallback nobody will notice taking.

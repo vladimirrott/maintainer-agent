@@ -43,6 +43,10 @@ backend_run() {
             < "$prompt_file" 2>>"$log" \
             | python3 "$filter" "$log" "${log%.log}.commands"
     else
+        # Say so. A silent fallback is how the transcript went missing for a
+        # whole deployment without anyone noticing.
+        printf 'transcript.py not found at %s; this run records prose only\n' \
+            "$filter" >>"$log"
         claude -p \
             --settings "$settings" \
             --permission-mode bypassPermissions \

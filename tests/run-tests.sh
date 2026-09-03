@@ -384,6 +384,14 @@ for f in maintainer maintainer-merge; do
     d="$ih/.local/bin/$f"
     if [ -x "$d" ]; then ok "$f deployed executable"; else bad "$f missing or not executable"; fi
 done
+# Every script the repository ships must reach the deployment. transcript.py did
+# not, and the backend's fallback hid it: runs kept working and stopped
+# recording which commands the agent ran.
+for f in "$root"/scripts/*.py; do
+    n="$(basename "$f")"
+    [ -f "$ih/.local/share/maintainer/scripts/$n" ] && ok "scripts/$n deployed" \
+        || bad "scripts/$n was never deployed"
+done
 
 echo "== opencode: default-deny closes the spelling hole a denylist cannot =="
 oc="$root/profiles/sysknife/opencode.json"

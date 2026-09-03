@@ -72,7 +72,12 @@ run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
 run mkdir -p "$share/scripts"
-run cp "$root/scripts/render-settings.py" "$share/scripts/render-settings.py"
+# Every script, not a list. render-settings.py was deployed and transcript.py
+# was not, and the backend's fallback made the missing one invisible: runs kept
+# working and silently stopped recording what the agent executed.
+for f in "$root"/scripts/*.py; do
+    run cp "$f" "$share/scripts/$(basename "$f")"
+done
 # `cp -r src dst` copies src INTO dst when dst already exists, so a second
 # install nests profiles/profiles and backends/backends. That happened, and the
 # render step below then wrote into the nested copy while the live deny wall
