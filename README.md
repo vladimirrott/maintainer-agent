@@ -127,22 +127,32 @@ worse than none: it reads as a guarantee.
 Three, and they are **not** interchangeable. The difference is containment, and
 it is the reason there is a default.
 
-| | Claude Code | Codex | Cursor |
-|---|---|---|---|
-| Verified against | 2.1.257 | codex-cli 0.149.1 | documented CLI |
-| Invocation | `claude -p --settings … --permission-mode bypassPermissions` | `codex exec --sandbox workspace-write -C …` | `cursor-agent -p --output-format text` |
-| Per-command deny list | **yes**, outranks bypass | no | no |
-| Write confinement | rules-based, filesystem-wide | sandbox mode, working tree | **none in print mode** |
-| May run posting tasks | yes | read-and-report only | **refused in code** |
+| | opencode | Claude Code | Codex | Cursor |
+|---|---|---|---|---|
+| Invocation | `opencode run --model groq/… --auto` | `claude -p --settings … --permission-mode bypassPermissions` | `codex exec --sandbox workspace-write -C …` | `cursor-agent -p --output-format text` |
+| Permission model | **default-deny + allowlist** | denylist over bypass | sandbox mode | none in print mode |
+| Survives an unfamiliar spelling | **yes, structurally** | **no** (measured) | n/a | n/a |
+| May run posting tasks | yes | yes | read-and-report only | **refused in code** |
 
-**Claude is the default and the only backend trusted with a task that can post,
-publish or merge.** Codex expresses a sandbox *mode* rather than a rule set, so
-it cannot say "everything except `git push`, `gh pr merge` and `cargo publish`".
-Cursor is weaker still: its own documentation states that in non-interactive
-mode the agent has full write access, and `--force` turns proposals into writes,
-so this backend never passes `--force` and declares `backend_allowed_tasks`.
-`run.sh` reads that declaration and refuses a task the backend is not fit for,
-exiting 78. A comment would have drifted; a refusal in code does not.
+**opencode has the strongest containment, and the reason is structural rather
+than diligent.** Its permission rules are patterns evaluated last-match-wins, so
+the config opens with `"*": "deny"` and allows specific commands. An unfamiliar
+spelling is denied *because* it is unfamiliar. That closes the hole measured on
+the Claude backend, where `/usr/bin/git push` evaded a rule written for
+`git push`. Wired here to Groq (`openai/gpt-oss-120b` by default), so it also
+runs without an Anthropic subscription.
+
+One trap found while writing that config, because default-deny is not automatic
+safety: a broad allow re-opens the hole. `"cargo *": "allow"` permitted
+`cargo publish`. The publishing verbs are denied again at the **end** of the map,
+where last-match-wins puts them on top, and a test decides all fourteen probe
+commands to prove it.
+
+Claude remains the default because it is the most capable at the work. Codex
+expresses a sandbox *mode* rather than a rule set. Cursor is weakest: its own
+documentation states the print-mode agent has full write access, so it never
+gets `--force`, it declares `backend_allowed_tasks`, and `run.sh` exits 78
+rather than hand it a task that can post or merge.
 
 ## Platforms
 
@@ -155,6 +165,7 @@ scheduling forks.
 | Linux | systemd user timers | `Persistent=true` catches up a missed run |
 | macOS | launchd agents | **no** `Persistent` equivalent; a missed run does not catch up, and cadence longer than a day is enforced by the since-last-run state rather than by the schedule |
 | Windows | Task Scheduler via `Install-Maintainer.ps1` | `-StartWhenAvailable` is the closest thing to `Persistent=true`; bash comes from Git Bash or WSL and the script locates it |
+| **Everything else** | `platform/posix/install-cron.sh` | FreeBSD, OpenBSD, NetBSD, Alpine and other musl or systemd-less Linux, Termux, containers. **No catch-up for a missed run**, and cron gives a job almost no environment, so the entries pin `PATH` |
 
 ```sh
 ./install.sh --timers                       # Linux
@@ -198,10 +209,20 @@ still writes well.
 ## Install
 
 ```sh
-./install.sh              # deploy files, leave timers alone
-./install.sh --timers     # deploy and enable
-./install.sh --dry-run    # print what would change
+./install.sh              # deploy files, leave the scheduler alone
+maintainer-doctor         # check it by running it
+./install.sh --timers     # enable (Linux); see the table above for other platforms
 ```
+
+**`maintainer-doctor` is the command to reach for when anything is wrong.** It
+executes each entry point rather than checking that files exist, because every
+deployment bug this project has hit survived a file-existence check: a profile
+path that resolved in the repository and not once installed, a `chmod` that ran
+before the file was copied, and a `cp -r` that nested directories so the live
+deny wall stayed frozen at 40 rules while the repository had 72. It prints the
+fix, not the symptom.
+
+`./install.sh --dry-run` prints what would change and touches nothing.
 
 The installer writes a timer stamp before enabling. A fresh `Persistent=true`
 timer treats "never run" as a missed slot and fires a catch-up run the instant
@@ -230,6 +251,12 @@ Baselines promote only on success. `start` writes `pending-<task>.json` and
 `finish` promotes it to `last-<task>.json` after the report checks pass, so an
 aborted run cannot make the next one skip unreviewed changes.
 
+## Lessons
+
+[`docs/lessons.md`](docs/lessons.md) has the ten defects that reached a working
+system, each with the measurement that found it and the guard that now stops it.
+The short version follows.
+
 ## Operational traps, each one paid for
 
 - **Never edit `run.sh` while a run is in flight.** Bash reads a script by byte
@@ -254,12 +281,12 @@ aborted run cannot make the next one skip unreviewed changes.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 82 offline tests
+./tests/run-tests.sh        # 93 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-82 offline tests: no network, no GitHub, no model call. Every case tests a
+93 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing one of the 72 deny rules turns it red naming that
 rule, and planting a home path turns the leak check red.

@@ -53,7 +53,8 @@ for tpl in "$share"/profiles/*/settings.json.template; do
 done
 run cp "$root/bin/maintainer" "$bin/maintainer"
 run cp "$root/bin/maintainer-merge" "$bin/maintainer-merge"
-run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge"
+run cp "$root/bin/maintainer-doctor" "$bin/maintainer-doctor"
+run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.
@@ -110,3 +111,12 @@ else
     say "timers not touched (pass --timers to enable them)"
 fi
 say "done"
+say ""
+say "next: maintainer-doctor        # checks the install by running it, not by listing files"
+if [ "$timers" = 0 ]; then
+    case "$(uname -s)" in
+      Linux)  say "      ./install.sh --timers     # enable the systemd timers" ;;
+      Darwin) say "      platform/macos/install-launchd.sh" ;;
+      *)      say "      platform/posix/install-cron.sh   # works anywhere with crontab" ;;
+    esac
+fi

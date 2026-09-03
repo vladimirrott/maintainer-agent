@@ -1,0 +1,143 @@
+#!/usr/bin/env bash
+# Check that the maintainer is actually able to run, by running things.
+#
+#   maintainer-doctor            check everything
+#   maintainer-doctor --quick    skip the container probe
+#
+# Every check here exists because something passed a file-existence test and
+# then failed in production. It executes entry points rather than stat-ing them.
+# See docs/lessons.md.
+set -uo pipefail
+
+share="$HOME/.local/share/maintainer"
+bin="$HOME/.local/bin"
+profile="${MAINTAINER_PROFILE:-sysknife}"
+quick=0; [ "${1:-}" = "--quick" ] && quick=1
+ok=0; warn=0; err=0
+
+green()  { printf '  \033[32mok\033[0m    %s\n' "$1"; ok=$((ok+1)); }
+yellow() { printf '  \033[33mwarn\033[0m  %s\n' "$1"; [ -n "${2:-}" ] && printf '        fix: %s\n' "$2"; warn=$((warn+1)); }
+red()    { printf '  \033[31mFAIL\033[0m  %s\n' "$1"; [ -n "${2:-}" ] && printf '        fix: %s\n' "$2"; err=$((err+1)); }
+head_()  { printf '\n\033[1m%s\033[0m\n' "$1"; }
+
+head_ "Deployment"
+if [ -d "$share" ]; then green "installed at $share"; else
+    red "not installed" "run ./install.sh from the repository"; fi
+# Lesson 2: cp -r nests on reinstall, and the nested copy is the one that gets
+# rendered while the live one goes stale.
+nested=$(find "$share" -type d \( -name profiles -o -name backends \) 2>/dev/null | wc -l)
+if [ "$nested" -le 2 ]; then green "no nested profiles/ or backends/"; else
+    red "$nested profiles/backends dirs; a reinstall nested them" \
+        "rm -rf $share && ./install.sh"; fi
+# Lesson 1: executability, not existence.
+for f in run.sh run-instance.sh; do
+    if [ ! -e "$share/$f" ]; then
+        [ "$f" = run-instance.sh ] && [ "$(uname -s)" != Linux ] \
+            && green "$f not needed on $(uname -s)" \
+            || red "$f missing" "./install.sh"
+    elif [ -x "$share/$f" ]; then green "$f is executable"
+    else red "$f is NOT executable" "chmod +x $share/$f, then fix install.sh"; fi
+done
+for f in maintainer maintainer-merge; do
+    if [ -x "$bin/$f" ]; then green "$f on PATH and executable"; else
+        red "$bin/$f missing or not executable" "./install.sh"; fi
+done
+
+head_ "Profile and containment"
+pdir="$share/profiles/$profile"
+if [ -f "$pdir/profile.env" ]; then green "profile '$profile' present"; else
+    red "no profile '$profile'" "check profiles/ in the repository"; fi
+if [ -f "$pdir/settings.json.template" ]; then
+    red "the deny-wall template was never rendered" "./install.sh renders it"
+elif [ -f "$pdir/settings.json" ]; then
+    n=$(python3 -c "import json;print(len(json.load(open('$pdir/settings.json'))['permissions']['deny']))" 2>/dev/null)
+    if [ -z "$n" ]; then red "deny wall is not valid JSON" "reinstall"
+    elif [ "$n" -lt 60 ]; then
+        red "deny wall has only $n rules; it is stale" "rm -rf $share && ./install.sh"
+    else green "deny wall rendered, $n rules"; fi
+    grep -q '__HOME__' "$pdir/settings.json" && red "unrendered __HOME__ left in the deny wall" "reinstall"
+else red "no deny wall at all" "./install.sh"; fi
+
+head_ "Backend"
+# shellcheck disable=SC1091
+[ -f "$pdir/profile.env" ] && . "$pdir/profile.env"
+b="${BACKEND:-claude}"
+if [ -f "$share/backends/$b.sh" ]; then green "backend '$b' installed"; else
+    red "backend '$b' not installed" "./install.sh"; fi
+case "$b" in
+  claude) command -v claude >/dev/null && green "claude on PATH ($(claude --version 2>/dev/null | head -1))" \
+            || red "claude not on PATH" "install Claude Code" ;;
+  codex)  command -v codex  >/dev/null && green "codex on PATH"  || red "codex not on PATH" "npm i -g @openai/codex" ;;
+  cursor) command -v cursor-agent >/dev/null && green "cursor-agent on PATH" || red "cursor-agent not on PATH" "install the Cursor CLI" ;;
+  opencode) command -v opencode >/dev/null && green "opencode on PATH" || red "opencode not on PATH" "curl -fsSL https://opencode.ai/install | bash" ;;
+esac
+
+head_ "GitHub identity"
+# Lesson 9: the active account changes under you, and a write under the wrong
+# one is worse than a refusal.
+if command -v gh >/dev/null; then
+    who=$(gh api user --jq .login 2>/dev/null)
+    want="${GH_ACCOUNT:-vladimirrott}"
+    if [ "$who" = "$want" ]; then green "gh is $who"
+    elif [ -z "$who" ]; then red "gh is not authenticated" "gh auth login"
+    else yellow "gh is '$who', not '$want'" "run.sh switches automatically, but check ~/.config/gh/hosts.yml"; fi
+else red "gh not installed" "install the GitHub CLI"; fi
+
+head_ "Repository"
+r="${REPO_PATH:-$HOME/Desktop/lacs}"
+if [ -d "$r/.git" ]; then
+    green "repo at $r"
+    dirty=$(git -C "$r" status --porcelain 2>/dev/null | wc -l)
+    [ "$dirty" = 0 ] && green "working tree clean" || yellow "$dirty uncommitted change(s); a run will refuse to start" "commit or stash"
+    ahead=$(git -C "$r" rev-list --count origin/main..HEAD 2>/dev/null || echo 0)
+    [ "$ahead" = 0 ] && green "not ahead of origin/main" || yellow "$ahead commit(s) ahead of origin/main" "push or reset"
+else red "no repository at $r" "clone it or set REPO_PATH in profile.env"; fi
+
+head_ "Scheduler"
+case "$(uname -s)" in
+  Linux)
+    if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
+        t=$(systemctl --user list-timers 'maintainer@*' --all --no-pager 2>/dev/null | grep -c 'maintainer@')
+        [ "$t" -gt 0 ] && green "$t systemd timer(s) registered" || yellow "no timers registered" "./install.sh --timers"
+        [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ] \
+            && green "lingering on: timers run without a login session" \
+            || yellow "lingering off: timers stop when you log out" "sudo loginctl enable-linger $USER"
+        # Lesson 8: a timer about to fire immediately is usually a catch-up.
+        soon=$(systemctl --user list-timers 'maintainer@*' --all --no-pager 2>/dev/null | grep -cE '\b[0-9]?[0-9]s left|left *$' || true)
+        systemctl --user list-timers 'maintainer@*' --all --no-pager 2>/dev/null | grep -qE '^\S+ +[0-9]+s ' \
+            && yellow "a timer fires within seconds; Persistent=true may be catching up" "expected after enabling; otherwise check the stamp files"
+    else yellow "no systemd user session" "use platform/posix/install-cron.sh"; fi ;;
+  Darwin)
+    n=$(launchctl list 2>/dev/null | grep -c 'dev\.maintainer' || true)
+    [ "${n:-0}" -gt 0 ] && green "$n launchd agent(s) loaded" || yellow "no launchd agents" "platform/macos/install-launchd.sh"
+    yellow "launchd has no Persistent=true" "a run missed while asleep does not catch up" ;;
+  *) yellow "$(uname -s): no native scheduler wired" "platform/posix/install-cron.sh" ;;
+esac
+
+head_ "Container verification"
+if [ "$quick" = 1 ]; then yellow "skipped (--quick)" ""
+elif ! command -v podman >/dev/null; then
+    yellow "podman not installed; the merge gate cannot observe a mutation" "install podman"
+else
+    # Lesson 7: what matters is whether it works COLD, because that is the state
+    # a timer finds after a reboot.
+    podman system migrate >/dev/null 2>&1
+    if podman run --rm --network=none docker.io/library/busybox:latest true >/dev/null 2>&1; then
+        green "podman runs from cold"
+    else red "podman cannot start a container from cold" "check newuidmap and /etc/subuid"; fi
+    if [ "$(uname -s)" = Linux ] && [ -f "$HOME/.config/systemd/user/podman-userns-warmup.service" ]; then
+        green "userns warm-up unit installed (hardened units can reuse the namespace)"
+    elif [ "$(uname -s)" = Linux ]; then
+        red "no podman-userns-warmup.service" "./install.sh; without it a hardened timer cannot start a container"
+    fi
+fi
+
+head_ "Audit trail"
+st="${STATE_DIR:-$HOME/.local/state/sysknife-maint}"
+if [ -d "$st" ]; then
+    green "$(ls "$st/runs" 2>/dev/null | wc -l) run report(s), $(ls "$st/receipts" 2>/dev/null | wc -l) open receipt(s)"
+    [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
+else yellow "no state yet; the first run creates it" ""; fi
+
+printf '\n  \033[1m%d ok, %d warning(s), %d failure(s)\033[0m\n' "$ok" "$warn" "$err"
+[ "$err" -eq 0 ]

@@ -336,5 +336,45 @@ for f in maintainer maintainer-merge; do
     if [ -x "$d" ]; then ok "$f deployed executable"; else bad "$f missing or not executable"; fi
 done
 
+echo "== opencode: default-deny closes the spelling hole a denylist cannot =="
+oc="$root/profiles/sysknife/opencode.json"
+python3 - "$oc" <<'PYEOF' && ok "opencode config decides all 14 probe commands correctly" || bad "opencode permission config lets something through"
+import json, fnmatch, collections, sys
+b = json.load(open(sys.argv[1]), object_pairs_hook=collections.OrderedDict)["permission"]["bash"]
+def decide(c):
+    v = b.get("*", "deny")
+    for pat, val in b.items():
+        if pat != "*" and fnmatch.fnmatch(c, pat): v = val
+    return v
+must_deny = ["cargo publish", "cd /x && cargo publish", "/usr/bin/cargo publish",
+             "git push origin main", "/usr/bin/git push origin main", "gh pr merge 1",
+             "curl http://x", "cat ~/.ssh/id_ed25519", "maintainer-merge receipt 1 a b"]
+must_allow = ["git status", "cargo test -p x", "maintainer-merge verify 1 a b c",
+              "gh pr review 1 --approve", "podman run --rm x"]
+bad = [c for c in must_deny if decide(c) != "deny"] + [c for c in must_allow if decide(c) != "allow"]
+if bad: print("  wrong verdicts:", bad); sys.exit(1)
+sys.exit(0)
+PYEOF
+grep -q '"\*": "deny"' "$oc" && ok "opencode config is default-deny" || bad "opencode config is not default-deny"
+grep -q 'default-deny' "$root/lib/backends/opencode.sh" && ok "opencode backend explains its posture" || bad "opencode backend does not state its containment"
+
+echo "== the universal cron fallback =="
+cr="$root/platform/posix/install-cron.sh"
+[ -x "$cr" ] && ok "cron installer present and executable" || bad "cron installer missing"
+grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
+grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
+
+echo "== doctor executes rather than inspects =="
+d="$root/bin/maintainer-doctor"
+[ -x "$d" ] && ok "doctor present and executable" || bad "doctor missing"
+grep -q 'podman run' "$d" && ok "doctor actually starts a container" || bad "doctor only checks that podman exists"
+grep -q 'gh api user' "$d" && ok "doctor resolves the real gh identity" || bad "doctor does not check identity"
+grep -q 'fix:' "$d" && ok "doctor prints a fix, not just a symptom" || bad "doctor reports problems without remedies"
+if PATH="$stub_dir:$PATH" HOME="$stub_dir/nothing" bash "$d" --quick >/dev/null 2>&1; then
+    bad "doctor passed against an empty home; it inspects nothing"
+else
+    ok "doctor fails against an empty home"
+fi
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
