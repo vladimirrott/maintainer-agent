@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 🔐 Security issue
+    url: https://github.com/vladimirrott/maintainer-agent/blob/main/SECURITY.md
+    about: A forged receipt, a deny-wall escape, a rehearsal that posted, a credential read. Follow SECURITY.md; do not open a public issue.
+  - name: 📓 What broke before, and what guards it now
+    url: https://github.com/vladimirrott/maintainer-agent/blob/main/docs/lessons.md
+    about: Every defect that reached a working system, with the measurement that found it. Worth reading before filing.
+  - name: 🧭 Why the refusals are the ones they are
+    url: https://github.com/vladimirrott/maintainer-agent/blob/main/docs/maintainer-doctrine.md
+    about: xz-utils, curl's AI slop, and maintainer burnout, and what each one changed here.

@@ -1,4 +1,36 @@
-# Working on this
+# Contributing
+
+Thanks for looking. This is a small, opinionated tool: an agent that maintains a
+repository unattended, whose value is the set of things it refuses to do. That
+shapes what a useful contribution looks like here.
+
+## Where to start
+
+- **Issues labelled `untested`** are guards that ship without a test that could
+  fail. Each one is a self-contained job with a clear finish line, and writing
+  the mutation teaches you the codebase faster than reading it.
+- **`docs/lessons.md`** is twenty-two defects that reached a working system,
+  each with the measurement that found it. It is the fastest way to understand
+  why anything here is shaped the way it is, and several entries end in work
+  that is still open.
+- **Run it against your own repository.** `./new-profile.sh`, `POST=off`, read
+  the report. Everything it gets wrong on a project that is not this one is
+  worth an issue, and that is the feedback this project has least of.
+
+Small, precise changes are easier to review than large ones, and a change that
+narrows what the agent may do is easier to accept than one that widens it.
+
+## What happens to your pull request
+
+CI runs the same gates you can run locally, on every push including from a fork.
+A maintainer reads the diff, checks the numbers in it against the tree, and
+mutation-proves any guard it adds. Expect the review to name one blocking item
+and separate it from the optional ones. If a later pass finds something an
+earlier one should have, you will be told plainly rather than quietly.
+
+Anything you contribute is under the MIT licence in `LICENSE`, same as the rest.
+
+## The gates
 
 The gates run in three places, and they are the same gates: a pre-commit hook
 before a commit exists, GitHub Actions on every push and pull request, and your
@@ -110,15 +142,25 @@ Three rules for anything added here:
 
 ## Changing the deny wall
 
-Edit `profiles/<name>/deny.json` and add the verb once.
-`scripts/render-settings.py` spells it bare and under `/bin`, `/usr/bin` and
-`/usr/local/bin`, because the matcher keys on the command as written and
-`/usr/bin/touch` was measured evading a rule for `touch`.
+Edit `profiles/<name>/deny.json` and add the verb **once**.
+`scripts/render-settings.py` spells it from every directory it could be run
+from: the static ones, the usual user-local ones in `~/`, `$HOME/` and expanded
+form, and wherever `which` finds the binary on the machine generating the wall.
+That last part is not decoration. The wall listed three FHS directories until a
+run found that `cargo` lives in `~/.cargo/bin`, `npm` under
+`~/.local/lib/nodejs/…/bin` and `maintainer-merge` in `~/.local/bin`, so the two
+publishing verbs had no absolute-path rule and the receipt was forgeable by
+writing the full path.
 
-Two things in the generated output look like typos and are not: `Read(~/...)` is
-the only form that denies (a single leading slash anchors to the settings
-directory, measured), and the same credential path is denied to `cat` three
-different ways on purpose.
+Three things in the generated output look like mistakes and are not:
+
+- `Read(~/…)` is the only form that denies. A single leading slash anchors to
+  the settings file's own directory, so `Read(/home/you/.ssh/**)` protects
+  nothing. Measured with a control.
+- The same credential path is denied to `cat` three different ways, because the
+  matcher keys on the command as written.
+- The rule count differs between machines, which is why the README pins the
+  **verb** count and prints the rule count as an observation.
 
 ## Adding a backend
 

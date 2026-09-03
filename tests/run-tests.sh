@@ -1090,5 +1090,35 @@ printf '%s' "$out" | grep -q '2 profiles are deployed' \
     && ok "two deployed profiles must be disambiguated, not guessed" \
     || bad "a tool picked a profile on its own"
 
+echo "== a public repository has the files a public repository needs =="
+# Checked because they are easy to intend and easy to forget, and because a
+# licence that is absent is a licence nobody can rely on.
+for f in LICENSE SECURITY.md CODE_OF_CONDUCT.md CODEOWNERS CONTRIBUTING.md CHANGELOG.md \
+         .github/PULL_REQUEST_TEMPLATE.md .github/dependabot.yml \
+         .github/ISSUE_TEMPLATE/bug.yml .github/ISSUE_TEMPLATE/feature.yml \
+         .github/ISSUE_TEMPLATE/config.yml .github/workflows/ci.yml; do
+    [ -s "$root/$f" ] && ok "$f is present and not empty" || bad "$f is missing or empty"
+done
+# Actions are the supply chain here. A tag is mutable; a SHA is not.
+unpinned=$(grep -hoE 'uses: [^ ]+' "$root"/.github/workflows/*.yml | grep -vE '@[0-9a-f]{40}' || true)
+if [ -z "$unpinned" ]; then ok "every action is pinned by SHA"; else
+    bad "an action is pinned by tag, which is mutable:"; printf '%s\n' "$unpinned" | sed 's/^/        /'; fi
+# Every SHA pin needs the version it claims to be, or the pin cannot be audited.
+while read -r line; do
+    printf '%s' "$line" | grep -qE '#' || bad "a SHA pin carries no version comment: $line"
+done < <(grep -hE 'uses: [^ ]+@[0-9a-f]{40}' "$root"/.github/workflows/*.yml)
+ok "SHA pins carry the version they claim"
+# CI must run the gates rather than merely exist.
+for gate in "tests/run-tests.sh" "evals/run-evals.sh" "scripts/check_claims.sh" "shellcheck"; do
+    grep -q "$gate" "$root/.github/workflows/ci.yml" \
+        && ok "CI runs $gate" || bad "CI does not run $gate"
+done
+# The workflow needs no write access and no secrets.
+grep -q 'contents: read' "$root/.github/workflows/ci.yml" \
+    && ok "CI asks for read-only permissions" || bad "CI does not restrict its permissions"
+grep -q 'secrets\.' "$root/.github/workflows/ci.yml" \
+    && bad "CI reads a secret; a fork's pull request must not be able to" \
+    || ok "CI reads no secrets, so a fork's PR is safe to run"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

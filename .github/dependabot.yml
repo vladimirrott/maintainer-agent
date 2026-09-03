@@ -1,0 +1,21 @@
+version: 2
+updates:
+  # Actions are the only dependency this project has: everything else is bash,
+  # python3 from the system, and git. They are pinned by SHA with the tag in a
+  # comment, and the pin is verified against the API rather than copied.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+    # A short cooldown avoids adopting a tag that was re-pointed at a bad commit
+    # moments earlier. It ages releases, so it only works for pins that sit on a
+    # release tag; a pin on an untagged commit has no version to age.
+    cooldown:
+      default-days: 5
+    groups:
+      github-actions:
+        patterns:
+          - "*"

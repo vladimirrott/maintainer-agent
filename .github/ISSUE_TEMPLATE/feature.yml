@@ -1,0 +1,42 @@
+name: 💡 Proposal
+description: Something the agent should do, or should stop doing.
+title: "proposal: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The bar here is a measurement rather than an idea. What went wrong, on
+        a real repository, that this would have prevented?
+  - type: textarea
+    id: problem
+    attributes:
+      label: What goes wrong today
+      description: Name the run, the command, or the review where it bit. "It would be nice if" is the hardest kind of proposal to act on.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you propose
+    validations:
+      required: true
+  - type: textarea
+    id: proof
+    attributes:
+      label: How anyone would know it worked
+      description: |
+        Every guard here ships with a mutation that turns its test red. What
+        would you break to prove this one bites?
+    validations:
+      required: true
+  - type: dropdown
+    id: refusal
+    attributes:
+      label: Does this widen what an unattended agent may do?
+      options:
+        - "No, it narrows or leaves it unchanged"
+        - "Yes, it lets the agent do something it currently cannot"
+        - "Not sure"
+    validations:
+      required: true

@@ -1,0 +1,55 @@
+name: 🐛 Bug report
+description: A gate passed when it should have refused, or refused when it should have passed.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **If an agent reached past a refusal, follow
+        [SECURITY.md](../../SECURITY.md) instead and do not file this
+        publicly.** That includes a forged receipt, a deny-wall escape, a
+        rehearsal that posted, or anything that read a credential.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran and its output. Paste it rather than describing it.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should have happened
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: "`git rev-parse --short HEAD`"
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: What the gates say
+      description: |
+        Run them and paste the last line of each. If one of them is red, that
+        is usually the whole report.
+      value: |
+        $ ./tests/run-tests.sh
+        $ ./evals/run-evals.sh
+        $ ./scripts/check_claims.sh
+        $ maintainer-doctor
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform and scheduler
+      placeholder: "Ubuntu 24.04, systemd timers / macOS 15, launchd / Windows 11, Task Scheduler"
+    validations:
+      required: true

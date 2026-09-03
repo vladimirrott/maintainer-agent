@@ -1,0 +1,11 @@
+# Everything is reviewed by a human before it lands, even when an agent wrote it.
+* @vladimirrott @V3RNE42
+
+# The refusals. A change here changes what an unattended agent is able to do on
+# somebody's machine, so it is never a one-reviewer change in practice.
+/bin/maintainer-merge        @vladimirrott @V3RNE42
+/lib/profile.sh              @vladimirrott @V3RNE42
+/scripts/render-settings.py  @vladimirrott @V3RNE42
+/profiles/*/deny.json        @vladimirrott @V3RNE42
+/lib/preamble-core.md        @vladimirrott @V3RNE42
+/.github/                    @vladimirrott @V3RNE42
