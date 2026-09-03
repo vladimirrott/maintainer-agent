@@ -1,6 +1,8 @@
 # Working on this
 
-Private repository, one maintainer, no CI. The gate runs before a commit exists.
+The gates run in three places, and they are the same gates: a pre-commit hook
+before a commit exists, GitHub Actions on every push and pull request, and your
+own shell whenever you want. Nothing is gated only on a maintainer's laptop.
 
 ## Setup
 

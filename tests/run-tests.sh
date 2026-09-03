@@ -266,6 +266,35 @@ gate_case() {  # $1 pr, $2 head, $3 expect-substring, $4 label
 gate_case 7 "$docs_head" "receipt still applies" "docs-only movement keeps the receipt valid"
 gate_case 8 "$prod_head" "production code changed" "production movement invalidates the receipt"
 
+
+echo "== the merge gate reads mergeStateStatus, which it used to discard =="
+# It fetched mergeStateStatus and never read the variable, which shellcheck
+# found by noticing it was unused. BEHIND is the one that matters: the branch is
+# not up to date with its base, so every green check describes a tree that is
+# not the one being merged.
+# The CLEAN case reaches the fetch, so #9 needs a ref like the others.
+git -C "$gr" update-ref "refs/pull/9/head" "$verified"
+ms_case() {  # $1 = mergeStateStatus, $2 = expected substring
+    PATH="$stub_dir:$PATH" bash "$mg" receipt 9 "$verified" "mutation proved" >/dev/null 2>&1
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $verified;;
+      *mergeStateStatus*) echo $1;;
+      *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]';;
+      *'pr merge'*) echo MERGED_STUB;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 9 2>&1)
+    if printf '%s' "$out" | grep -q "$2"; then ok "mergeStateStatus $1 -> $2"
+    else bad "mergeStateStatus $1 did not produce '$2' (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"; fi
+}
+ms_case BEHIND  "BEHIND its base"
+ms_case DIRTY   "conflicts"
+ms_case BLOCKED "BLOCKED"
+ms_case UNKNOWN "only CLEAN and HAS_HOOKS"
+ms_case CLEAN   "receipt valid"
+
 echo "== the doctrine reaches a run, not just a reader =="
 # Assembled, not inspected. The doctrine lives in lib/preamble-core.md and the
 # profile contributes only its site header, so grepping either file alone would
@@ -405,7 +434,6 @@ echo "== absolute-path spellings of every blocked verb are denied =="
 # MEASURED: /usr/bin/touch evaded a rule written for touch. The matcher keys on
 # the command as written, so each verb needs its absolute forms too.
 for verb in "git push" "git tag" "gh pr merge" "cargo publish" "npm publish"; do
-    cmd=${verb%% *}
     if grep -q "Bash(/usr/bin/$verb:\*)" "$s"; then
         ok "absolute form denied: /usr/bin/$verb"
     else
@@ -518,9 +546,6 @@ else
 fi
 grep -q "enable --now \*\.timer" "$SYSTEMCTL_LOG" && bad "--timers passed an unexpanded glob to systemctl" \
     || ok "--timers never passes a literal glob"
-for u in $(find "$root/platform/linux" -name '*.timer' -exec basename {} \;); do
-    grep -q "stamp-$u" "$SYSTEMCTL_LOG" 2>/dev/null
-done
 [ -e "$th/.local/share/systemd/timers" ] && ok "a stamp is written before enabling (no catch-up storm)" \
     || bad "no stamp written; enabling fires every missed slot at once"
 
@@ -539,13 +564,13 @@ for pe in "$root"/profiles/*/profile.env; do
   pf="$(basename "$(dirname "$pe")")"
   [ "$pf" = "_template" ] && continue
   rm -f "$stub_dir"/p-*.md
-  # shellcheck disable=SC1091
+  # shellcheck disable=SC1090,SC1091
   ( . "$pe"
     for tk in $TASKS; do
         PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt "$pf" "$tk" \
             >"$stub_dir/p-$tk.md" 2>/dev/null
     done )
-  # shellcheck disable=SC1091
+  # shellcheck disable=SC1090,SC1091
   ( . "$pe"
     python3 - "$stub_dir" "$REQUIRED_COMMANDS" "$KNOWN_NAMES" <<'PYEOF'
 import glob, os, re, sys
@@ -662,7 +687,6 @@ PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$lay2/run.sh" --show-prompt syskni
     && ok "and runs once the core preamble is restored" || bad "the core preamble is not found in the installed layout"
 
 echo "== --show-prompt shows, and changes nothing =="
-snap_before=$(find "$root" -newer "$root/README.md" -type f 2>/dev/null | wc -l)
 lock_before=$(ls "$HOME/.local/state/sysknife-maint/state" 2>/dev/null | wc -l)
 PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife issues >/dev/null 2>&1
 lock_after=$(ls "$HOME/.local/state/sysknife-maint/state" 2>/dev/null | wc -l)

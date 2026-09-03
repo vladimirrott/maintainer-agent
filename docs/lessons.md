@@ -421,3 +421,25 @@ I also destroyed this work once with `git checkout .` and had to redo it, which
 is the trap the mutation-harness entry in this file already describes. Commit
 before running an experiment that touches the tree, including the experiments
 that verify the commit.
+
+
+## 22. shellcheck found a condition the merge gate had been ignoring for weeks
+
+Adding CI meant running shellcheck for the first time, which produced nine
+warnings. Seven were dead variables and fragile loops. One was not.
+
+    bin/maintainer-merge:162
+    state="$(gh pr view "$pr" --json mergeStateStatus --jq .mergeStateStatus)"
+    ^---^ SC2034: state appears unused
+
+The gate made the API call, took the answer, and never read it. So a pull
+request that was **BEHIND** its base merged happily: its checks were green
+against a tree that is not the one being merged, which is precisely the failure
+this gate exists to prevent. `DIRTY` and `BLOCKED` passed too.
+
+An unused variable is usually tidy-up. This one was a missing condition, and a
+linter found it because a linter reads what the author meant to use rather than
+what the author remembers writing.
+
+**Guard:** only `CLEAN` and `HAS_HOOKS` may merge, with five tests driving the
+gate through each status. Deleting the check turns four of them red.

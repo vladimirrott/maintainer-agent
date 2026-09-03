@@ -164,6 +164,20 @@ cmd_merge() {
 
     [ "$review" = "APPROVED" ] || die "#$pr reviewDecision is '$review', not APPROVED"
 
+    # mergeStateStatus was fetched and thrown away for as long as this gate has
+    # existed, which shellcheck found by noticing the variable was never read.
+    # BEHIND is the one that matters: the branch is not up to date with its
+    # base, so every green check describes a tree that is not the one being
+    # merged, which is the failure this whole gate is about. DIRTY is a
+    # conflict, BLOCKED means a required review or check is missing.
+    case "$state" in
+        CLEAN|HAS_HOOKS) ;;
+        BEHIND)  die "#$pr is BEHIND its base; its checks describe a different tree. Update the branch and let it re-run." ;;
+        DIRTY)   die "#$pr has conflicts (mergeStateStatus DIRTY)" ;;
+        BLOCKED) die "#$pr is BLOCKED: a required review or check is missing" ;;
+        *)       die "#$pr mergeStateStatus is '$state'; only CLEAN and HAS_HOOKS may merge" ;;
+    esac
+
     local checks fails pend
     checks="$(gh pr checks "$pr" --repo "$REPO_SLUG" --json name,bucket 2>/dev/null)"
     [ -n "$checks" ] || die "#$pr reported no checks at all; refusing"
@@ -178,7 +192,7 @@ cmd_merge() {
     git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:mm-$pr" --force || die "cannot fetch #$pr"
     if [ "$head" != "$verified_head" ]; then
         local diff
-        diff="$(git -C "$REPO_PATH" diff --name-only "$verified_head".."mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        diff="$(git -C "$REPO_PATH" diff --name-only "${verified_head}..mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
         if [ -n "$diff" ]; then
             git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
             die "production code changed since the verified head $verified_head:

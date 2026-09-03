@@ -97,6 +97,7 @@ live() {
   local only="${1:-}"
   # shellcheck disable=SC1091
   . "$pdir/profile.env"
+  # shellcheck disable=SC1090
   . "$root/lib/backends/${BACKEND:-claude}.sh"
   export PROFILE_DIR="$pdir" REPO_PATH
   for f in "$root"/evals/scenarios/*.md; do

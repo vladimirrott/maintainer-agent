@@ -1,0 +1,99 @@
+---
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Read-only, and no secrets are used anywhere in this file. A fork's pull
+# request runs the same gates as a branch, which is the point: the gates used to
+# live only in a pre-commit hook on one laptop, so a contributor had no way to
+# know whether their change passed before a maintainer told them.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gates:
+    name: the four gates
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Syntax, every script, dispatched by shebang
+        run: |
+          rc=0
+          for f in $(git ls-files); do
+            [ -f "$f" ] || continue
+            case "$(head -c 80 "$f" 2>/dev/null)" in
+              *"#!/usr/bin/env bash"*|*"#!/bin/bash"*|*"#!/bin/sh"*) bash -n "$f" || rc=1 ;;
+              *"#!/usr/bin/env python3"*) python3 -c "import ast,sys;ast.parse(open(sys.argv[1]).read())" "$f" || rc=1 ;;
+            esac
+          done
+          exit $rc
+
+      - name: Offline test suite
+        run: ./tests/run-tests.sh
+
+      - name: Eval rules, for every profile
+        run: |
+          rc=0
+          for pe in profiles/*/profile.env; do
+            pn="$(basename "$(dirname "$pe")")"
+            [ "$pn" = "_template" ] && continue
+            echo "--- $pn ---"
+            MAINTAINER_PROFILE="$pn" ./evals/run-evals.sh || rc=1
+          done
+          exit $rc
+
+      - name: README numbers are derived from the tree
+        run: ./scripts/check_claims.sh
+
+  shellcheck:
+    name: shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Install shellcheck
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
+
+      - name: Run it over every shell script
+        run: |
+          mapfile -t files < <(
+            for f in $(git ls-files); do
+              [ -f "$f" ] || continue
+              case "$(head -c 80 "$f" 2>/dev/null)" in
+                *"#!/usr/bin/env bash"*|*"#!/bin/bash"*|*"#!/bin/sh"*) printf '%s\n' "$f" ;;
+              esac
+            done
+          )
+          printf 'checking %d scripts\n' "${#files[@]}"
+          [ "${#files[@]}" -gt 0 ] || { echo "no scripts found; this gate inspected nothing" >&2; exit 1; }
+          shellcheck --severity=warning "${files[@]}"
+
+  powershell:
+    name: the Windows installer parses
+    runs-on: ubuntu-latest
+    # A real PowerShell, not a brace count. The local suite skips this when the
+    # image is absent, and an absent dependency that turns a gate green is a
+    # trap this project has already paid for. Here it cannot be skipped.
+    container: mcr.microsoft.com/powershell:latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Parse Install-Maintainer.ps1
+        shell: pwsh {0}
+        run: |
+          $errors = $null; $tokens = $null
+          [System.Management.Automation.Language.Parser]::ParseFile(
+            "platform/windows/Install-Maintainer.ps1", [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { $errors | ForEach-Object { Write-Host $_.Message }; exit 1 }
+          Write-Host "parsed, $($tokens.Count) tokens"

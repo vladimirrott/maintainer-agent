@@ -71,6 +71,7 @@ refuses unless **all** of these hold:
 | **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved `crates/*/src`, `.github` or a manifest, the receipt describes a tree that is gone |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
 | zero failing **and zero pending** checks | pending is not green |
+| `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
 | the check list is **non-empty** | an empty board is a failure, not a pass |
 | `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
 
@@ -404,7 +405,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-one entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the twenty-two entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -432,22 +433,27 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 272 offline tests
+./tests/run-tests.sh        # 277 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-272 offline tests: no network, no GitHub, no model call. Every case tests a
+277 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
 turns the command check red, and pointing the installer's timer glob back at the
 directory it used to look in turns the install test red.
 
-There is no CI. This is a private repository with one maintainer, so the gate
-runs before the commit exists rather than after: `.githooks/pre-commit` runs
-`bash -n` over every script, the test suite, the evals, and the claim check.
-Install it with `git config core.hooksPath .githooks`.
+The same gates run in three places. `.githooks/pre-commit` runs them before a
+commit exists (`git config core.hooksPath .githooks`), GitHub Actions runs them
+on every push and pull request including from forks, and you can run them
+yourself. A contributor should never have to ask a maintainer whether their
+change passes.
+
+Actions adds two things the hook cannot: **shellcheck** over every script, and
+the PowerShell installer parsed by a real `pwsh` in a container rather than
+skipped when the image is absent locally.
 
 `scripts/check_claims.sh` holds this README's numbers to the tree, the same way
 the target repository holds its published test count to an evidence artifact. If
