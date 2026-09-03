@@ -1,3 +1,18 @@
 *.bak
 *.orig
 __pycache__/
+
+# Generated at install time into ~/.local/share/maintainer, never into the repo.
+# Listed anyway: running scripts/render-settings.py against a profile in place
+# writes them here, and a committed wall would be a stale copy of a generated
+# one, which is the drift this project spends its time preventing.
+profiles/*/settings.json
+profiles/*/settings-rehearsal.json
+profiles/*/opencode-rehearsal.json
+
+# A run's own output. The audit trail lives in ~/.local/state and names pull
+# requests, contributors and reviews; none of it belongs in a public repository.
+runs/
+drafts/
+receipts/
+*.commands

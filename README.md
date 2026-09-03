@@ -2,6 +2,10 @@
 
 # maintainer-agent
 
+[![ci](https://github.com/vladimirrott/maintainer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/vladimirrott/maintainer-agent/actions/workflows/ci.yml)
+[![secret scan](https://github.com/vladimirrott/maintainer-agent/actions/workflows/secret-scan.yml/badge.svg)](https://github.com/vladimirrott/maintainer-agent/actions/workflows/secret-scan.yml)
+[![licence: MIT](https://img.shields.io/badge/licence-MIT-blue.svg)](LICENSE)
+
 An unattended maintainer for an open-source repository. It runs Claude Code (or
 Codex, Cursor, or opencode) on a timer to review pull requests, file and place
 issues, audit the tracker, harden CI, prune merged branches and say when a
