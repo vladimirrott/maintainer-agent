@@ -433,12 +433,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 299 offline tests
+./tests/run-tests.sh        # 300 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-299 offline tests: no network, no GitHub, no model call. Every case tests a
+300 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
@@ -451,9 +451,18 @@ on every push and pull request including from forks, and you can run them
 yourself. A contributor should never have to ask a maintainer whether their
 change passes.
 
-Actions adds two things the hook cannot: **shellcheck** over every script, and
-the PowerShell installer parsed by a real `pwsh` in a container rather than
-skipped when the image is absent locally.
+Actions adds four things the hook cannot: **shellcheck** over every script, the
+PowerShell installer parsed by a real `pwsh` in a container rather than skipped
+when the image is absent locally, every **action pin checked against the API**
+to be the tag its comment claims, and every relative link in every document
+resolved.
+
+Three more workflows run beside it: **trufflehog** over the full history on
+every push and weekly, **CodeQL** over the Python, and the **OpenSSF
+scorecard**. The last two are skipped while the repository is private, because
+code scanning needs Advanced Security there and the scorecard reads branch
+protection. Skipping is stated in the workflow; pretending to scan would be
+worse than not scanning.
 
 `scripts/check_claims.sh` holds this README's numbers to the tree, the same way
 the target repository holds its published test count to an evidence artifact. If

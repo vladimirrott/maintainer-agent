@@ -1,0 +1,41 @@
+---
+name: scorecard
+
+on:
+  branch_protection_rule:
+  schedule:
+    - cron: "23 7 * * 3"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: OpenSSF scorecard
+    runs-on: ubuntu-latest
+    # The scorecard reads branch protection and publishes to the OpenSSF API,
+    # and neither works on a private repository.
+    if: github.event.repository.visibility == 'public'
+    permissions:
+      security-events: write
+      id-token: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          persist-credentials: false
+
+      - name: Run the analysis
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc  # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@cdf488f595d80d6e07e03d4674febd5ab45fa938  # v4
+        with:
+          sarif_file: results.sarif

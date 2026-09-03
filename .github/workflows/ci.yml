@@ -54,6 +54,28 @@ jobs:
       - name: README numbers are derived from the tree
         run: ./scripts/check_claims.sh
 
+      - name: Every action pin is the tag it claims
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/verify-action-pins.sh
+
+      - name: Every relative link in every document resolves
+        run: |
+          python3 - <<'PY'
+          import re, os, glob, sys
+          bad = []
+          for f in glob.glob("**/*.md", recursive=True):
+              base = os.path.dirname(f)
+              for m in re.finditer(r'\]\((?!https?:|mailto:|#)([^)#]+)', open(f).read()):
+                  t = m.group(1).strip()
+                  if not (os.path.exists(os.path.normpath(os.path.join(base, t)))
+                          or os.path.exists(os.path.normpath(t.lstrip("/")))):
+                      bad.append(f"{f}: {t}")
+          for b in bad:
+              print("broken link:", b)
+          sys.exit(1 if bad else 0)
+          PY
+
   shellcheck:
     name: shellcheck
     runs-on: ubuntu-latest

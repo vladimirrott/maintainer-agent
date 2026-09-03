@@ -1135,11 +1135,16 @@ done
 unpinned=$(grep -hoE 'uses: [^ ]+' "$root"/.github/workflows/*.yml | grep -vE '@[0-9a-f]{40}' || true)
 if [ -z "$unpinned" ]; then ok "every action is pinned by SHA"; else
     bad "an action is pinned by tag, which is mutable:"; printf '%s\n' "$unpinned" | sed 's/^/        /'; fi
-# Every SHA pin needs the version it claims to be, or the pin cannot be audited.
+# Every SHA pin needs a comment naming what it claims to be. Whether the claim
+# is TRUE needs the network, so scripts/verify-action-pins.sh does that in CI.
+missing=0
 while read -r line; do
-    printf '%s' "$line" | grep -qE '#' || bad "a SHA pin carries no version comment: $line"
+    printf '%s' "$line" | grep -qE '# *\S' || { bad "a SHA pin carries no version comment: $line"; missing=1; }
 done < <(grep -hE 'uses: [^ ]+@[0-9a-f]{40}' "$root"/.github/workflows/*.yml)
-ok "SHA pins carry the version they claim"
+[ "$missing" = 0 ] && ok "every SHA pin says which version it claims to be"
+[ -x "$root/scripts/verify-action-pins.sh" ] \
+    && ok "a script exists that checks those claims against the API" \
+    || bad "nothing verifies that a pin is the tag it claims"
 # CI must run the gates rather than merely exist.
 for gate in "tests/run-tests.sh" "evals/run-evals.sh" "scripts/check_claims.sh" "shellcheck"; do
     grep -q "$gate" "$root/.github/workflows/ci.yml" \
