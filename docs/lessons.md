@@ -443,3 +443,28 @@ what the author remembers writing.
 
 **Guard:** only `CLEAN` and `HAS_HOOKS` may merge, with five tests driving the
 gate through each status. Deleting the check turns four of them red.
+
+
+## 23. The first CI run found three tests that were measuring my laptop
+
+Adding GitHub Actions was meant to give contributors the same gates. Its first
+run went red on three cases that had been green here for a day:
+
+    FAIL  status does not report task
+    FAIL  status does not report review
+    FAIL  status does not show when the next run is
+
+`maintainer status` was correct on the runner. It said there was no deployment
+and no scheduler, because there was neither. The tests asserted against whatever
+profile happened to be installed in my home directory and whatever timers
+happened to be registered, so they measured the machine rather than the code.
+Locally they could not fail; anywhere else they could not pass.
+
+**Guard:** those cases now build a profile, a state directory, a report and a
+stubbed `systemctl` inside the suite's scratch directory, and the whole suite is
+expected to pass under
+
+    env -i HOME="$(mktemp -d)" PATH=/usr/bin:/bin bash ./tests/run-tests.sh
+
+which it does. CI is the only place that check was ever going to come from,
+which is an argument for CI that has nothing to do with contributors.

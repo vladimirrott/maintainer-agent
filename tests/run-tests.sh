@@ -767,14 +767,46 @@ else
 fi
 
 echo "== status answers the question a maintainer actually has =="
-out=$(MAINTAINER_PROFILE=sysknife python3 "$root/bin/maintainer" status 2>&1)
-for want in "profile" "posting" "task" "review"; do
-    printf '%s' "$out" | grep -qi "$want" && ok "status reports $want" || bad "status does not report $want"
+# Built here rather than read off this machine. These cases used to run against
+# whatever profile happened to be deployed and whatever timers happened to be
+# registered, so they passed locally and failed the first time CI ran them: on a
+# runner there is no deployment and no systemd, and status correctly said so
+# while the assertions expected my laptop's answer.
+sh_home="$stub_dir/statushome"
+mkdir -p "$sh_home/.local/share/maintainer/profiles/sk" \
+         "$sh_home/.local/state/sk-maint/state" "$sh_home/.local/state/sk-maint/runs"
+cat > "$sh_home/.local/share/maintainer/profiles/sk/profile.env" <<'ENVSK'
+PROFILE_NAME="sk"
+REPO_SLUG="acme/sk"
+REPO_PATH="$HOME/src/sk"
+STATE_DIR="$HOME/.local/state/sk-maint"
+TASKS="review issues"
+MIN_HOURS_review=6
+POST="on"
+GH_ACCOUNT="acmebot"
+ENVSK
+printf '{"run_id":"2026-01-01T00-00-review","main_sha":"abc"}\n' \
+    > "$sh_home/.local/state/sk-maint/state/last-review.json"
+printf '# report\nsecond line\n' > "$sh_home/.local/state/sk-maint/runs/2026-01-01T00-00-review.md"
+# A timer that fires in an hour, in the shape systemctl --output=json emits:
+# `next` is an absolute timestamp in microseconds, which is what tripped the
+# duration column into printing "in 20700 days" the first time.
+make_stub systemctl 'case "$*" in
+  *list-timers*json*) python3 -c "import json,time;print(json.dumps([{\"unit\":\"maintainer@sk-review.timer\",\"next\":int((time.time()+3600)*1e6)}]))";;
+  *) exit 0;;
+esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$sh_home" MAINTAINER_PROFILE=sk \
+      env -u MAINTAINER_STATE -u MAINTAINER_REPO -u MAINTAINER_SLUG -u MAINTAINER_TASKS \
+          -u MAINTAINER_STATE_DIR python3 "$root/bin/maintainer" status 2>&1)
+for want in "acme/sk" "posting" "review" "issues"; do
+    printf '%s' "$out" | grep -q "$want" && ok "status reports $want" || bad "status does not report $want"
 done
 printf '%s' "$out" | grep -qE 'in [0-9]+' && ok "status converts the next-run time to a duration" \
     || bad "status does not show when the next run is"
-# `maintainer run` exists so nobody has to be told the path to run.sh twice, and
-# it must not become a second way to start a run that skips the gates.
+printf '%s' "$out" | grep -q '2 lines' && ok "status reports how long the last report was" \
+    || bad "status does not size the last report"
+printf '%s' "$out" | grep -qi 'never' && ok "status marks a task that has never run" \
+    || bad "status does not distinguish a task that never ran"
 grep -q 'def cmd_run' "$root/bin/maintainer" && ok "maintainer run wraps the deployed orchestrator" \
     || bad "no maintainer run subcommand"
 grep -q 'os.execv' "$root/bin/maintainer" && ok "maintainer run execs run.sh rather than reimplementing it" \

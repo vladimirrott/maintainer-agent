@@ -72,6 +72,18 @@ bash -n <every script>        # the hook does this over `git ls-files`
 If `check_claims.sh` fails because you added a test, the fix is to update the
 number in `README.md`, not to relax the check.
 
+**The suite must pass with nothing installed.** This is the property CI tests
+and the one that is easy to lose:
+
+```sh
+env -i HOME="$(mktemp -d)" PATH=/usr/bin:/bin TERM=dumb bash ./tests/run-tests.sh
+```
+
+Three `status` cases once passed locally and failed the first time CI ran them,
+because they asserted against whatever profile happened to be deployed on the
+author's machine and whatever timers happened to be registered. A test that
+reads your deployment is measuring you.
+
 ## What a change here has to prove
 
 This project's whole value is refusals, so a change that touches one must show
