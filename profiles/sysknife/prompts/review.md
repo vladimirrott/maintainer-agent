@@ -47,3 +47,12 @@ gh issue view N --repo lacs-project/sysknife --json labels --jq '[.labels[].name
 ```
 
 The reservation lifts after 2026-09-09. Do not remove the label before then.
+
+## Arming a merge
+
+If your review leaves only a mechanical item (a rebase, a conflict, a test count
+that moved), approve at the head you verified and say the merge is armed, listing
+the conditions. Do not merge unattended. Report it as ready under a
+"ready to merge" heading with the conditions spelled out, and let the interactive
+session close it. You cannot run a mutation in a container, so you cannot satisfy
+condition 2 in the skill, and a merge you cannot verify is not one to make.
