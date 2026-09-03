@@ -1,0 +1,11 @@
+[Unit]
+Description=maintainer: sysknife ci (timer)
+
+[Timer]
+OnCalendar=*-*-1/3 11:27:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@sysknife-ci.service
+
+[Install]
+WantedBy=timers.target

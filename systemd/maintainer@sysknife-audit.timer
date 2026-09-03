@@ -1,0 +1,11 @@
+[Unit]
+Description=maintainer: sysknife audit (timer)
+
+[Timer]
+OnCalendar=*-*-1/5 12:19:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@sysknife-audit.service
+
+[Install]
+WantedBy=timers.target

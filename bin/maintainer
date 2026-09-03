@@ -1,0 +1,408 @@
+#!/usr/bin/env python3
+"""Refresh the sysknife checkout and keep an auditable record of each maintenance run.
+
+    maintainer start  <task>                 refresh, diff against the last run, open a report
+    maintainer finish <run_id>                 close the run and append it to the index
+    maintainer screen <pr>                         may this PR be built on the host?
+    maintainer log    [n]                           show the last n runs
+
+`start` refuses to touch a dirty tree. It never stashes, resets or force-updates
+anything: a run that would have to discard local work is a run that stops and
+says so, because the alternative is losing someone's uncommitted change to a
+scheduled job.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+# Profile-driven. lib/run.sh exports these; the SYSKNIFE_* names are kept as
+# fallbacks so an existing install keeps working across the rename.
+REPO = Path(os.environ.get("MAINTAINER_REPO")
+            or os.environ.get("SYSKNIFE_REPO", str(Path.home() / "Desktop/lacs")))
+SLUG = (os.environ.get("MAINTAINER_SLUG")
+        or "lacs-project/sysknife")
+ROOT = Path(os.environ.get("MAINTAINER_STATE")
+            or os.environ.get("SYSKNIFE_MAINT_HOME",
+                              Path.home() / ".local/state/sysknife-maint"))
+RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
+INDEX = ROOT / "index.md"
+SENTINEL = "<!-- sysknife-maint: report not yet written -->"
+SKILLS = {
+    "review": "sysknife-review",
+    "issues": "sysknife-issues",
+    "ci": "sysknife-ci-live-tests",
+    "audit": "sysknife-issue-audit",
+}
+
+
+
+# Titles and login names are written by strangers and end up inside the prompt
+# that drives an unattended agent. A title carrying a newline and a code fence
+# escaped the context block and rendered as top-level instructions, which is the
+# indirect-injection path this whole system is supposed to defend against.
+# Collapse to one line, strip the fence characters, and cap the length.
+def safe_for_prompt(text: str, limit: int = 90) -> str:
+    flat = " ".join(str(text).split())
+    flat = flat.replace("`", "'").replace("$", "").replace("\\", "/")
+    return flat[:limit] + ("..." if len(flat) > limit else "")
+
+
+def run(*args: str, cwd: Path | None = REPO, check: bool = True) -> str:
+    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    if check and p.returncode != 0:
+        raise SystemExit(f"maintainer: `{' '.join(args)}` failed ({p.returncode})\n"
+                         f"{p.stderr.strip()}")
+    return p.stdout.strip()
+
+
+def gh_json(*args: str):
+    """Query gh, degrading to None rather than aborting the run on a rate limit."""
+    p = subprocess.run(("gh", *args), cwd=REPO, capture_output=True, text=True)
+    if p.returncode != 0:
+        return None
+    try:
+        return json.loads(p.stdout)
+    except json.JSONDecodeError:
+        return None
+
+
+def refresh() -> tuple[str, str, list[str], list[str]]:
+    """Fast-forward main and fetch every open PR head. Returns (before, after, commits, notes)."""
+    notes: list[str] = []
+    dirty = run("git", "status", "--porcelain")
+    if dirty:
+        raise SystemExit(
+            "maintainer: the working tree has uncommitted changes, so the refresh "
+            "stopped rather than touching them.\n\n" + dirty +
+            "\n\nCommit, stash or clean these by hand, then re-run.")
+
+    before = run("git", "rev-parse", "HEAD")
+    run("git", "fetch", "origin", "--prune", "--tags", "--quiet")
+
+    head = run("git", "rev-parse", "--abbrev-ref", "HEAD")
+    if head != "main":
+        notes.append(f"was on `{head}`, returned to `main`")
+        run("git", "checkout", "main", "--quiet")
+
+    ahead = run("git", "rev-list", "--count", "origin/main..HEAD", check=False)
+    if ahead.isdigit() and int(ahead) > 0:
+        raise SystemExit(
+            f"maintainer: local main is {ahead} commit(s) ahead of origin/main. A run "
+            "must never leave commits behind; resolve by hand before the next pass.")
+
+    merge = subprocess.run(("git", "merge", "--ff-only", "origin/main"),
+                           cwd=REPO, capture_output=True, text=True)
+    if merge.returncode != 0:
+        raise SystemExit(
+            "maintainer: `main` cannot fast-forward to origin/main, so local "
+            "commits or a rewrite are in the way. Resolve by hand.\n" + merge.stderr.strip())
+
+    after = run("git", "rev-parse", "HEAD")
+    commits = []
+    if before != after:
+        rng = f"{before}..{after}"
+        log = run("git", "log", "--oneline", "--no-decorate", rng, check=False)
+        commits = [ln for ln in log.splitlines() if ln]
+
+    prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
+                  "--json", "number,headRefOid,updatedAt,title,author")
+    if prs is None:
+        notes.append("gh unavailable: PR heads not fetched, deltas below are git-only")
+        prs = []
+    for pr in prs:
+        subprocess.run(("git", "fetch", "origin",
+                        f"refs/pull/{pr['number']}/head:p{pr['number']}", "--force", "--quiet"),
+                       cwd=REPO, capture_output=True, text=True)
+    return before, after, commits, notes
+
+
+def snapshot(main_sha: str) -> dict:
+    prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
+                  "--json", "number,headRefOid,updatedAt,title,author") or []
+    issues = gh_json("issue", "list", "--state", "open", "--limit", "200",
+                     "--json", "number,updatedAt,title,labels") or []
+    baseline = None
+    art = REPO / "tests/evidence/workspace-tests.json"
+    if art.exists():
+        try:
+            baseline = json.loads(art.read_text()).get("tests")
+        except json.JSONDecodeError:
+            pass
+    return {
+        "main_sha": main_sha,
+        "captured_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "workspace_tests": baseline,
+        "open_prs": {str(p["number"]): {"head": p["headRefOid"], "updated": p["updatedAt"],
+                                        "title": safe_for_prompt(p["title"]), "author": safe_for_prompt(p["author"]["login"], 40)}
+                     for p in prs},
+        "open_issues": {str(i["number"]): {"updated": i["updatedAt"], "title": safe_for_prompt(i["title"]),
+                                           "labels": sorted(l["name"] for l in i["labels"])}
+                        for i in issues},
+    }
+
+
+def delta(old: dict | None, new: dict) -> list[str]:
+    if old is None:
+        return ["no previous run recorded for this skill; this run establishes the baseline"]
+    out: list[str] = []
+    op, np_ = old.get("open_prs", {}), new["open_prs"]
+    for n in sorted(set(np_) - set(op), key=int):
+        out.append(f"PR #{n} opened by {np_[n]['author']}: {np_[n]['title']}")
+    for n in sorted(set(op) - set(np_), key=int):
+        out.append(f"PR #{n} closed or merged since last run: {op[n]['title']}")
+    for n in sorted(set(op) & set(np_), key=int):
+        if op[n]["head"] != np_[n]["head"]:
+            out.append(f"PR #{n} head moved {op[n]['head'][:8]} -> {np_[n]['head'][:8]} "
+                       f"(re-review at the new SHA)")
+    oi, ni = old.get("open_issues", {}), new["open_issues"]
+    new_i = sorted(set(ni) - set(oi), key=int)
+    closed_i = sorted(set(oi) - set(ni), key=int)
+    touched = [n for n in sorted(set(oi) & set(ni), key=int) if oi[n]["updated"] != ni[n]["updated"]]
+    if new_i:
+        out.append("issues opened: " + ", ".join("#" + n for n in new_i))
+    if closed_i:
+        out.append("issues closed: " + ", ".join("#" + n for n in closed_i))
+    if touched:
+        out.append("issues with new activity: " + ", ".join("#" + n for n in touched))
+    if old.get("workspace_tests") != new.get("workspace_tests"):
+        out.append(f"workspace test baseline {old.get('workspace_tests')} -> {new.get('workspace_tests')}")
+    return out or ["nothing changed on the tracker since the last run of this skill"]
+
+
+
+# ---------------------------------------------------------------------------
+# Untrusted-code screen
+# ---------------------------------------------------------------------------
+# `cargo test` on a fork PR executes that contributor's code, and `build.rs`
+# executes it at compile time, as this user. Mount isolation is unavailable on
+# this host, so the containment is to not run the code at all when the diff can
+# reach a compiler or the network.
+
+# Paths whose change means the PR can execute code during a build, or can change
+# what CI itself runs. Building one of these unsandboxed is remote code
+# execution with the maintainer's own credentials on disk.
+EXECUTES_ON_BUILD = (
+    ("build.rs", "runs at compile time, before any test"),
+    (".cargo/config.toml", "can redirect the registry or inject rustflags"),
+    (".cargo/config", "can redirect the registry or inject rustflags"),
+    ("Cargo.lock", "a dependency change pulls and builds new third-party code"),
+    ("rust-toolchain", "selects the toolchain that will be executed"),
+    ("rust-toolchain.toml", "selects the toolchain that will be executed"),
+    (".github/workflows/", "changes what CI runs, and gates run approval"),
+    ("Makefile", "arbitrary recipes"),
+    ("justfile", "arbitrary recipes"),
+    ("xtask/", "a build-system crate that runs as part of normal commands"),
+)
+# Anything the repo's own gates EXECUTE. The first version of this screen only
+# looked for build-time vectors, so a PR adding one integration test came back
+# SAFE TO BUILD and `cargo nextest run --workspace` then ran that test. The
+# execution surface is the union of build time and test time, and test time is
+# the normal path for every Rust change here.
+EXECUTED_BY_GATES = (
+    (".rs", "cargo test compiles and runs it"),
+    (".sh", "the shellcheck and hygiene gates execute these directly"),
+    (".py", "scripts/ are run by docs-and-hygiene"),
+    (".js", "npm test --prefix packages/setup runs it"),
+    (".mjs", "npm test --prefix packages/setup runs it"),
+    (".ts", "the frontend job runs it"),
+)
+DEP_SECTIONS = ("[dependencies]", "[build-dependencies]", "[dev-dependencies]")
+# Only these are inert: read as text by a gate, never executed.
+INERT_SUFFIXES = (".md", ".json", ".yml", ".yaml", ".txt", ".lock.example", ".svg", ".png")
+
+
+def _sh(*args: str) -> tuple[int, str]:
+    p = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
+    return p.returncode, p.stdout
+
+
+def cmd_screen(pr: str) -> None:
+    """Say whether a PR may be executed on the host, and why not when it may not.
+
+    Fails closed. Every path that cannot establish the answer raises rather than
+    printing a permissive verdict, because a screen that errs toward SAFE is
+    worse than no screen: it launders an unknown into a reassurance.
+    """
+    meta = gh_json("pr", "view", pr, "--json", "files,headRefOid,author,title,changedFiles")
+    if meta is None:
+        raise SystemExit(f"maintainer: could not read PR {pr} from gh; screen FAILED, treat as READ-ONLY")
+    paths = [f["path"] for f in meta.get("files", [])]
+    declared = meta.get("changedFiles", len(paths))
+    truncated = declared > len(paths)
+
+    blocks: list[tuple[str, str]] = []
+    for path in paths:
+        for marker, why in EXECUTES_ON_BUILD:
+            if path == marker or path.endswith("/" + marker) or (marker.endswith("/") and marker in path):
+                blocks.append((path, f"build-time: {why}"))
+        for suffix, why in EXECUTED_BY_GATES:
+            if path.endswith(suffix):
+                blocks.append((path, f"test-time: {why}"))
+
+    rc, diff = _sh("gh", "pr", "diff", pr, "--patch")
+    if rc != 0:
+        raise SystemExit(f"maintainer: could not read the diff for PR {pr}; screen FAILED, treat as READ-ONLY")
+    for path in (p for p in paths if p.endswith("Cargo.toml")):
+        hunk, in_file = [], False
+        for line in diff.splitlines():
+            if line.startswith("diff --git"):
+                in_file = path in line
+            elif in_file and line[:1] in "+-" and not line.startswith(("+++", "---")):
+                hunk.append(line)
+        if any(s in "\n".join(hunk) for s in DEP_SECTIONS) or any(
+            k in l for l in hunk if l.startswith("+") for k in ("git =", "path =", "version =")
+        ):
+            blocks.append((path, "build-time: dependency lines changed, new third-party code would be built"))
+
+    title = safe_for_prompt(meta.get("title", ""))
+    print(f"=== screen: PR {pr} — {title}")
+    print(f"author {meta['author']['login']}  head {meta['headRefOid'][:8]}  files {len(paths)} of {declared}")
+    if truncated:
+        blocks.append(("<file list truncated>",
+                       f"gh returned {len(paths)} of {declared} files, so the rest were never screened"))
+
+    if blocks:
+        seen, ordered = set(), []
+        for item in blocks:
+            if item not in seen:
+                seen.add(item)
+                ordered.append(item)
+        print("\nVERDICT: DO NOT EXECUTE. Review this PR by reading the diff.")
+        for path, why in ordered[:12]:
+            print(f"  - {path}: {why}")
+        if len(ordered) > 12:
+            print(f"  ... and {len(ordered) - 12} more")
+        print("\nIn an unattended run there is no fallback: do not build, do not test,")
+        print("do not run its scripts. Say in the review that you reviewed by reading.")
+        print("Interactively, Vladimir can execute it in podman:")
+        print("  podman run --rm --network=none -v \"$PWD:/repo:ro\" docker.io/library/rust:1-slim \\")
+        print("    sh -c 'cd /repo && cargo test --offline'")
+        if any(".github/workflows/" in p for p, _ in ordered):
+            print("\nThis PR touches .github/workflows/. Do NOT approve its queued workflow")
+            print("run: that approval is the control that stops a fork's code running in CI.")
+    else:
+        inert = [p for p in paths if p.endswith(INERT_SUFFIXES)]
+        if len(inert) != len(paths):
+            raise SystemExit(
+                "maintainer: screen could not classify "
+                f"{sorted(set(paths) - set(inert))}; failing closed, treat as DO NOT EXECUTE")
+        print("\nVERDICT: INERT. Every changed file is read as text by a gate and never")
+        print("executed. Building is unnecessary rather than merely permitted.")
+
+
+def cmd_start(skill: str) -> None:
+    if skill not in SKILLS:
+        raise SystemExit(f"maintainer: unknown skill {skill!r}; expected one of {', '.join(SKILLS)}")
+    for d in (RUNS, STATE, DRAFTS):
+        d.mkdir(parents=True, exist_ok=True)
+
+    stamp = datetime.now().strftime("%Y-%m-%dT%H-%M")
+    run_id = f"{stamp}-{skill}"
+    # Two runs in the same minute must not share a report path, or the second
+    # silently overwrites the first and one run leaves no trace.
+    suffix = 1
+    while (RUNS / f"{run_id}.md").exists():
+        suffix += 1
+        run_id = f"{stamp}-{skill}.{suffix}"
+    before, after, commits, notes = refresh()
+
+    state_file = STATE / f"last-{skill}.json"
+    previous = json.loads(state_file.read_text()) if state_file.exists() else None
+    snap = snapshot(after)
+    changes = delta(previous, snap)
+
+    report = RUNS / f"{run_id}.md"
+    # Reserve the path immediately. The collision loop above can only work if the
+    # file exists between `start` and the agent writing it, and the sentinel is
+    # what stops `finish` from accepting the placeholder as a real report.
+    report.write_text(f"{SENTINEL}\n# {run_id}\n")
+    draft_dir = DRAFTS / run_id
+    draft_dir.mkdir(parents=True, exist_ok=True)
+
+    snap["run_id"] = run_id
+    snap["previous_run"] = (previous or {}).get("run_id")
+    # Written as *pending*, and promoted to the baseline only by `finish`. A run
+    # that dies must not move the baseline: the next run would diff against
+    # changes nobody actually reviewed and skip them as already seen. Found by
+    # the 2026-09-02T14-36-review run, which noticed a state file newer than any
+    # report.
+    (STATE / f"pending-{skill}.json").write_text(json.dumps(snap, indent=2, sort_keys=True) + "\n")
+
+    print(f"=== sysknife-maint {run_id} ===")
+    print(f"skill        {SKILLS[skill]}")
+    print(f"repo         {REPO}")
+    print(f"main         {before[:8]} -> {after[:8]}" + ("  (already current)" if before == after else ""))
+    if commits:
+        print(f"new commits  {len(commits)}")
+        for c in commits[:20]:
+            print(f"  {c}")
+    for n in notes:
+        print(f"note         {n}")
+    prev_id = (previous or {}).get("run_id", "none")
+    print(f"\nsince the last `{skill}` run ({prev_id}):")
+    for c in changes:
+        print(f"  - {c}")
+    print(f"\nwrite the run report to  {report}")
+    print(f"put any drafts under     {draft_dir}/")
+    print("run.sh closes the run for you; do not call `sysknife-maint finish` yourself")
+
+
+def cmd_finish(run_id: str) -> None:
+    report = RUNS / f"{run_id}.md"
+    INDEX.parent.mkdir(parents=True, exist_ok=True)
+    if not report.exists() or not report.read_text().strip():
+        raise SystemExit(
+            f"maintainer: {report} is missing or empty. A run with no report is not "
+            f"auditable; write the report, then finish.")
+    if SENTINEL in report.read_text():
+        raise SystemExit(
+            f"maintainer: {report} still carries the placeholder line, so the run "
+            f"wrote no report. Replace the whole file, then finish.")
+    # Idempotent: both the agent and run.sh call this, and a run counted twice is
+    # a wrong audit trail just as surely as a run counted zero times.
+    if INDEX.exists() and f"`{run_id}`" in INDEX.read_text():
+        print(f"maintainer: {run_id} already recorded, nothing to do")
+        return
+    line = (f"- `{run_id}`  {datetime.now().strftime('%Y-%m-%d %H:%M')}  "
+            f"{len(report.read_text().splitlines())} lines  [{report.name}](runs/{report.name})\n")
+    with INDEX.open("a") as fh:
+        fh.write(line)
+    skill = run_id.split("-")[-1].split(".")[0]
+    pending = STATE / f"pending-{skill}.json"
+    if pending.exists() and json.loads(pending.read_text()).get("run_id") == run_id:
+        (STATE / f"last-{skill}.json").write_text(pending.read_text())
+        pending.unlink()
+    print(f"maintainer: recorded {run_id} in {INDEX}")
+
+
+def cmd_log(n: int) -> None:
+    if not INDEX.exists():
+        print("maintainer: no runs recorded yet")
+        return
+    lines = INDEX.read_text().splitlines()
+    print("\n".join(lines[-n:]))
+
+
+def main() -> None:
+    if len(sys.argv) < 2:
+        raise SystemExit(__doc__)
+    cmd = sys.argv[1]
+    if cmd == "start" and len(sys.argv) == 3:
+        cmd_start(sys.argv[2])
+    elif cmd == "finish" and len(sys.argv) == 3:
+        cmd_finish(sys.argv[2])
+    elif cmd == "screen" and len(sys.argv) == 3:
+        cmd_screen(sys.argv[2])
+    elif cmd == "log":
+        cmd_log(int(sys.argv[2]) if len(sys.argv) > 2 else 10)
+    else:
+        raise SystemExit(__doc__)
+
+
+if __name__ == "__main__":
+    main()

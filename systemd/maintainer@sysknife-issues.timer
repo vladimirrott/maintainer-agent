@@ -1,0 +1,11 @@
+[Unit]
+Description=maintainer: sysknife issues (timer)
+
+[Timer]
+OnCalendar=*-*-1/2 10:41:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@sysknife-issues.service
+
+[Install]
+WantedBy=timers.target

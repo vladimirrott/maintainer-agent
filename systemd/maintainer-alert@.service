@@ -1,0 +1,8 @@
+[Unit]
+Description=maintainer: desktop alert for a failed %i
+
+[Service]
+Type=oneshot
+Environment=DISPLAY=:1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+ExecStart=/usr/bin/notify-send -u critical "maintainer failed" "%i produced no report. See ~/.local/state/sysknife-maint/logs/"

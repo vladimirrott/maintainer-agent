@@ -1,0 +1,12 @@
+[Unit]
+Description=maintainer: sysknife review (timer)
+
+[Timer]
+OnCalendar=*-*-* 09:13:00
+OnCalendar=*-*-* 21:13:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@sysknife-review.service
+
+[Install]
+WantedBy=timers.target

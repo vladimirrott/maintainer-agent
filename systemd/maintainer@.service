@@ -1,0 +1,37 @@
+[Unit]
+Description=maintainer: %i
+Documentation=file://%h/.local/state/sysknife-maint/index.md
+OnFailure=maintainer-alert@%n.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/Desktop/lacs
+Environment=DISPLAY=:1
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# %i is "<profile>-<task>", split by the wrapper.
+ExecStart=%h/.local/share/maintainer/run-instance.sh %i
+TimeoutStartSec=5400
+
+# --- Containment -----------------------------------------------------------
+# Mount-based isolation is NOT available here, and the directives for it were
+# removed rather than left in place looking protective. Verified 2026-09-02 on
+# systemd 255 / Ubuntu 24.04: ProtectHome, BindPaths and InaccessiblePaths are
+# silently ignored for *user* units, and bwrap fails with "setting up uid map:
+# Permission denied", both because kernel.apparmor_restrict_unprivileged_userns
+# is 1. A directive that no-ops is worse than none: it reads as a guarantee.
+#
+# What actually contains a run:
+#   1. NoNewPrivileges below, which is seccomp-based and verified to take effect.
+#   2. The backend's own deny list (Claude only; see lib/backends/codex.sh).
+#   3. `maintainer screen`, which refuses to BUILD a PR that could execute
+#      contributor code (build.rs, dependency changes, workflow changes).
+#   4. podman for anything that must run untrusted code.
+#
+# ProtectKernelTunables, ProtectControlGroups and RestrictNamespaces are
+# deliberately ABSENT: each one breaks rootless podman, and podman is the only
+# working sandbox for running contributor code on this host.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictRealtime=yes
