@@ -71,6 +71,7 @@ run mkdir -p "$share" "$bin" "$units"
 run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
+run cp "$root/lib/profile.sh" "$share/profile.sh"
 run mkdir -p "$share/scripts"
 # Every script, not a list. render-settings.py was deployed and transcript.py
 # was not, and the backend's fallback made the missing one invisible: runs kept

@@ -10,8 +10,11 @@
 # open, or a security fix left sitting unreleased on main.
 set -uo pipefail
 
-REPO_SLUG="${MAINTAINER_SLUG:-lacs-project/sysknife}"
-REPO_PATH="${MAINTAINER_REPO:-$HOME/Desktop/lacs}"
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/profile.sh" 2>/dev/null \
+  || . "$HOME/.local/share/maintainer/profile.sh"
+maintainer_load_profile || exit 64
+REPO_SLUG="$MAINTAINER_SLUG"
+REPO_PATH="$MAINTAINER_REPO"
 say() { printf '  %s\n' "$1"; }
 # A rehearsal that deletes a remote branch is not a rehearsal. run.sh exports
 # this; a deny rule cannot enforce it, because the push happens inside this

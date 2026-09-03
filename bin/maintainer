@@ -92,12 +92,12 @@ def _setting(env_key: str, profile_key: str, default: str) -> str:
     return os.environ.get(env_key) or _ENV.get(profile_key) or default
 
 
-REPO = Path(_setting("MAINTAINER_REPO", "REPO_PATH",
-                     os.environ.get("SYSKNIFE_REPO", str(Path.home() / "Desktop/lacs"))))
-SLUG = _setting("MAINTAINER_SLUG", "REPO_SLUG", "lacs-project/sysknife")
+# No fallback names a person or a repository. A tool that guesses which project
+# it is acting on will eventually guess wrong, in public.
+REPO = Path(_setting("MAINTAINER_REPO", "REPO_PATH", ""))
+SLUG = _setting("MAINTAINER_SLUG", "REPO_SLUG", "")
 ROOT = Path(_setting("MAINTAINER_STATE", "STATE_DIR",
-                     os.environ.get("SYSKNIFE_MAINT_HOME",
-                                    str(Path.home() / ".local/state/sysknife-maint"))))
+                     str(Path.home() / ".local/state/maintainer")))
 RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
 INDEX = ROOT / "index.md"
 # `start` writes this as the FIRST line and nowhere else, so `finish` anchors to
@@ -382,7 +382,7 @@ def cmd_screen(pr: str) -> None:
             print(f"  ... and {len(ordered) - 12} more")
         print("\nIn an unattended run there is no fallback: do not build, do not test,")
         print("do not run its scripts. Say in the review that you reviewed by reading.")
-        print("Interactively, Vladimir can execute it in podman:")
+        print("Interactively, you can execute it in podman:")
         print("  podman run --rm --network=none -v \"$PWD:/repo:ro\" docker.io/library/rust:1-slim \\")
         print("    sh -c 'cd /repo && cargo test --offline'")
         if any(".github/workflows/" in p for p, _ in ordered):

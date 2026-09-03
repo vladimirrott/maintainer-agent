@@ -1021,5 +1021,50 @@ grep -q 'social-preview.svg' "$root/assets/social-preview.html" \
     && ok "the preview page renders the SVG, so the PNG has one source" \
     || bad "the PNG has no reproducible source"
 
+echo "== no tool defaults to a person or a repository =="
+# Every bash tool used to carry personal fallbacks: REPO_SLUG to one project,
+# ACCOUNT to one GitHub login, REPO_PATH to a directory on one laptop. Harmless
+# with one user, wrong with two: a stranger running `maintainer-repo prune` with
+# no profile would have queried somebody else's repository.
+needle_repo="lacs-project""/sysknife"
+needle_user="vladimir""rott"
+for f in "$root"/bin/* "$root"/lib/*.sh "$root"/install.sh "$root"/new-profile.sh; do
+    [ -f "$f" ] || continue
+    # Executable lines only. The files explain the defaults they used to have,
+    # and a check that reads its own rationale is the vacuous kind.
+    code=$(sed 's/#.*//' "$f")
+    if printf '%s' "$code" | grep -qF "$needle_repo"; then
+        bad "$(basename "$f") still defaults to a specific repository"
+    elif printf '%s' "$code" | grep -qF "$needle_user"; then
+        bad "$(basename "$f") still names a specific GitHub account"
+    else
+        ok "$(basename "$f") names no repository or account in code"
+    fi
+done
+# And it must refuse rather than guess.
+nohome="$stub_dir/noprofile"; mkdir -p "$nohome"
+for tool in maintainer-repo maintainer-merge; do
+    out=$(env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_PROFILE -u MAINTAINER_STATE \
+              -u MAINTAINER_ACCOUNT HOME="$nohome" bash "$root/bin/$tool" prune 2>&1); rc=$?
+    if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no profile is deployed'; then
+        ok "$tool refuses when no profile says which repository"
+    else
+        bad "$tool ran without knowing which repository (rc=$rc)"
+    fi
+done
+# Two deployed profiles must be an error, not a coin toss.
+two="$stub_dir/twoprof"; mkdir -p "$two/.local/share/maintainer/profiles/alpha" \
+                                  "$two/.local/share/maintainer/profiles/beta"
+for p in alpha beta; do
+    printf 'REPO_SLUG="o/%s"\nREPO_PATH="/tmp/%s"\nSTATE_DIR="/tmp/%s-st"\nGH_ACCOUNT="a"\n' \
+        "$p" "$p" "$p" > "$two/.local/share/maintainer/profiles/$p/profile.env"
+done
+cp "$root/lib/profile.sh" "$two/.local/share/maintainer/profile.sh"
+out=$(env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_PROFILE -u MAINTAINER_STATE \
+          -u MAINTAINER_ACCOUNT HOME="$two" bash "$root/bin/maintainer-repo" release-check 2>&1)
+printf '%s' "$out" | grep -q '2 profiles are deployed' \
+    && ok "two deployed profiles must be disambiguated, not guessed" \
+    || bad "a tool picked a profile on its own"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

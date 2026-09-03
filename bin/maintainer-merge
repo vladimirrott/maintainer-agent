@@ -11,10 +11,13 @@
 # recurring defect is a test that stays green with the fix reverted.
 set -uo pipefail
 
-REPO_SLUG="${MAINTAINER_SLUG:-lacs-project/sysknife}"
-REPO_PATH="${MAINTAINER_REPO:-$HOME/Desktop/lacs}"
-STATE="${MAINTAINER_STATE:-$HOME/.local/state/sysknife-maint}"
-ACCOUNT="${MAINTAINER_ACCOUNT:-vladimirrott}"
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/profile.sh" 2>/dev/null \
+  || . "$HOME/.local/share/maintainer/profile.sh"
+maintainer_load_profile || exit 64
+REPO_SLUG="$MAINTAINER_SLUG"
+REPO_PATH="$MAINTAINER_REPO"
+STATE="$MAINTAINER_STATE"
+ACCOUNT="$MAINTAINER_ACCOUNT"
 RECEIPTS="$STATE/receipts"
 # Same reasoning as maintainer-repo: `gh pr merge` runs inside this script, so
 # no Bash deny rule sees it. Without this, a POST=off rehearsal could merge a

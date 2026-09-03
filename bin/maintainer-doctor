@@ -11,7 +11,23 @@ set -uo pipefail
 
 share="$HOME/.local/share/maintainer"
 bin="$HOME/.local/bin"
-profile="${MAINTAINER_PROFILE:-sysknife}"
+# One deployed profile needs no naming; several do. Defaulting to a particular
+# repository's name is how a tool ends up reporting on somebody else's project.
+profile="${MAINTAINER_PROFILE:-}"
+if [ -z "$profile" ]; then
+    _found=()
+    for _d in "$HOME/.local/share/maintainer/profiles"/*/profile.env; do
+        [ -e "$_d" ] || continue
+        _found+=("$(basename "$(dirname "$_d")")")
+    done
+    if [ "${#_found[@]}" = 1 ]; then profile="${_found[0]}"
+    elif [ "${#_found[@]}" = 0 ]; then profile="(none deployed)"
+    else
+        printf 'maintainer-doctor: %d profiles are deployed (%s).\n' "${#_found[@]}" "${_found[*]}" >&2
+        printf '                   Set MAINTAINER_PROFILE to say which one to check.\n' >&2
+        exit 64
+    fi
+fi
 quick=0; [ "${1:-}" = "--quick" ] && quick=1
 ok=0; warn=0; err=0
 
@@ -111,8 +127,10 @@ head_ "GitHub identity"
 # one is worse than a refusal.
 if command -v gh >/dev/null; then
     who=$(gh api user --jq .login 2>/dev/null)
-    want="${GH_ACCOUNT:-vladimirrott}"
-    if [ "$who" = "$want" ]; then green "gh is $who"
+    want="${GH_ACCOUNT:-}"
+    if [ -z "$want" ]; then
+        red "the profile names no GH_ACCOUNT" "set it in profile.env; a run refuses to start without one"
+    elif [ "$who" = "$want" ]; then green "gh is $who"
     elif [ -z "$who" ]; then red "gh is not authenticated" "gh auth login"
     else yellow "gh is '$who', not '$want'" "run.sh switches automatically, but check ~/.config/gh/hosts.yml"; fi
 else red "gh not installed" "install the GitHub CLI"; fi
@@ -125,8 +143,10 @@ case "${POST:-on}" in
 esac
 
 head_ "Repository"
-r="${REPO_PATH:-$HOME/Desktop/lacs}"
-if [ -d "$r/.git" ]; then
+r="${REPO_PATH:-}"
+if [ -z "$r" ]; then
+    red "the profile names no REPO_PATH" "set it in profiles/$profile/profile.env"
+elif [ -d "$r/.git" ]; then
     green "repo at $r"
     dirty=$(git -C "$r" status --porcelain 2>/dev/null | wc -l)
     [ "$dirty" = 0 ] && green "working tree clean" || yellow "$dirty uncommitted change(s); a run will refuse to start" "commit or stash"
@@ -174,8 +194,10 @@ else
 fi
 
 head_ "Audit trail"
-st="${STATE_DIR:-$HOME/.local/state/sysknife-maint}"
-if [ -d "$st" ]; then
+st="${STATE_DIR:-}"
+if [ -z "$st" ]; then
+    red "the profile names no STATE_DIR" "set it in profiles/$profile/profile.env"
+elif [ -d "$st" ]; then
     green "$(ls "$st/runs" 2>/dev/null | wc -l) run report(s), $(ls "$st/receipts" 2>/dev/null | wc -l) open receipt(s)"
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
 else yellow "no state yet; the first run creates it" ""; fi
