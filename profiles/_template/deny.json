@@ -1,44 +1,45 @@
 {
  "_comment": [
-  "Inputs to the deny wall for this profile. scripts/render-settings.py expands",
-  "it into settings.json and settings-rehearsal.json at install time.",
-  "Add a verb here once; it comes out spelled four ways. Never write a literal",
-  "home path: use ~/ and the generator produces the other spellings."
+  "Inputs to the deny wall. scripts/render-settings.py expands this into",
+  "settings.json (live) and settings-rehearsal.json (live + every GitHub",
+  "write verb). Every verb here is spelled from every directory it could be",
+  "run from, including the one it is actually installed in: a rule for",
+  "`cargo publish` that misses ~/.cargo/bin protects nothing.",
+  "The bound is honest: enumeration cannot be complete, so this stops a",
+  "cooperative agent reaching a destructive verb, not a hostile one."
  ],
  "spelled_everywhere": [
   "cargo publish",
   "curl",
-  "gh auth token",
-  "gh pr merge",
-  "gh release",
-  "gh workflow run",
-  "git push",
-  "git tag",
-  "npm publish",
-  "wget"
- ],
- "bare": [
   "gh api --method DELETE",
   "gh api --method PUT",
   "gh api -X DELETE",
   "gh api -X PUT",
+  "gh auth token",
   "gh pr create",
+  "gh pr merge",
+  "gh release",
   "gh repo delete",
   "gh repo edit",
   "gh secret",
   "gh variable",
+  "gh workflow run",
   "git -C",
   "git checkout --",
   "git cherry-pick",
   "git clean",
   "git commit",
   "git merge",
+  "git push",
   "git rebase",
   "git reset --hard",
   "git restore",
+  "git tag",
   "maintainer-merge receipt",
   "nc",
-  "printenv"
+  "npm publish",
+  "printenv",
+  "wget"
  ],
  "bare_exact": [
   "env"

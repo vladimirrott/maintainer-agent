@@ -40,6 +40,20 @@ if [ "${1:-}" = "--show-prompt" ]; then show=1; shift; fi
 profile="${1:?usage: run.sh [--show-prompt] <profile> <task>}"
 task="${2:?usage: run.sh [--show-prompt] <profile> <task>}"
 
+# A run must not start inside another run.
+#
+# The agent inherits this process's environment, so `run.sh` is reachable from
+# inside a pass: nothing stopped one profile's rehearsal from launching a full
+# run of another. That it stayed a rehearsal was luck, because MAINTAINER_POST
+# happened to be inherited too. Refuse instead of relying on that.
+#
+# A preview is exempt: reading the prompt from inside a run is harmless.
+if [ -n "${MAINTAINER_IN_RUN:-}" ] && [ "$show" = 0 ]; then
+    echo "run.sh: already inside the run '$MAINTAINER_IN_RUN'; refusing to start" \
+         "'$profile/$task' from within it" >&2
+    exit 78
+fi
+
 PROFILE_DIR="$local_root/profiles/$profile"
 [ -f "$PROFILE_DIR/profile.env" ] || { echo "run.sh: no profile '$profile'" >&2; exit 64; }
 # shellcheck disable=SC1091
@@ -89,6 +103,12 @@ min_gate() {
     fi
 }
 [ "$show" = 1 ] || min_gate
+# The override is consumed here and must not travel any further. It reached the
+# agent's environment, so every `run.sh` the agent invoked skipped its cadence
+# gate: a repro that should have printed "skipped" started a real pass instead.
+unset MAINTAINER_FORCE
+# And mark this process, so anything started from inside it can tell.
+export MAINTAINER_IN_RUN="$profile/$task"
 
 stamp="$(date +%Y-%m-%dT%H-%M)"
 if [ "$show" = 1 ]; then

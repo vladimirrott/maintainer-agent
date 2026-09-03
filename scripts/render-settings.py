@@ -126,12 +126,19 @@ def main() -> None:
     live = wall(spec, home)
     # The gate's own tool must be unreachable by every spelling, or the receipt
     # it protects is a formality. maintainer-merge lives in ~/.local/bin.
-    receipt = shutil.which("maintainer-merge")
-    if receipt:
-        want = f"Bash({os.path.dirname(receipt)}/maintainer-merge receipt:*)"
-        if "maintainer-merge receipt" in json.dumps(spec) and want not in live:
-            raise SystemExit(f"render-settings: {want} is missing, so the receipt "
-                             f"can be forged by writing the full path")
+    if "maintainer-merge receipt" in json.dumps(spec):
+        # `which` returns None on a first install, before the tool is on PATH,
+        # so keying the check on it made the guard inert exactly when the wall
+        # is first written. Check the directory install.sh deploys into, which
+        # is known regardless, and the resolved one when there is one.
+        wanted = {f"Bash({home.rstrip('/')}/.local/bin/maintainer-merge receipt:*)"}
+        found = shutil.which("maintainer-merge")
+        if found:
+            wanted.add(f"Bash({os.path.dirname(found)}/maintainer-merge receipt:*)")
+        missing = sorted(w for w in wanted if w not in live)
+        if missing:
+            raise SystemExit("render-settings: the receipt can be forged by writing "
+                             "the full path; missing " + ", ".join(missing))
     if not any(r.startswith("Read(~/") for r in live):
         raise SystemExit("render-settings: no credential path is denied; refusing to "
                          "write a wall that protects nothing")

@@ -361,3 +361,63 @@ matters and does not move.
 
 **Guard:** claim the input, observe the output, and test the invariant that
 connects them.
+
+## 21. The second run found what the first one's fixes introduced
+
+Running the agent against its own repository a second time, on the commit that
+fixed the first eight findings, produced nine more. Three came from that commit;
+the rest had been there longer and nothing had looked.
+
+**A rehearsal could still merge.** `maintainer-repo prune` was taught to honour
+`POST=off`, and `maintainer-merge` was not: `gh pr merge --squash
+--delete-branch` runs inside the script, where no deny rule sees it. The
+reasoning that fixed `prune` was written into the commit message and not applied
+to the file next to it.
+
+**`MAINTAINER_FORCE=1` reached the agent's environment**, so every `run.sh` the
+agent invoked skipped its cadence gate. A reproduction that should have printed
+`skipped` started a real pass against another repository's checkout instead.
+Nothing forbade the nesting either: a rehearsal could launch a full run of a
+posting profile, and that it stayed a rehearsal was luck, because
+`MAINTAINER_POST` happened to be inherited too. Runs now export
+`MAINTAINER_IN_RUN` and refuse to start inside another, and the override is
+unset the moment it is consumed.
+
+**The suite inherited the run's environment and reported two vacuous passes.**
+Invoked from inside a run it gave 236 passed / 6 failed, with the identity-gate
+cases never reaching the identity gate. Worse, `a task past its minimum interval
+proceeds` and `MAINTAINER_FORCE overrides the gate` both PASSED because force
+was on. A suite whose answer depends on who called it is not a measurement; it
+clears every `MAINTAINER_*` variable before measuring anything now.
+
+**`check_claims.sh` read the suite's output and not its status**, so a red suite
+surfaced as `README says 242 tests, the tree has 236`. It sent a reader to the
+README instead of to six failures, and only noticed at all by arithmetic
+accident.
+
+**The `"n/a"` hatch could retire the whole eval suite.** Omission was guarded and
+declaration was not: marking all seven scenarios not-applicable left the gate
+reporting seven passed. Five assert doctrine from `lib/preamble-core.md`, which
+every profile receives, so they are not a profile's to retire. Only
+`05-reserved-issue` is.
+
+**The context block answered a question nobody asked.** `main <before> -> <after>`
+reports what a run's own fetch pulled in, and reads `(already current)` when a
+commit was made on this machine rather than fetched. `snapshot()` had always
+written `main_sha` and `delta()` never read it, so the field that answers "what
+have I not reviewed" was written and unused. A run was told the tree was current
+while an entire unreviewed commit sat in front of it, and the prompt told it to
+trust that line.
+
+**Three guards had no test at all**: prune's rehearsal check, the profile-name
+refusal, and the merge gate's. Each was mutated with all three gates left green.
+
+**The template taught the retired format**, and the receipt guard in
+`render-settings.py` was keyed on `which("maintainer-merge")`, which returns
+None on a first install: the check meant to keep the merge receipt unforgeable
+was inert exactly when the wall is first written.
+
+I also destroyed this work once with `git checkout .` and had to redo it, which
+is the trap the mutation-harness entry in this file already describes. Commit
+before running an experiment that touches the tree, including the experiments
+that verify the commit.

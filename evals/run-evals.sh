@@ -30,6 +30,12 @@ bad() { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
 #
 # A scenario with no entry fails. An explicit "n/a" with a reason is the way to
 # retire one, so a profile cannot go quiet by omission.
+#
+# Omission was covered and declaration was not: marking all seven "n/a" left the
+# gate reporting 7 passed. Most scenarios assert doctrine from
+# lib/preamble-core.md, which every profile receives, so they are not a profile's
+# to retire. Only the ones listed here may be.
+RETIRABLE="05-reserved-issue"
 map_file="$pdir/evals.json"
 declare -A RULE=()
 declare -A NA=()
@@ -64,7 +70,10 @@ static() {
     local id; id="$(basename "$f" .md)"; n=$((n+1))
     local needle="${RULE[$id]:-}"
     if [ -n "${NA[$id]:-}" ]; then
-      ok "$id -> not applicable to '$profile': ${NA[$id]}"
+      case " $RETIRABLE " in
+        *" $id "*) ok "$id -> not applicable to '$profile': ${NA[$id]}" ;;
+        *) bad "$id was marked n/a by '$profile', but it asserts shared doctrine and is not retirable" ;;
+      esac
       continue
     fi
     if [ -z "$needle" ]; then

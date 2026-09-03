@@ -234,6 +234,25 @@ def delta(old: dict | None, new: dict) -> list[str]:
     if old is None:
         return ["no previous run recorded for this skill; this run establishes the baseline"]
     out: list[str] = []
+    # What has this task not reviewed? `refresh()` answers a different question,
+    # "what did this run's fetch pull in", and prints "(already current)" when
+    # the answer is nothing. A commit made on this machine between two runs
+    # arrives without a fetch, so a whole commit went unmentioned and a run was
+    # told the tree was current. snapshot() has always written main_sha and
+    # nothing read it.
+    old_sha, new_sha = old.get("main_sha"), new.get("main_sha")
+    if old_sha and new_sha and old_sha != new_sha:
+        log = subprocess.run(("git", "log", "--oneline", "--no-decorate",
+                              f"{old_sha}..{new_sha}"),
+                             cwd=REPO, capture_output=True, text=True)
+        commits = [ln for ln in log.stdout.splitlines() if ln] if log.returncode == 0 else []
+        out.append(f"main moved {old_sha[:8]} -> {new_sha[:8]} since this task last ran"
+                   + (f", {len(commits)} commit(s) YOU HAVE NOT REVIEWED:" if commits else ""))
+        out.extend(f"    {c}" for c in commits[:20])
+        if len(commits) > 20:
+            out.append(f"    ... and {len(commits) - 20} more")
+    elif old_sha and new_sha:
+        out.append(f"main is unchanged since this task last ran ({new_sha[:8]})")
     op, np_ = old.get("open_prs", {}), new["open_prs"]
     for n in sorted(set(np_) - set(op), key=int):
         out.append(f"PR #{n} opened by {np_[n]['author']}: {np_[n]['title']}")

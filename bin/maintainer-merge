@@ -16,6 +16,10 @@ REPO_PATH="${MAINTAINER_REPO:-$HOME/Desktop/lacs}"
 STATE="${MAINTAINER_STATE:-$HOME/.local/state/sysknife-maint}"
 ACCOUNT="${MAINTAINER_ACCOUNT:-vladimirrott}"
 RECEIPTS="$STATE/receipts"
+# Same reasoning as maintainer-repo: `gh pr merge` runs inside this script, so
+# no Bash deny rule sees it. Without this, a POST=off rehearsal could merge a
+# pull request while reporting that it reached nobody.
+POST="${MAINTAINER_POST:-on}"
 # Paths whose change invalidates a receipt. Tests, docs and the evidence
 # artifact may move between the verified head and the merged one; production
 # code and CI configuration may not.
@@ -183,6 +187,11 @@ $(printf '%s' "$diff" | sed 's/^/    /')
     git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
 
     say "#$pr: approved, $(printf '%s' "$checks" | jq '[.[]|select(.bucket=="pass")]|length') checks pass, 0 fail, 0 pending, receipt valid"
+    if [ "$POST" = off ]; then
+        say "POST=off: every condition holds and the merge is NOT being made"
+        say "         re-run with posting on to land it"
+        return 0
+    fi
     gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch || die "merge failed"
     say "merged #$pr"
     rm -f "$receipt"

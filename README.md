@@ -402,8 +402,8 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty entries that reached a
-working system, each with the measurement that found it and the guard that now stops it.
+[`docs/lessons.md`](docs/lessons.md) has the twenty-one entries that reached
+a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
 ## Operational traps, each one paid for
@@ -430,12 +430,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 242 offline tests
+./tests/run-tests.sh        # 254 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-242 offline tests: no network, no GitHub, no model call. Every case tests a
+254 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

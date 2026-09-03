@@ -12,9 +12,17 @@ git log --oneline <last-reviewed-sha>..HEAD
 git diff <last-reviewed-sha>..HEAD
 ```
 
-The context block names the SHA you last worked from. On the first run there is
-no previous SHA and the block says so: review the last three commits instead,
-and say in the report that this run set the baseline.
+The context block names the range this task has not reviewed, as
+`main moved <old> -> <new> ... commit(s) YOU HAVE NOT REVIEWED`, and lists them.
+Use that range.
+
+One line in the same block answers a different question and is not it. The
+`main <before> -> <after>` line reports what this run's own fetch pulled in, and
+reads `(already current)` when a commit was made on this machine rather than
+fetched. Trusting it once cost a whole commit's review.
+
+On the first run there is no previous SHA and the block says so: review the last
+three commits instead, and say in the report that this run set the baseline.
 
 Read the whole diff. This repository is small enough that skimming is a choice
 rather than a necessity.

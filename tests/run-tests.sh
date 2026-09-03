@@ -5,6 +5,21 @@
 # declines to do, so those are the paths worth pinning.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Clear anything a run exports before measuring anything.
+#
+# Invoked from inside a run, this suite reported 236 passed / 6 failed, and
+# worse, two cases in the cadence block PASSED because MAINTAINER_FORCE=1 was
+# inherited and the gate they test was disabled. MAINTAINER_POST=off sent every
+# run.sh the suite starts down the rehearsal branch, which exits 78 in a
+# checkout that has no rendered wall, so the identity gate cases never reached
+# the gate they exist to prove.
+#
+# A suite whose answer depends on who called it is not a measurement.
+unset MAINTAINER_FORCE MAINTAINER_POST MAINTAINER_PROFILE MAINTAINER_SETTINGS \
+      MAINTAINER_STATE MAINTAINER_STATE_DIR MAINTAINER_SLUG MAINTAINER_REPO \
+      MAINTAINER_TASKS MAINTAINER_SKILL MAINTAINER_IN_RUN MAINTAINER_SCRIPTS \
+      MAINTAINER_BACKEND MAINTAINER_PROSE_STYLE MAINTAINER_ACCOUNT
 pass=0; fail=0
 ok()   { printf '  PASS  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
@@ -815,6 +830,151 @@ make_stub gh 'exit 1'
 out="$(screen_run)"
 if printf '%s' "$out" | grep -q 'READ-ONLY'; then ok "an unreachable gh fails closed"
 else bad "the screen produced a verdict with no data (got: $(printf '%s' "$out" | head -1))"; fi
+
+echo "== a run cannot start inside another run, and the override does not travel =="
+# The agent inherits run.sh's environment. MAINTAINER_FORCE=1 was in it, so
+# every run.sh the agent invoked skipped its cadence gate: a repro that should
+# have printed "skipped" started a real pass against another repository's
+# checkout instead. Nothing forbade the nesting either, so a rehearsal could
+# have launched a full run of a posting profile.
+out=$(MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+if [ "$rc" = 78 ] && printf '%s' "$out" | grep -q "already inside the run 'other/review'"; then
+    ok "a nested run is refused, naming the run it is inside"
+else
+    bad "a nested run was not refused (rc=$rc)"
+fi
+# A preview from inside a run stays allowed: reading the prompt harms nothing.
+MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
+    bash "$root/lib/run.sh" --show-prompt sysknife review >/dev/null 2>&1 \
+    && ok "a preview from inside a run is still allowed" \
+    || bad "the nested guard also blocks --show-prompt"
+
+# What the backend actually receives, measured by running one.
+envh="$stub_dir/envrun"; mkdir -p "$envh/backends" "$envh/profiles/envp/prompts" "$envh/bin"
+cp "$root/lib/run.sh" "$envh/run.sh"
+cp "$root/lib/preamble-core.md" "$root/lib/prose-style.md" "$envh/"
+cat > "$envh/backends/envdump.sh" <<'BACKEND'
+backend_name() { printf 'envdump'; }
+backend_check() { return 0; }
+backend_run() { env | sort > "$ENVDUMP_OUT"; return 0; }
+BACKEND
+cat > "$envh/profiles/envp/profile.env" <<'ENVP'
+PROFILE_NAME="envp"
+REPO_PATH="$HOME/repo"
+REPO_SLUG="o/r"
+MAINTAINER_NAME="Tester"
+GH_ACCOUNT="testuser"
+STATE_DIR="${MAINTAINER_STATE_DIR:-$HOME/state}"
+HELPER="$HOME/bin/maintainer"
+TASKS="review"
+MODEL_review="m"
+MIN_HOURS_review=6
+POST="on"
+PROSE_STYLE="raw"
+BACKEND="envdump"
+LOCK_WAIT=5
+REQUIRED_COMMANDS="gh"
+KNOWN_NAMES=""
+ENVP
+printf '# task\n' > "$envh/profiles/envp/prompts/review.md"
+printf '# site\n' > "$envh/profiles/envp/prompts/common-preamble.md"
+# A helper that behaves like `maintainer start` and `finish` without a repo.
+cat > "$envh/bin/maintainer" <<'HELPER'
+#!/usr/bin/env bash
+case "$1" in
+  start)  echo "=== maintainer testrun-review ==="; echo "context";;
+  finish) exit 0;;
+esac
+HELPER
+chmod +x "$envh/bin/maintainer"
+mkdir -p "$envh/state/state" "$envh/state/runs" "$envh/repo"
+make_stub gh "case \"\$*\" in *'api user'*) echo testuser;; esac; exit 0"
+printf '# r\n' > "$envh/state/runs/testrun-review.md"
+ENVDUMP_OUT="$stub_dir/backend.env" PATH="$stub_dir:$envh/bin:$PATH" HOME="$envh" \
+    MAINTAINER_FORCE=1 MAINTAINER_STATE_DIR="$envh/state" \
+    bash "$envh/run.sh" envp review >/dev/null 2>&1
+if [ -f "$stub_dir/backend.env" ]; then
+    ok "the backend ran, so its environment can be measured"
+    grep -q '^MAINTAINER_FORCE=' "$stub_dir/backend.env" \
+        && bad "MAINTAINER_FORCE reached the backend; nested runs skip their cadence gate" \
+        || ok "MAINTAINER_FORCE does not reach the backend"
+    grep -q '^MAINTAINER_IN_RUN=envp/review$' "$stub_dir/backend.env" \
+        && ok "the backend is told which run it is inside" \
+        || bad "MAINTAINER_IN_RUN is not set for the backend"
+    grep -q '^MAINTAINER_POST=' "$stub_dir/backend.env" \
+        && ok "MAINTAINER_POST does reach the tools (prune has to honour it)" \
+        || bad "MAINTAINER_POST is not exported"
+else
+    bad "the env-dump backend never ran, so this block measured nothing"
+fi
+
+echo "== three guards that shipped without a test =="
+# All three were found by a run that mutated them and watched every gate stay
+# green. A guard nothing tests is a guard that will be deleted by someone tidying
+# up, and nobody will know.
+
+# 1. prune must not delete during a rehearsal.
+pr="$stub_dir/prunerepo"; rm -rf "$pr"; mkdir -p "$pr"
+git -C "$pr" init -q -b main; git -C "$pr" config user.email t@t; git -C "$pr" config user.name t
+echo a > "$pr/a"; git -C "$pr" add -A; git -C "$pr" commit -qm base
+git -C "$pr" branch merged-one; git -C "$pr" remote add origin "$pr"; git -C "$pr" fetch -q origin 2>/dev/null
+make_stub gh 'exit 0'
+MAINTAINER_POST=off MAINTAINER_REPO="$pr" MAINTAINER_SLUG="o/r" PATH="$stub_dir:$PATH" \
+    bash "$root/bin/maintainer-repo" prune >/dev/null 2>&1
+if git -C "$pr" show-ref --verify -q refs/heads/merged-one; then
+    ok "prune deletes nothing while POST=off"
+else
+    bad "a rehearsal deleted a branch"
+fi
+MAINTAINER_POST=on MAINTAINER_REPO="$pr" MAINTAINER_SLUG="o/r" PATH="$stub_dir:$PATH" \
+    bash "$root/bin/maintainer-repo" prune >/dev/null 2>&1
+if git -C "$pr" show-ref --verify -q refs/heads/merged-one; then
+    bad "prune deleted nothing with POST=on either; the test proves nothing"
+else
+    ok "prune does delete with POST=on (so the POST=off case means something)"
+fi
+
+# 2. the merge gate must not merge during a rehearsal. Same shape as prune:
+#    `gh pr merge` runs inside the script, where no deny rule can see it.
+grep -q 'POST="\${MAINTAINER_POST:-on}"' "$root/bin/maintainer-merge" \
+    && ok "the merge gate reads POST" || bad "the merge gate ignores POST"
+# Located by line number rather than by a context window, which was set to four
+# lines and missed a five-line guard.
+python3 - "$root/bin/maintainer-merge" <<'PYEOF' && ok "the merge gate returns before gh pr merge when POST=off" || bad "a rehearsal could merge a pull request"
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+merge = next((i for i, l in enumerate(lines) if "gh pr merge " in l and not l.strip().startswith("#")), None)
+if merge is None:
+    print("  no gh pr merge call found at all"); sys.exit(1)
+window = lines[max(0, merge - 12):merge]
+if not any('"$POST" = off' in l for l in window):
+    print("  no POST=off check in the 12 lines before the merge call"); sys.exit(1)
+if not any("return 0" in l for l in window):
+    print("  the POST=off branch does not return before the merge"); sys.exit(1)
+sys.exit(0)
+PYEOF
+
+# 3. the profile name must not reach a shell unquoted.
+inj="$stub_dir/injhome"; rm -rf "$inj"
+evil='pwn"; touch '"$stub_dir"'/INJECTED; :"'
+mkdir -p "$inj/.local/share/maintainer/profiles/$evil"
+printf 'REPO_SLUG="o/r"\nTASKS="review"\n' > "$inj/.local/share/maintainer/profiles/$evil/profile.env"
+rm -f "$stub_dir/INJECTED"
+out=$(HOME="$inj" MAINTAINER_PROFILE="$evil" python3 "$root/bin/maintainer" status 2>&1); rc=$?
+if [ -e "$stub_dir/INJECTED" ]; then
+    bad "a profile name reached the shell: the injection ran"
+elif [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not a plain word'; then
+    ok "a profile name that is not a plain word is refused"
+else
+    bad "the injection did not run, but nothing refused it either (rc=$rc)"
+fi
+# And the ordinary case must still work, or the refusal is just a broken tool.
+ok2="$stub_dir/okhome"; mkdir -p "$ok2/.local/share/maintainer/profiles/plain"
+printf 'REPO_SLUG="o/r"\nTASKS="review"\nSTATE_DIR="$HOME/st"\nPOST="off"\n' \
+    > "$ok2/.local/share/maintainer/profiles/plain/profile.env"
+HOME="$ok2" MAINTAINER_PROFILE=plain python3 "$root/bin/maintainer" status 2>&1 | grep -q 'o/r' \
+    && ok "a plain profile name still works" || bad "the name check rejects a valid profile"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

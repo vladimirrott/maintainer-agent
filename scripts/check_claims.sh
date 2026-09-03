@@ -11,8 +11,17 @@ fail=0
 note() { printf '  %s\n' "$1"; }
 bad()  { printf 'FAIL: %s\n' "$1" >&2; fail=1; }
 
-# Measured, not asserted.
-tests_actual=$(bash "$root/tests/run-tests.sh" 2>/dev/null | sed -n 's/^ *\([0-9]\+\) passed.*/\1/p' | tail -1)
+# Measured, not asserted. The suite's STATUS is read before its output: this
+# check once parsed "236 passed" out of a red suite and reported
+# "README says 242 tests, the tree has 236", sending a reader to the README
+# instead of to the six failures. It caught the problem by arithmetic accident.
+suite_out="$(mktemp)"; trap 'rm -f "$suite_out"' EXIT
+if ! bash "$root/tests/run-tests.sh" >"$suite_out" 2>&1; then
+    bad "the test suite is RED; fix that before believing any number here"
+    grep -E '^  FAIL' "$suite_out" | head -10 >&2
+    exit 1
+fi
+tests_actual=$(sed -n 's/^ *\([0-9]\+\) passed.*/\1/p' "$suite_out" | tail -1)
 [ -n "$tests_actual" ] || { bad "could not measure the test count; refusing to pass over nothing"; exit 1; }
 evals_actual=$(find "$root/evals/scenarios" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
 backends_actual=$(find "$root/lib/backends" -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
