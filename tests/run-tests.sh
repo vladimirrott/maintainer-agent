@@ -480,24 +480,29 @@ echo "== every command the prompt names is declared, and resolves =="
 # it: the evals check that a RULE is present, not that a tool exists.
 #
 # Scanned over the ASSEMBLED prompt, because the doctrine and the task prompt
-# come from different files and only the assembly is what the agent reads.
-# Every task, not a sample: a stale command name in the one prompt nobody
-# assembled is exactly the case this check exists for.
-# shellcheck disable=SC1091
-( . "$root/profiles/sysknife/profile.env"
-  for tk in $TASKS; do
-      PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife "$tk" \
-          >"$stub_dir/p-$tk.md" 2>/dev/null
-  done )
-# shellcheck disable=SC1091
-( . "$root/profiles/sysknife/profile.env"
-  python3 - "$stub_dir" "$REQUIRED_COMMANDS" "$KNOWN_NAMES" <<'PYEOF'
+# come from different files and only the assembly is what the agent reads. Every
+# task of every profile: a stale name in the one prompt nobody assembled is the
+# case this exists for, and a second profile's prompts are no less able to name
+# a command that is gone.
+for pe in "$root"/profiles/*/profile.env; do
+  pf="$(basename "$(dirname "$pe")")"
+  [ "$pf" = "_template" ] && continue
+  rm -f "$stub_dir"/p-*.md
+  # shellcheck disable=SC1091
+  ( . "$pe"
+    for tk in $TASKS; do
+        PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt "$pf" "$tk" \
+            >"$stub_dir/p-$tk.md" 2>/dev/null
+    done )
+  # shellcheck disable=SC1091
+  ( . "$pe"
+    python3 - "$stub_dir" "$REQUIRED_COMMANDS" "$KNOWN_NAMES" <<'PYEOF'
 import glob, os, re, sys
 d, required, known = sys.argv[1], sys.argv[2].split(), sys.argv[3].split()
 allowed = set(required) | set(known)
 # Hyphenated lowercase words inside backticks, taken as the first token of the
-# span. Precise enough that the current prompts yield nine names, not ninety;
-# calibrated by checking it flags a renamed command and nothing else.
+# span. Precise enough that the current prompts yield a handful of names rather
+# than ninety; calibrated by checking it flags a renamed command and nothing else.
 span = re.compile(r"`([^`\n]+)`")
 name = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)+$")
 seen, undeclared = set(), {}
@@ -518,8 +523,9 @@ for k in unused:
     print(f"  KNOWN_NAMES lists '{k}', which no assembled prompt uses")
 sys.exit(1 if undeclared or unused else 0)
 PYEOF
-) && ok "every hyphenated name in the prompt is declared, and no declaration is padding" \
-  || bad "an undeclared or unused name in the prompt (see above)"
+  ) && ok "$pf: every hyphenated name is declared, and none is padding" \
+    || bad "$pf: an undeclared or unused name in its prompts (see above)"
+done
 
 echo "== the cadence gate holds a task that ran too recently =="
 # launchd cannot express "every N days" and cron's day-of-month stepping fires
@@ -635,6 +641,16 @@ echo "== new-profile.sh makes CONTRIBUTING's promise true =="
 np="$stub_dir/np"; mkdir -p "$np"; cp -r "$root"/* "$np/" 2>/dev/null
 rm -rf "$np/.git"
 ( cd "$np" && ./new-profile.sh demo acme/widget /tmp/widget acmebot "Ada" ) >/dev/null 2>&1
+# A checkout under $HOME must be written as $HOME/..., because profile.env gets
+# committed and the adopter's username would go with it. This repository's own
+# leak check caught it the first time a profile was scaffolded here.
+( cd "$np" && ./new-profile.sh underhome acme/uh "$HOME/src/uh" acmebot "Ada" ) >/dev/null 2>&1
+if grep -q 'REPO_PATH=.*\$HOME/src/uh' "$np/profiles/underhome/profile.env"; then
+    ok "a checkout under \$HOME is written relative, not expanded"
+else
+    bad "new-profile wrote a literal home path into a file meant to be committed"
+    grep -n 'REPO_PATH' "$np/profiles/underhome/profile.env" | head -1
+fi
 [ -f "$np/profiles/demo/profile.env" ] && ok "new-profile scaffolds a profile" || bad "new-profile wrote no profile"
 grep -rq '__[A-Z_]*__' "$np/profiles/demo" && bad "a placeholder survived scaffolding" || ok "every placeholder is substituted"
 grep -q 'REPO_SLUG="acme/widget"' "$np/profiles/demo/profile.env" && ok "the slug lands in profile.env" || bad "the slug did not substitute"
@@ -643,6 +659,13 @@ made=$(find "$np/platform/linux" -name 'maintainer@demo-*.timer' | wc -l)
 check "one timer per task" "$made" "$tasks"
 ( cd "$np" && ./new-profile.sh demo acme/widget /tmp/widget acmebot ) >/dev/null 2>&1 \
     && bad "new-profile overwrote an existing profile" || ok "new-profile refuses to overwrite"
+# The closing instructions must name commands that exist. They told the adopter
+# to call run.sh by its deployed path after `maintainer run` had replaced it.
+nextsteps=$( cd "$np" && ./new-profile.sh steps acme/s /tmp/s acmebot "A" 2>&1 )
+printf '%s' "$nextsteps" | grep -q 'maintainer run' && ok "the next steps name the command that exists" \
+    || bad "new-profile still points at a path instead of a command"
+printf '%s' "$nextsteps" | grep -q 'MAINTAINER_PROFILE' && ok "the next steps say to export the profile" \
+    || bad "the next steps would have the adopter querying the wrong profile"
 # The scaffolded profile must produce a real prompt, not a template with holes.
 ( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null ) | grep -q 'acme/widget' \
     && ok "a scaffolded profile assembles a prompt naming its own repository" \
@@ -669,6 +692,36 @@ grep -q 'os.execv' "$root/bin/maintainer" && ok "maintainer run execs run.sh rat
     || bad "maintainer run does not delegate to run.sh"
 out=$(python3 "$root/bin/maintainer" run 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "maintainer run with no task is refused" || bad "maintainer run accepted an empty task"
+
+echo "== a second profile reads its own settings, not the first one's =="
+# Found by scaffolding a profile for this repository and running status against
+# it. It printed the new profile's name and POST setting above the FIRST
+# profile's repository path and run history, because those came from module
+# defaults. An adopter would have read another project's runs as their own.
+two="$stub_dir/twoprofiles"; mkdir -p "$two/.local/share/maintainer/profiles/other"
+cat > "$two/.local/share/maintainer/profiles/other/profile.env" <<'ENV'
+PROFILE_NAME="other"
+REPO_PATH="$HOME/src/otherrepo"
+REPO_SLUG="someone/otherrepo"
+STATE_DIR="$HOME/.local/state/other-maint"
+TASKS="triage"
+MIN_HOURS_triage=12
+POST="off"
+ENV
+mkdir -p "$two/.local/state/other-maint/runs" "$two/.local/state/other-maint/state"
+out=$(env -u MAINTAINER_STATE -u MAINTAINER_REPO -u MAINTAINER_SLUG -u MAINTAINER_TASKS \
+      -u MAINTAINER_STATE_DIR HOME="$two" MAINTAINER_PROFILE=other \
+      python3 "$root/bin/maintainer" status 2>&1)
+printf '%s' "$out" | grep -q 'someone/otherrepo' && ok "status reports the second profile's slug" \
+    || bad "status did not read the second profile's slug"
+printf '%s' "$out" | grep -q 'src/otherrepo' && ok "status reports the second profile's repository" \
+    || bad "status showed the wrong repository for a second profile"
+printf '%s' "$out" | grep -q 'triage' && ok "status reports the second profile's task list" \
+    || bad "status showed the wrong task list for a second profile"
+printf '%s' "$out" | grep -qi 'lacs\|sysknife' && bad "the first profile's data leaked into the second profile's status" \
+    || ok "no first-profile data leaks into a second profile"
+printf '%s' "$out" | grep -qi 'OFF, rehearsal' && ok "status reads POST from the deployed profile" \
+    || bad "status did not read POST"
 
 echo "== the screen decides what may execute on this host =="
 # Containment layer 3, and it had no test at all until now. `cargo test` on a

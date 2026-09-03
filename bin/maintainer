@@ -22,24 +22,66 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-# Profile-driven. lib/run.sh exports these; the SYSKNIFE_* names are kept as
-# fallbacks so an existing install keeps working across the rename.
-REPO = Path(os.environ.get("MAINTAINER_REPO")
-            or os.environ.get("SYSKNIFE_REPO", str(Path.home() / "Desktop/lacs")))
-SLUG = (os.environ.get("MAINTAINER_SLUG")
-        or "lacs-project/sysknife")
-ROOT = Path(os.environ.get("MAINTAINER_STATE")
-            or os.environ.get("SYSKNIFE_MAINT_HOME",
-                              Path.home() / ".local/state/sysknife-maint"))
+# Profile-driven, in this order: the environment run.sh exports, then the
+# DEPLOYED profile.env, then a default.
+#
+# The middle step is what makes a direct call correct. `maintainer status` used
+# to read the profile's name and POST setting from its profile.env while taking
+# the repository, the state directory and the task list from module-level
+# defaults, so a second profile printed its own header above the FIRST
+# profile's repository and run history. An adopter would have read another
+# project's runs and believed they were theirs.
+PROFILE = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+
+
+def _profile_env(profile: str = PROFILE) -> dict:
+    """Source the deployed profile.env and read its values back.
+
+    Sourced rather than parsed, because the values are shell:
+    `STATE_DIR="${MAINTAINER_STATE_DIR:-$HOME/.local/state/x-maint}"` cannot be
+    read with a regex without reimplementing parameter expansion. run.sh sources
+    the same file on every run, so this adds no new trust.
+    """
+    path = Path.home() / ".local/share/maintainer/profiles" / profile / "profile.env"
+    out = {"_profile": profile, "_path": str(path)}
+    if not path.exists():
+        return out
+    keys = ("REPO_PATH", "REPO_SLUG", "STATE_DIR", "TASKS", "POST", "GH_ACCOUNT",
+            "MAINTAINER_NAME", "REQUIRED_COMMANDS")
+    script = f'. "{path}" >/dev/null 2>&1; ' + "".join(
+        f'printf "%s\\n" "${{{k}:-}}"; ' for k in keys)
+    p = subprocess.run(("bash", "-c", script), capture_output=True, text=True)
+    if p.returncode != 0:
+        return out
+    values = p.stdout.split("\n")
+    out.update({k: v for k, v in zip(keys, values)})
+    # Every MIN_HOURS_<task>, for the "held back" marker in status.
+    for task in (out.get("TASKS") or "").split():
+        q = subprocess.run(
+            ("bash", "-c", f'. "{path}" >/dev/null 2>&1; printf "%s" "${{MIN_HOURS_{task}:-}}"'),
+            capture_output=True, text=True)
+        if q.returncode == 0 and q.stdout.strip():
+            out[f"MIN_HOURS_{task}"] = q.stdout.strip()
+    return out
+
+
+_ENV = _profile_env()
+
+
+def _setting(env_key: str, profile_key: str, default: str) -> str:
+    return os.environ.get(env_key) or _ENV.get(profile_key) or default
+
+
+REPO = Path(_setting("MAINTAINER_REPO", "REPO_PATH",
+                     os.environ.get("SYSKNIFE_REPO", str(Path.home() / "Desktop/lacs"))))
+SLUG = _setting("MAINTAINER_SLUG", "REPO_SLUG", "lacs-project/sysknife")
+ROOT = Path(_setting("MAINTAINER_STATE", "STATE_DIR",
+                     os.environ.get("SYSKNIFE_MAINT_HOME",
+                                    str(Path.home() / ".local/state/sysknife-maint"))))
 RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
 INDEX = ROOT / "index.md"
 SENTINEL = "<!-- sysknife-maint: report not yet written -->"
-# The task list belongs to the profile, not to this file. It used to be a dict
-# hardcoded to one repository's skill names, which is why CONTRIBUTING's promise
-# that a second repository needs no code change was not true. run.sh exports
-# both; the defaults keep a direct call working for the original profile.
-TASKS = (os.environ.get("MAINTAINER_TASKS")
-         or "review issues ci audit").split()
+TASKS = _setting("MAINTAINER_TASKS", "TASKS", "review issues ci audit").split()
 SKILL = os.environ.get("MAINTAINER_SKILL", "")
 DEFAULT_SKILLS = {
     "review": "sysknife-review",
@@ -393,26 +435,6 @@ def cmd_finish(run_id: str) -> None:
     print(f"maintainer: recorded {run_id} in {INDEX}")
 
 
-def _profile_env() -> dict:
-    """Read the DEPLOYED profile.env, which is what a scheduled run actually uses.
-
-    Reading the repository copy instead would report the settings someone is
-    editing rather than the ones running in their name at 09:13.
-    """
-    name = os.environ.get("MAINTAINER_PROFILE", "sysknife")
-    path = Path.home() / ".local/share/maintainer/profiles" / name / "profile.env"
-    out: dict[str, str] = {"_profile": name, "_path": str(path)}
-    if not path.exists():
-        return out
-    for line in path.read_text().splitlines():
-        line = line.split("#")[0].strip()
-        if "=" not in line or line.startswith("#"):
-            continue
-        k, _, v = line.partition("=")
-        out[k.strip()] = v.strip().strip('"').strip("'")
-    return out
-
-
 def _next_runs(profile: str) -> dict:
     """Ask the scheduler when each task fires next. Absent one, say so."""
     p = subprocess.run(("systemctl", "--user", "list-timers", f"maintainer@{profile}-*",
@@ -450,15 +472,11 @@ def _duration(sec: float) -> str:
 
 
 def cmd_status() -> None:
-    env = _profile_env()
+    env = _ENV
     # profile.env holds POST="${MAINTAINER_POST:-on}", so read the default out
     # of the parameter expansion rather than trying to evaluate shell here.
-    raw = env.get("POST")
-    if raw is None:
-        post = "on (default; this deployed profile predates POST, re-run ./install.sh)"
-    else:
-        post = "off" if raw.rstrip("}").endswith("off") else "on"
-    print(f"profile   {env['_profile']}  ->  {env.get('REPO_SLUG', SLUG)}")
+    post = (env.get("POST") or "on").strip() or "on"
+    print(f"profile   {env['_profile']}  ->  {SLUG}")
     print(f"repo      {REPO}")
     print("posting   " + ("OFF, rehearsal: it writes reports and drafts, and posts nothing"
                           if post == "off" else
@@ -483,8 +501,8 @@ def cmd_status() -> None:
             report = RUNS / f"{rid}.md"
             lines = f"{len(report.read_text().splitlines())} lines" if report.exists() else "MISSING"
             age = f"{age_h:.0f}h"
-            min_h = env.get(f"MIN_HOURS_{task}")
-            if min_h and min_h.isdigit() and age_h < int(min_h):
+            min_h = env.get(f"MIN_HOURS_{task}", "")
+            if min_h.isdigit() and age_h < int(min_h):
                 age += "*"
                 held = True
         else:

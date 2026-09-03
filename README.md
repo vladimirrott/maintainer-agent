@@ -231,6 +231,15 @@ refuses to load.
 ./new-profile.sh widget acme/widget ~/src/widget acmebot "Ada Lovelace"
 ```
 
+`profiles/magent/` is the worked second profile: this repository maintaining
+itself, at `POST=off`. Scaffolding it found three defects in the first five
+minutes, which is the argument for doing it rather than describing it.
+`maintainer status` for a second profile printed that profile's name above the
+*first* profile's repository and run history; `new-profile.sh` wrote an absolute
+home path into a file meant to be committed, and this repository's own leak
+check caught it; and the scaffolder's closing instructions named `run.sh` by its
+deployed path after `maintainer run` had replaced it.
+
 That writes `profiles/widget/` from `profiles/_template/`, substitutes every
 placeholder, refuses to continue if one survives, and generates one systemd
 timer per task. Then rewrite `profiles/widget/prompts/*.md` for the project.
@@ -370,7 +379,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the seventeen defects that reached
+[`docs/lessons.md`](docs/lessons.md) has the eighteen defects that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -398,12 +407,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 171 offline tests
+./tests/run-tests.sh        # 180 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-171 offline tests: no network, no GitHub, no model call. Every case tests a
+180 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

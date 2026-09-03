@@ -19,6 +19,16 @@ usage() { sed -n '2,9p' "$0" >&2; exit 64; }
 [ $# -ge 4 ] || usage
 profile="$1"; slug="$2"; path="$3"; account="$4"; name="${5:-$account}"
 
+# A checkout under $HOME is written as $HOME/..., not expanded. profile.env is
+# meant to be committed, and this repository's own leak check went red the first
+# time a profile was scaffolded here: the adopter's username would have been
+# published in a file nobody reads twice. It also makes the profile portable
+# between machines.
+case "$path" in
+    "$HOME"/*) path_written="\$HOME/${path#"$HOME"/}" ;;
+    *)         path_written="$path" ;;
+esac
+
 case "$profile" in
     _*|*/*|"") echo "new-profile: '$profile' is not a usable profile name" >&2; exit 64 ;;
 esac
@@ -37,7 +47,7 @@ while IFS= read -r f; do
     sed -i \
         -e "s|__PROFILE__|$profile|g" \
         -e "s|__SLUG__|$slug|g" \
-        -e "s|__REPO_PATH__|$path|g" \
+        -e "s|__REPO_PATH__|$path_written|g" \
         -e "s|__GH_ACCOUNT__|$account|g" \
         -e "s|__MAINTAINER_NAME__|$name|g" "$f"
 done < <(find "$root/profiles/$profile" -type f)
@@ -85,16 +95,21 @@ cat <<NEXT
   2. Rewrite profiles/$profile/prompts/*.md for this repository. The generic
      ones are a starting point, not a description of your project. Read
      profiles/sysknife/prompts/ for a worked set.
-  3. Install and look at the assembled prompt before anything runs:
+  3. Install, then read the prompt before anything runs:
 
        ./install.sh
-       MAINTAINER_PROFILE=$profile maintainer-doctor
-       ./lib/run.sh --show-prompt $profile review | less
+       export MAINTAINER_PROFILE=$profile
+       maintainer-doctor
+       maintainer run --show-prompt review | less
 
   Then one rehearsal run by hand. POST=off, so it posts nothing:
 
-       ~/.local/share/maintainer/run.sh $profile review
-       maintainer log 1
+       maintainer run review
+       maintainer status
 
-  Turn posting on in profile.env only after you have read a week of reports.
+  Every command above reads MAINTAINER_PROFILE, so export it once per shell or
+  the tools answer for whichever profile is first.
+
+  Turn posting on in profile.env only after you have read a week of reports,
+  then enable the timers with ./install.sh --timers.
 NEXT

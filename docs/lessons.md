@@ -252,3 +252,31 @@ repository, the tests read the repository, and the deployment had neither.
 test asserts every shipped script reaches the deployed tree, and the fallback
 now writes a line into the log saying the transcript is unavailable. A fallback
 that stays quiet is a fallback nobody will notice taking.
+
+## 18. Scaffolding a second profile is the only test of the scaffolding
+
+`new-profile.sh` passed seven tests: it substitutes every placeholder, refuses
+when one survives, writes one timer per task, refuses to overwrite, and produces
+a profile that assembles a prompt naming its own repository. Then I pointed it
+at this repository, and three defects fell out in five minutes.
+
+- **`maintainer status` mixed two profiles.** It read the profile name and the
+  `POST` setting from the deployed `profile.env`, and took the repository path,
+  the state directory and the task list from module-level defaults. The second
+  profile's header sat above the first profile's repository and run history. An
+  adopter would have read another project's runs as their own.
+- **The scaffolder wrote an absolute home path** into `profile.env`, a file
+  meant to be committed. This repository's own leak check went red on the first
+  scaffold. For an adopter it would have published their username.
+- **The closing instructions named a command that no longer existed**, telling
+  the adopter to call `run.sh` by its deployed path after `maintainer run` had
+  replaced it. Lesson 12 in the documentation this time rather than in a prompt.
+
+None of the seven passing tests could see any of it, because each one asks
+whether the script did what it was written to do. Only using the output as an
+adopter asks whether what it was written to do is enough.
+
+**Guard:** every setting resolves from the deployed profile with the environment
+taking precedence, paths under `$HOME` are written relative, the prompt
+declaration check runs for every profile rather than the first one, and a test
+asserts the closing instructions name a command that exists.

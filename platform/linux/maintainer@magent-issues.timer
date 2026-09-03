@@ -1,0 +1,13 @@
+[Unit]
+Description=maintainer: magent issues (timer)
+
+[Timer]
+# Fires daily. The real cadence is MIN_HOURS_issues in profiles/magent/profile.env,
+# which run.sh enforces on every platform.
+OnCalendar=*-*-* 10:17:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@magent-issues.service
+
+[Install]
+WantedBy=timers.target

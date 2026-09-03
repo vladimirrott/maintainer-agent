@@ -1,0 +1,13 @@
+[Unit]
+Description=maintainer: magent review (timer)
+
+[Timer]
+# Fires daily. The real cadence is MIN_HOURS_review in profiles/magent/profile.env,
+# which run.sh enforces on every platform.
+OnCalendar=*-*-* 09:17:00
+Persistent=true
+RandomizedDelaySec=300
+Unit=maintainer@magent-review.service
+
+[Install]
+WantedBy=timers.target
