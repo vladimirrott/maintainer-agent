@@ -1,9 +1,9 @@
 # Going public
 
-Everything in this list is a thing the API cannot do, or that this repository
-cannot do for itself while it is private. Each one is a single paste.
+**Done on 2026-09-03**, except the social preview, which has no API. This page
+stays as the record of what was applied and how to reapply it.
 
-## 1. Flip the visibility
+## 1. Flip the visibility — done
 
 ```sh
 gh repo edit vladimirrott/maintainer-agent --visibility public --accept-visibility-change-consequences
@@ -12,10 +12,14 @@ gh repo edit vladimirrott/maintainer-agent --visibility public --accept-visibili
 Read [the leak check's own scope](#4-what-the-leak-check-does-and-does-not-cover)
 first.
 
-## 2. Branch protection
+## 2. Branch protection — done
 
 Refused with `Upgrade to GitHub Pro or make this repository public` while
-private, and free the moment it is public. Run it straight after step 1:
+private, and free the moment it is public. The applied rule requires **the four
+gates**, **shellcheck**, **the Windows installer parses** and **trufflehog**,
+taken from the check names GitHub actually reports rather than from the job
+names in the file, because protection naming a check that never appears can
+never be satisfied:
 
 ```sh
 gh api -X PUT repos/vladimirrott/maintainer-agent/branches/main/protection --input - <<'JSON'
@@ -41,7 +45,7 @@ that is not the one being merged.
 `enforce_admins` is false on purpose. An agent cannot merge here at all, and the
 person who can needs a way to land a fix when CI itself is broken.
 
-## 3. The social preview
+## 3. The social preview — still to do
 
 No API exists for this. Settings, General, Social preview, Upload an image, then
 pick `assets/social-preview.png`. It is already 1280x640 and 35KB, which is what
