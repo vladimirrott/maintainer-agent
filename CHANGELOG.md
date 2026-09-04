@@ -10,6 +10,81 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-04
+
+The middle digit moves because the merge gate refuses something it used to
+merge: a pull request closing an issue somebody else had claimed.
+
+Everything here came from maintaining a real tracker with real contributors,
+and most of it was found by using a tool on the repository it had just been
+built for.
+
+### Added
+
+- **`maintainer claims`** and **`maintainer offers`**. Who holds what, how long
+  they have been quiet, who can be offered an issue, and who is already past the
+  one-offer-per-person rule. That rule existed because it was measured (of
+  thirteen offers, five people got two each and every one answered exactly one)
+  and lived as prose in a skill file, so nothing enforced it. Run against the
+  live tracker it found one person holding three unanswered offers and another
+  holding two.
+- **`docs/cli.md`**, a reference for every command, and a gate that fails when a
+  subcommand appears in no document or an internal one is advertised. Six had
+  accumulated undocumented.
+- **`docs/roadmap.md`**: where everything goes, what a new backend has to prove
+  before it may post, and which drifts CI still cannot catch.
+- **A documentation site** at
+  [vladimirrott.github.io/maintainer-agent](https://vladimirrott.github.io/maintainer-agent/),
+  mdBook, built by a workflow with a checksum-verified toolchain download.
+- **A Cursor deny wall**, generated from the same `deny.json` as every other
+  backend, live and rehearsal.
+
+### Removed
+
+- **A pull request may no longer close an issue somebody else claimed.** The
+  gate refuses when the issue carries the claim label and the pull request's
+  author has never posted on it, naming both people. On 2026-09-04 a contributor
+  was told "it is yours", the label went on, and ten hours later a different
+  person's pull request closed it and was merged. Every component worked as
+  built and none of them knew the issue had been promised.
+
+### Fixed
+
+- **`lib/backends/cursor.sh` asserted that Cursor has no per-command deny list**,
+  and restricted the backend to read-only tasks on that basis. It has
+  `permissions.allow`/`deny` with `Shell()`, `Read()` and `Write()` patterns, and
+  `CURSOR_CONFIG_DIR` points it at a directory of our choosing. A stale claim
+  about containment is not conservative: it made the backend less capable than
+  it is while reading like caution. The read-only restriction stays, gated now on
+  a containment probe rather than on the wrong claim.
+- **The first Cursor wall emitted `Shell(git)`**, derived from `git push`, which
+  denies every git including the log and diff a review is made of. Caught by
+  reading the rendered file.
+- **Claims were labels and not assignments.** `GET /assignees/USER` returns 404
+  for every outside contributor and the POST succeeds for anyone who has
+  commented, so the check answers a different question than the operation does.
+  All five open claims are assignments now.
+- **`maintainer claims` measured staleness from `updatedAt`**, so recording five
+  claims reset all five to "0d, active", including one eleven days old: the act
+  of recording a claim blinded the check that watches it.
+- **`maintainer offers` read a release as an offer.** They are the same sentence
+  addressed to the same person on the same thread; the difference is intent and
+  intent is not a field. A release carries
+  `<!-- maintainer: claim-released -->` now.
+- **A profile key the code read and `_profile_env`'s allowlist omitted returned
+  empty**, indistinguishable from unset. A test cross-checks the two lists.
+
+### Security
+
+- Two lessons became doctrine rather than documentation, and the test that pins
+  the doctrine to the assembled prompt now lists every rule that came from a
+  real incident. **A capability check is a claim; the operation is the world**,
+  scoped to capability rather than permission. And **a claim is a promise**:
+  record it with the label and the assignment, never close a claimed issue with
+  somebody else's work, and release it with a comment, both removals and the
+  marker.
+
+
 ## [0.3.0] - 2026-09-04
 
 The middle digit moves because `maintainer finish` now refuses a report that is
@@ -326,7 +401,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.1.0
