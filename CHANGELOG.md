@@ -10,6 +10,48 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **What a run cost, on every surface that mentions the run.** `maintainer
+  digest <run-id>` prints it, `maintainer status` carries a `spend` column and a
+  profile total, and a finished run now sends a desktop notification saying what
+  it did and what it spent. Every figure is Claude Code's own reported usage, and
+  every surface that prints the dollar amount says it is a client-side estimate
+  from a bundled price table rather than a bill.
+- **A notification for a run that SUCCEEDED.** Until now the agent spoke to its
+  owner only to complain, which trains a person to read every popup as bad news.
+
+### Fixed
+
+- **A run recorded its input as `in=48`.** The usage line logged
+  `input_tokens` alone, and in an agent run almost every input token is a cache
+  read or a cache write, both of which are separate fields. The number was true
+  and useless, and it read as a measurement. Cache creation, cache reads, the
+  per-model breakdown and the turn count are all recorded now, in a
+  machine-readable file beside the log, for failed runs as well as successful
+  ones. Not counted with a tokenizer: `tiktoken` is OpenAI's, it undercounts
+  Claude by 15-20% on prose and by more on code, and the exact figures are
+  already in the stream.
+- **Every scheduled run failed for the first hour after v0.2.0 was deployed.**
+  `bin/maintainer` stopped defaulting to a hardcoded profile in that release and
+  now refuses when two are deployed and none is named, which is right, but
+  `lib/run.sh` called it without saying which profile it was running. It failed
+  closed and alerted, which is the only reason this was an hour. The test that
+  should have caught it replaces `maintainer` with a stub that ignores its
+  environment.
+- **The failure notification was a shell error.** It passed the raw message
+  straight to `notify-send`, absolute path and all, with no next step. Known
+  failures are translated into a sentence and a fix; anything unrecognised still
+  goes through verbatim, because a wrong translation is worse than none.
+- **The `OnFailure` alert left no trace.** It only called `notify-send`, so a
+  failure at 03:00 left a popup that was gone by morning. It appends to
+  `logs/alerts.log` too. It also moved out of the unit file, which refused the
+  inline shell with `Unbalanced quoting, ignoring` while `systemd-analyze
+  verify` reported that and exited 0.
+- **The digest read the newest `*.commands` in the directory** rather than the
+  one belonging to the run, so it printed another run's command count. Third
+  instance of `docs/lessons.md` 30.
+
 ## [0.2.0] - 2026-09-04
 
 The middle digit moves because six things that used to succeed now refuse. Every

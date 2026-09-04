@@ -63,6 +63,18 @@ export PROFILE_DIR REPO_PATH
 # called from inside a run must not have to re-derive what the run already knows.
 export MAINTAINER_REPO="$REPO_PATH" MAINTAINER_SLUG="$REPO_SLUG" MAINTAINER_STATE="$STATE_DIR"
 export MAINTAINER_ACCOUNT="$GH_ACCOUNT" PROD_GLOBS="${PROD_GLOBS:-}"
+# And the profile name itself. bin/maintainer stopped defaulting to a hardcoded
+# profile in v0.2.0 and now enumerates the deployed ones and refuses when two
+# are present, which is right. But run.sh calls `maintainer start` without
+# saying which profile it is running, so from 07:38 on the day v0.2.0 was
+# deployed EVERY scheduled run died with "2 profiles are deployed; set
+# MAINTAINER_PROFILE". It failed closed and alerted, which is the only reason
+# this is a story about an hour rather than about a week.
+#
+# The test that should have caught it replaces `maintainer` with a stub that
+# ignores its environment, so it measured run.sh talking to a helper that cannot
+# fail this way.
+export MAINTAINER_PROFILE="$profile"
 # scripts/ sits under local_root in both layouts: repo/scripts, and $share/scripts
 # once installed. local_root already accounts for the difference.
 [ -d "$local_root/scripts" ] && export MAINTAINER_SCRIPTS="$local_root/scripts"
@@ -127,10 +139,53 @@ else
 fi
 export PATH="$HOME/.local/bin:$PATH"
 
+# One notification shape, for the failure and the success alike.
+#
+# The old one passed the raw error string straight to notify-send, so what
+# reached the desktop was
+#
+#   maintainer: sysknife/review failed
+#   backend claude unusable: missing /home/<user>/<a long absolute path>/settings.json
+#
+# which is a shell message, not a message to a person. It said what broke in the
+# vocabulary of the thing that broke, gave no next step, and spent two thirds of
+# its width on an absolute path. And there was no notification at all for a run
+# that SUCCEEDED, so the only time this agent spoke to its owner was to complain.
+notify() {  # $1 = urgency, $2 = title, $3.. = body lines
+    local urgency="$1" title="$2"; shift 2
+    local body; body="$(printf '%s\n' "$@")"
+    DISPLAY="${DISPLAY:-:1}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+        notify-send -u "$urgency" -a maintainer "$title" "$body" 2>/dev/null || true
+}
+
+# Turn what broke into what to do about it. Anything unmatched falls through
+# verbatim, because a wrong translation is worse than an untranslated string.
+humanise() {  # $1 = raw message -> "sentence\nfix: command"
+    case "$1" in
+        *"unusable: missing"*settings*|*"unusable: missing"*opencode*)
+            printf 'Claude Code has no settings file for this profile.\nfix  ./install.sh' ;;
+        *"not on PATH"*)
+            printf '%s\nfix  install it, then: maintainer-doctor' "$1" ;;
+        *"refresh failed"*)
+            printf 'The checkout could not be refreshed, so no agent ran.\nfix  maintainer-doctor' ;;
+        *"held the lock"*)
+            printf 'Another run held the shared tree for over %ss.\nfix  maintainer status, then wait or kill it' "$LOCK_WAIT" ;;
+        *"authenticated as"*)
+            printf '%s\nfix  gh auth switch --user %s' "$1" "$GH_ACCOUNT" ;;
+        *"produced no report"*)
+            printf 'The run ended without writing a report, so it is not auditable.\nfix  read the log below' ;;
+        *"cannot enforce POST=off"*)
+            printf '%s\nfix  set BACKEND=claude or BACKEND=opencode in profile.env' "$1" ;;
+        *"no rehearsal wall"*)
+            printf 'POST=off, but no rehearsal deny wall is deployed for this profile.\nfix  ./install.sh' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
+
 alert() {
     printf '%s\n' "$1" | tee -a "$log" >&2
-    DISPLAY="${DISPLAY:-:1}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
-        notify-send -u critical "maintainer: $profile/$task failed" "$1" 2>/dev/null || true
+    notify critical "maintainer · $profile $task · FAILED" \
+        "$(humanise "$1")" "log  $log"
 }
 
 # Rehearsal: the agent does the whole run and reaches nobody.
@@ -314,6 +369,17 @@ fi
 if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
     alert "$run_id produced no report; the run is not auditable. See $log"
     exit 1
+fi
+
+# 5. Say what happened, to a person. An unattended agent that only ever speaks
+#    when it fails trains its owner to read every notification as bad news, and
+#    leaves the ordinary question -- did it run, what did it cost -- answerable
+#    only by opening a log. The digest is built from what the run MEASURED: its
+#    own line count, its own command record, and the usage the model reported.
+digest="$("$HELPER" digest "$run_id" --compact 2>/dev/null)" || digest=""
+if [ -n "$digest" ]; then
+    printf '\n=== digest ===\n%s\n' "$digest" >>"$log"
+    notify normal "maintainer · $profile $task" "$digest"
 fi
 
 echo "=== done $(date -Is) ===" >>"$log"

@@ -157,6 +157,10 @@ case "$(uname -s)" in
     done
     run cp "$root/platform/linux/run-instance.sh" "$share/run-instance.sh"
     run chmod +x "$share/run-instance.sh"
+    # The OnFailure alert. Deployed beside run-instance.sh for the same reason:
+    # the unit file calls a script so it needs no shell quoting of its own.
+    run cp "$root/platform/linux/alert.sh" "$share/alert.sh"
+    run chmod +x "$share/alert.sh"
     say "platform: Linux (systemd user units)"
     ;;
   Darwin)

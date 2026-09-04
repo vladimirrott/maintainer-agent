@@ -1,8 +1,11 @@
 [Unit]
-Description=maintainer: desktop alert for a failed %i
+Description=maintainer: alert for a failed %i
 
 [Service]
 Type=oneshot
 Environment=DISPLAY=:1
 Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
-ExecStart=/usr/bin/notify-send -u critical "maintainer failed" "%i produced no report. Run: maintainer status"
+# The script, not an inline shell command. systemd refused the inline version
+# with "Unbalanced quoting, ignoring", which it reports at load time and which
+# `systemd-analyze verify` prints while still exiting 0.
+ExecStart=%h/.local/share/maintainer/alert.sh %i

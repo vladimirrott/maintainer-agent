@@ -658,3 +658,59 @@ input and never the *documented* input.
 **A grep-based check has to say what part of the file is in scope.** Strip
 comments, anchor on a line shape, or read a structured field. A bare search over
 a file that talks about itself will eventually match the sentence explaining it.
+
+## 32. The number was true and useless
+
+A full review of a Rust workspace was recorded as `[tokens in=48 out=17365]`.
+Forty-eight input tokens for a run that read a repository.
+
+`input_tokens` is real, and in an agent run it is nearly nothing. The volume
+lives in two other fields: `cache_creation_input_tokens`, charged above input,
+and `cache_read_input_tokens`, charged below it. The same run's real shape was
+`in=108 cache_write=412k cache_read=9.85M`. Logging one of the three and calling
+it "in" was worse than logging nothing, because a reader treats it as a
+measurement.
+
+Three more things the usage record gets wrong if taken naively, all of them
+documented and none of them guessable:
+
+- `usage` **excludes subagent tokens**. `total_cost_usd` and `modelUsage`
+  include them, so the per-model map is the honest total the moment anything
+  nests.
+- `total_cost_usd` is a **client-side estimate** from a price table bundled with
+  the CLI, not billing truth. Every surface that prints it has to say so.
+- A **failed** run carries usage too, and a crashed one may carry it zeroed. A
+  run that spent four dollars and then died must not be filed as having spent
+  nothing.
+
+And the tempting shortcut is wrong twice over. `tiktoken` is OpenAI's tokenizer;
+it undercounts Claude by 15-20% on prose and by 1.57x to 2.08x on code, and
+Anthropic publishes none. But counting is the wrong move regardless: the exact
+billed figures are already in the stream, and re-deriving them from the text
+would replace a fact with an estimate.
+
+**Before summing a field, find out what the other fields are.** A partial
+measurement wearing a total's name outlives the person who wrote it.
+
+## 33. Speaking only to complain
+
+The agent had one voice: `notify-send` on failure, carrying the raw shell error.
+What reached the desktop was a message written in the vocabulary of the thing
+that broke, two thirds of it an absolute path, with no next step. A successful
+run said nothing at all, so every popup this project ever produced was bad news.
+
+Both halves were the same mistake. The notification was built from what was
+convenient to pass along rather than from what a person needs at the moment they
+glance at a corner of the screen: what ran, whether it worked, what to do,
+and what it cost.
+
+The failure path now translates the errors it recognises into a sentence and a
+fix, and passes anything else through unchanged, because a wrong translation is
+worse than an untranslated string. The success path sends a three-line digest
+built only from things the run measured: its own report length, its own command
+record, and the usage the model reported. An earlier sketch parsed the report's
+prose for "3 PRs reviewed", which is the agent's claim about itself with a
+summary's authority.
+
+**A notification is a user interface.** It gets the same scrutiny as any other,
+and the first question is what the reader does next.

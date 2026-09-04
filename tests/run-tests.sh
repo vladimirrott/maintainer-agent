@@ -1685,6 +1685,111 @@ for pe in "$root"/profiles/*/profile.env; do
         || bad "$pn runs$missing with no declared thinking budget or model"
 done
 
+echo "== what a run cost is recorded, not estimated =="
+# The first version of this logged `in=<input_tokens>` and nothing else, so a
+# full review of a Rust workspace was recorded as "in=48". Almost every input
+# token in an agent run is a cache read or a cache write, and both are separate
+# fields, so 48 was true and useless. It read as a measurement, which is worse
+# than printing nothing.
+#
+# Not tiktoken. It is OpenAI's tokenizer, it undercounts Claude by 15-20% on
+# prose and by more on code, and Anthropic publishes none. Counting is the wrong
+# move anyway: the exact figures are already in the stream Claude Code emits.
+tw="$stub_dir/usagerun"; mkdir -p "$tw"
+cat > "$tw/ev.jsonl" <<'EVENTS'
+{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls"}}]}}
+{"type":"result","subtype":"success","is_error":false,"num_turns":42,"duration_ms":1085000,"total_cost_usd":4.486383,"result":"done","usage":{"input_tokens":98,"output_tokens":38343,"cache_creation_input_tokens":412000,"cache_read_input_tokens":9800000},"modelUsage":{"opus":{"inputTokens":98,"outputTokens":38343,"cacheCreationInputTokens":412000,"cacheReadInputTokens":9800000,"costUSD":4.30},"haiku":{"inputTokens":10,"outputTokens":900,"cacheCreationInputTokens":0,"cacheReadInputTokens":52000,"costUSD":0.186383}}}
+EVENTS
+python3 "$root/scripts/transcript.py" "$tw/r.log" "$tw/r.commands" < "$tw/ev.jsonl"
+[ -f "$tw/r.usage.json" ] && ok "the transcript writes a usage record beside the log" \
+    || bad "nothing records what the run spent"
+python3 - "$tw/r.usage.json" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1])); t = d["totals"]
+fail = []
+if t["cache_read_input_tokens"] != 9852000:
+    fail.append(f"cache reads not summed across models: {t['cache_read_input_tokens']}")
+if t["cache_creation_input_tokens"] != 412000:
+    fail.append("cache writes missing")
+if t["input_tokens"] == 98:
+    fail.append("only the main loop counted; subagent models are excluded from usage")
+if t["billable_input_tokens"] <= t["input_tokens"]:
+    fail.append("billable input ignores the cache fields, which is the in=48 bug")
+if d["subtype"] != "success" or d["num_turns"] != 42:
+    fail.append("the result subtype or turn count was dropped")
+sys.exit("; ".join(fail) if fail else 0)
+PYEOF
+[ $? = 0 ] && ok "cache reads, cache writes and every model are in the totals" \
+    || bad "the usage record repeats the in=48 mistake"
+# An error result carries usage too. A failed run that spent four dollars must
+# not be recorded as having spent nothing.
+printf '%s\n' '{"type":"result","subtype":"error_max_budget_usd","is_error":true,"total_cost_usd":2.5,"usage":{"input_tokens":5,"output_tokens":10,"cache_read_input_tokens":900}}' \
+    > "$tw/err.jsonl"
+python3 "$root/scripts/transcript.py" "$tw/e.log" "$tw/e.commands" < "$tw/err.jsonl"
+python3 -c "
+import json,sys
+d=json.load(open('$tw/e.usage.json'))
+sys.exit(0 if d['is_error'] and d['cost_usd_estimate']==2.5 and d['subtype']=='error_max_budget_usd' else 1)" \
+    && ok "a failed run still records what it spent" \
+    || bad "a run that errored was recorded as having spent nothing"
+
+echo "== the digest reads THIS run's files, and says so when they are absent =="
+# Same shape as lessons.md 30, for the third time: the first version took the
+# newest *.commands in the directory and printed another run's command count
+# under this one.
+dg="$stub_dir/dgstate"; mkdir -p "$dg/runs" "$dg/logs" "$dg/state"
+printf '# report\nline two\n' > "$dg/runs/2026-01-01T00-00-review.md"
+printf '$ a\n$ b\n$ c\n' > "$dg/logs/2026-01-01T00-00-review.commands"
+printf '$ x\n' > "$dg/logs/2026-09-09T09-09-review.commands"
+cp "$tw/r.usage.json" "$dg/logs/2026-01-01T00-00-review.usage.json"
+dgrun() { MAINTAINER_STATE="$dg" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=dg python3 "$root/bin/maintainer" digest "$@" 2>&1; }
+out="$(dgrun 2026-01-01T00-00-review --compact)"
+printf '%s' "$out" | grep -q '3 commands run' \
+    && ok "the digest counts this run's commands" \
+    || bad "the digest read the wrong commands file: $(printf '%s' "$out" | tr '\n' ' ')"
+printf '%s' "$out" | grep -q '4.49' \
+    && ok "and reports the run's cost estimate" || bad "the cost is missing from the digest"
+printf '%s' "$out" | grep -qE 'cache read 9.9M' \
+    && ok "in units a person reads, not 9852000" || bad "raw token counts reached the digest"
+# A run with no usage record must say unknown, never zero.
+printf '# r\n' > "$dg/runs/2026-02-02T00-00-review.md"
+out="$(dgrun 2026-02-02T00-00-review --compact)"
+printf '%s' "$out" | grep -q 'spend unknown' \
+    && ok "a run with no usage record reports unknown, not zero" \
+    || bad "an unrecorded cost was printed as a number: $(printf '%s' "$out" | tr '\n' ' ')"
+printf '%s' "$out" | grep -q 'command record missing' \
+    && ok "and says its command record is missing rather than borrowing one" \
+    || bad "the digest borrowed another run's command count"
+
+echo "== a notification is written for a person =="
+# What used to reach the desktop was the raw shell error, absolute path and all,
+# with no next step: "backend claude unusable: missing /home/.../settings.json".
+# And nothing was sent at all when a run SUCCEEDED, so the agent only ever spoke
+# to its owner to complain.
+grep -q 'humanise()' "$root/lib/run.sh" && ok "failures are translated before they are shown" \
+    || bad "the raw shell error still goes straight to the desktop"
+grep -q 'notify normal' "$root/lib/run.sh" \
+    && ok "a successful run notifies too" \
+    || bad "the agent only speaks when it fails"
+grep -q 'HELPER" digest' "$root/lib/run.sh" \
+    && ok "and what it says is the measured digest" \
+    || bad "the success notification is not built from the run's own record"
+# The last-resort alert must leave a trace on disk. A popup at 03:00 is gone by
+# morning, and it was the only record.
+grep -q 'alerts.log' "$root/platform/linux/alert.sh" \
+    && ok "the systemd OnFailure alert writes to the state directory" \
+    || bad "a failure nobody was awake for leaves no trace"
+grep -q 'sort -u' "$root/platform/linux/alert.sh" \
+    && ok "and writes it once, not once per matching glob" \
+    || bad "both state globs match the same directory, so alerts are double-counted"
+grep -q 'ExecStart=%h/.local/share/maintainer/alert.sh' "$root/platform/linux/maintainer-alert@.service" \
+    && ok "the unit calls a script rather than quoting shell into ExecStart" \
+    || bad "systemd refuses the inline version with Unbalanced quoting"
+grep -q 'alert.sh' "$root/install.sh" \
+    && ok "install.sh deploys it, so the unit's ExecStart resolves" \
+    || bad "the alert unit points at a file the installer never copies"
+
 echo "== the doctor reports on the profile it was asked about =="
 # It globbed `maintainer@*` in systemctl, so with MAINTAINER_PROFILE=magent it
 # counted sysknife's four timers and printed "4 systemd timer(s) registered, ok"

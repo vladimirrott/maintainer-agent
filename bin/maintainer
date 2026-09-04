@@ -151,6 +151,9 @@ SLUG = _setting("MAINTAINER_SLUG", "REPO_SLUG", "")
 ROOT = Path(_setting("MAINTAINER_STATE", "STATE_DIR",
                      str(Path.home() / ".local/state/maintainer")))
 RUNS, STATE, DRAFTS = ROOT / "runs", ROOT / "state", ROOT / "drafts"
+# The transcript filter writes the usage record beside the log, so the digest
+# reads it from here rather than from the report, which is prose.
+LOGS = ROOT / "logs"
 INDEX = ROOT / "index.md"
 # `start` writes this as the FIRST line and nowhere else, so `finish` anchors to
 # line 1. It used to search the whole file, and on 2026-09-03 it threw away a
@@ -649,7 +652,7 @@ def cmd_status() -> None:
     nxt = _next_runs(env["_profile"])
     held = False
     print()
-    print(f"{'task':10} {'last run':22} {'age':>6}  {'report':>10}  next")
+    print(f"{'task':10} {'last run':22} {'age':>6}  {'report':>10}  {'spend':>7}  next")
     for task in TASKS:
         f = STATE / f"last-{task}.json"
         if f.exists():
@@ -667,9 +670,37 @@ def cmd_status() -> None:
                 held = True
         else:
             rid, age, lines = "never", "-", "-"
-        print(f"{task:10} {rid:22} {age:>6}  {lines:>10}  {nxt.get(task, '-')}")
+        # An unknown cost prints as "?" rather than as "$0.00". A run whose
+        # spend was never recorded and a run that cost nothing are different
+        # facts, and every run before scripts/transcript.py existed is the first
+        # kind.
+        c = load_usage(rid).get("cost_usd_estimate") if rid not in ("never", "unreadable") else None
+        spend = f"~${c:.2f}" if isinstance(c, (int, float)) else ("?" if rid != "never" else "-")
+        print(f"{task:10} {rid:22} {age:>6}  {lines:>10}  {spend:>7}  {nxt.get(task, '-')}")
     if held:
         print("\n* inside its minimum interval; the next scheduled run skips and says so")
+
+    # What this profile has spent, over every run that recorded it. Estimates,
+    # summed, and labelled as such: the figure comes from Claude Code's own
+    # bundled price table, not from a bill.
+    costs = []
+    for f in sorted(LOGS.glob("*.usage.json")):
+        try:
+            c = json.loads(f.read_text()).get("cost_usd_estimate")
+        except (json.JSONDecodeError, OSError):
+            continue
+        if isinstance(c, (int, float)):
+            costs.append(c)
+    total_runs = len(INDEX.read_text().splitlines()) if INDEX.exists() else 0
+    if costs:
+        print(f"\nspend  ~${sum(costs):.2f} over {len(costs)} of {total_runs} recorded run(s),"
+              f" mean ~${sum(costs) / len(costs):.2f}")
+        if len(costs) < total_runs:
+            print(f"       {total_runs - len(costs)} run(s) have no usage record and are not in that"
+                  " total")
+        print("       Claude Code's own estimate from a bundled price table, not a bill")
+    elif total_runs:
+        print(f"\nspend  unknown: none of {total_runs} recorded run(s) has a usage record")
 
     pend = sorted(STATE.glob("pending-*.json"))
     if pend:
@@ -709,6 +740,125 @@ def cmd_log(n: int) -> None:
     print("\n".join(lines[-n:]))
 
 
+
+def _fmt_tokens(n: int) -> str:
+    """Thousands and millions, because 9852000 is not a number anyone reads."""
+    if not isinstance(n, (int, float)):
+        return "?"
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.0f}k"
+    return str(int(n))
+
+
+def _fmt_ms(ms) -> str:
+    if not isinstance(ms, (int, float)) or ms <= 0:
+        return "?"
+    s = ms / 1000
+    if s < 90:
+        return f"{s:.0f}s"
+    if s < 5400:
+        return f"{s / 60:.0f}m"
+    return f"{s / 3600:.1f}h"
+
+
+def load_usage(run_id: str) -> dict:
+    """What the run spent, written by scripts/transcript.py beside the log.
+
+    Absent for any run older than the transcript filter, and absent whenever a
+    run died before the model returned a result. Both read as "unknown", never
+    as zero: a run whose cost is unknown and a run that cost nothing are
+    different facts and this used to print the same thing for both.
+    """
+    f = LOGS / f"{_log_stem(run_id)}.usage.json"
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _log_stem(run_id: str) -> str:
+    """The log/commands/usage basename for a run id.
+
+    A second run inside the same minute gets `<stamp>-<task>.2` as its run id
+    while run.sh keeps writing `<stamp>-<task>.log`, so the suffix comes off.
+
+    Named exactly, never globbed. The first version of this took the NEWEST
+    matching file, which attributed one run's command count to another and
+    printed "78 commands run" under a run that had executed none. That is
+    docs/lessons.md 30 for the third time: a per-thing lookup with a wildcard
+    reports on whoever answers first.
+    """
+    stem = run_id
+    if "." in stem and stem.rsplit(".", 1)[1].isdigit():
+        stem = stem.rsplit(".", 1)[0]
+    return stem
+
+
+def digest_lines(run_id: str, compact: bool = False) -> list[str]:
+    """The run, in three lines, for a notification or a terminal.
+
+    Deliberately made of things that were MEASURED. An earlier sketch of this
+    parsed the report's prose for "3 PRs reviewed", which is the agent's claim
+    about itself dressed up as a summary. Line count, command count, turns and
+    spend all come from files the run wrote as it went.
+    """
+    report = RUNS / f"{run_id}.md"
+    u = load_usage(run_id)
+    t = u.get("totals", {})
+    cost = u.get("cost_usd_estimate")
+    sub = u.get("subtype")
+
+    head = f"{PROFILE} {run_id.split('-')[-1]}"
+    if u:
+        head += f" · {'failed' if u.get('is_error') else 'done'} in {_fmt_ms(u.get('duration_ms'))}"
+        if u.get("num_turns"):
+            head += f" · {u['num_turns']} turns"
+    lines = [head]
+
+    if report.exists():
+        n = len(report.read_text().splitlines())
+        cmds = LOGS / f"{_log_stem(run_id)}.commands"
+        ncmd = len(cmds.read_text().splitlines()) if cmds.exists() else None
+        lines.append(f"report {n} lines" + (
+            f" · {ncmd} commands run" if ncmd is not None
+            else " · command record missing"))
+    else:
+        lines.append("NO REPORT: the run is not auditable")
+
+    if u:
+        spend = "~$?" if not isinstance(cost, (int, float)) else f"~${cost:.2f}"
+        lines.append(f"{spend} est · out {_fmt_tokens(t.get('output_tokens'))}"
+                     f" · cache read {_fmt_tokens(t.get('cache_read_input_tokens'))}"
+                     f" · new cache {_fmt_tokens(t.get('cache_creation_input_tokens'))}")
+    else:
+        lines.append("spend unknown: no usage record for this run")
+
+    if compact:
+        return lines
+    if u.get("by_model"):
+        lines.append("")
+        for name, m in u["by_model"].items():
+            c = m.get("cost_usd_estimate")
+            lines.append(f"  {name:24} ~${c:.2f}" if isinstance(c, (int, float))
+                         else f"  {name:24} ~$?")
+    lines += [
+        "",
+        "  The dollar figure is Claude Code's own client-side estimate from a",
+        "  bundled price table. It is for budgeting, not billing.",
+    ]
+    if sub and sub != "success":
+        lines.append(f"  The model returned subtype '{sub}', so this run did not finish cleanly.")
+    return lines
+
+
+def cmd_digest(run_id: str, compact: bool) -> None:
+    print("\n".join(digest_lines(run_id, compact)))
+
+
 def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
@@ -730,6 +880,8 @@ def main() -> None:
         cmd_finish(sys.argv[2])
     elif cmd == "screen" and len(sys.argv) == 3:
         cmd_screen(sys.argv[2])
+    elif cmd == "digest" and len(sys.argv) >= 3:
+        cmd_digest(sys.argv[2], "--compact" in sys.argv[3:])
     elif cmd == "log":
         cmd_log(int(sys.argv[2]) if len(sys.argv) > 2 else 10)
     else:
