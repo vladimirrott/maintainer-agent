@@ -188,8 +188,25 @@ def safe_for_prompt(text: str, limit: int = 90) -> str:
     return flat[:limit] + ("..." if len(flat) > limit else "")
 
 
+def _spawn(args, **kw):
+    """subprocess.run, but a missing binary is a sentence rather than a stack.
+
+    `systemctl` was called by name with no guard and `maintainer status` died
+    with an uncaught FileNotFoundError on any host without systemd, which is
+    three of the four schedulers this project documents. git and gh are genuine
+    requirements, so those still stop the command; they now say which binary is
+    missing instead of printing thirteen lines of traceback at a user who has
+    not installed gh yet.
+    """
+    try:
+        return subprocess.run(args, capture_output=True, text=True, **kw)
+    except FileNotFoundError:
+        raise SystemExit(f"maintainer: {args[0]} is not installed, and this command needs it.\n"
+                         f"            Install it and run this again.")
+
+
 def run(*args: str, cwd: Path | None = REPO, check: bool = True) -> str:
-    p = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    p = _spawn(args, cwd=cwd)
     if check and p.returncode != 0:
         raise SystemExit(f"maintainer: `{' '.join(args)}` failed ({p.returncode})\n"
                          f"{p.stderr.strip()}")
@@ -198,7 +215,7 @@ def run(*args: str, cwd: Path | None = REPO, check: bool = True) -> str:
 
 def gh_json(*args: str):
     """Query gh, degrading to None rather than aborting the run on a rate limit."""
-    p = subprocess.run(("gh", *args), cwd=REPO, capture_output=True, text=True)
+    p = _spawn(("gh", *args), cwd=REPO)
     if p.returncode != 0:
         return None
     try:
@@ -375,7 +392,7 @@ INERT_SUFFIXES = (".md", ".json", ".yml", ".yaml", ".txt", ".lock.example", ".sv
 
 
 def _sh(*args: str) -> tuple[int, str]:
-    p = subprocess.run(args, cwd=REPO, capture_output=True, text=True)
+    p = _spawn(args, cwd=REPO)
     return p.returncode, p.stdout
 
 
@@ -559,10 +576,19 @@ def cmd_finish(run_id: str) -> None:
 
 
 def _next_runs(profile: str) -> dict:
-    """Ask the scheduler when each task fires next. Absent one, say so."""
-    p = subprocess.run(("systemctl", "--user", "list-timers", f"maintainer@{profile}-*",
-                        "--all", "--no-pager", "--output=json"),
-                       capture_output=True, text=True)
+    """Ask the scheduler when each task fires next. Absent one, say so.
+
+    systemd is one of four documented schedulers, and this asked for it by name
+    with no guard. On any host without it -- macOS, Windows, a container --
+    `maintainer status` printed three lines and then died with an uncaught
+    FileNotFoundError. Found by running the test suite inside python:3.12.
+    """
+    try:
+        p = subprocess.run(("systemctl", "--user", "list-timers", f"maintainer@{profile}-*",
+                            "--all", "--no-pager", "--output=json"),
+                           capture_output=True, text=True)
+    except (FileNotFoundError, PermissionError, OSError):
+        return {}
     if p.returncode != 0:
         return {}
     try:

@@ -580,3 +580,35 @@ of `bin/maintainer-repo`, so both passed throughout.
 **A guard whose input is never empty in the author's tests is a guard that has
 never run.** Build the empty case as a fixture, not as an assertion about the
 source.
+
+## 29. Run your own suite somewhere that is not your laptop
+
+The offline suite was green here and had been for weeks. Run inside
+`python:3.12` it reported eight failures, and only one of them was about the
+container:
+
+- Five said `jq: command not found`. The merge gate shelled out to `jq` in three
+  places and nothing else in the project needs it. The refusal that followed
+  read `#7 has  failing check(s)`, with a blank where the number goes: it failed
+  closed and named the wrong thing. The counts are `python3` now, which the gate
+  already requires everywhere.
+- Two came from one bug in `bin/maintainer`. `_next_runs` called `systemctl` by
+  name with no guard, so `maintainer status` printed three lines and died with
+  an uncaught `FileNotFoundError` on any host without systemd. This project
+  documents four schedulers and three of them are not systemd.
+- One was real: the shell verify suite needs a container runtime, and there is
+  none inside a container.
+
+That last one had been written as a failure, so the suite could never be green
+on a machine without podman. Writing it as a pass would be worse: entry 24 in
+this file is a missing optional dependency that turned a gate green over seven
+real errors. It is a third count now, `SKIP`, printed in the summary, and CI
+fails when it is not zero.
+
+Two cases also made the suite's own size machine-dependent, which matters
+because `check_claims.sh` compares that number to the README. One reported a
+PASS for a PowerShell parse it had skipped, and one emitted a single failure
+line where the branch it replaced ran two cases. Host and container now agree
+on 396.
+
+**A suite that has only ever run in one place is measuring that place.**

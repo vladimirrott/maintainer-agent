@@ -9,7 +9,7 @@ shapes what a useful contribution looks like here.
 - **Issues labelled `untested`** are guards that ship without a test that could
   fail. Each one is a self-contained job with a clear finish line, and writing
   the mutation teaches you the codebase faster than reading it.
-- **`docs/lessons.md`** is twenty-eight defects that reached a working system,
+- **`docs/lessons.md`** is twenty-nine defects that reached a working system,
   each with the measurement that found it. It is the fastest way to understand
   why anything here is shaped the way it is, and several entries end in work
   that is still open.

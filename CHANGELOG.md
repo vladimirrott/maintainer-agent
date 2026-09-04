@@ -81,6 +81,14 @@ unnoticed.
 - Release, CodeQL, Scorecard and secret-scanning workflows, every action pinned
   by SHA with a script that checks each pin against the API.
 - A mark made of the characters the tool is made of.
+- **Verification suites for this repository itself** (`profiles/magent/verify.d/`).
+  The profile had none, so the merge gate could not verify a pull request
+  against the repository that contains the merge gate.
+- **A third test outcome, `SKIP`.** A case this machine cannot run is counted
+  and printed separately, and CI fails when the count is not zero. The suite's
+  own size no longer depends on the machine: host and container both report
+  396, which matters because `check_claims.sh` compares that number to the
+  README.
 
 ### Fixed
 
@@ -113,6 +121,15 @@ unnoticed.
 - A receipt's proof string was interpolated into JSON by a heredoc, so a proof
   containing a quote wrote a file the gate could not parse, and the refusal
   blamed the receipt rather than the quoting.
+- **`maintainer status` died on any host without systemd.** `_next_runs` called
+  `systemctl` by name with no guard, so it printed three lines and then an
+  uncaught `FileNotFoundError`. Three of the four schedulers this project
+  documents are not systemd. Every other spawn now names the missing binary
+  instead of printing a traceback.
+- **The merge gate needed `jq`**, in three places, and nothing else here does.
+  Without it the counts came back empty and the refusal read
+  `#7 has  failing check(s)`. It fails closed either way, and now it says which
+  thing it could not read.
 - The claim check read `388 tests` out of the SHA `7c6ed388`.
 - `release-check`'s "the Unreleased section is empty" warning had never printed:
   sed prints both delimiters, so an empty section came back as two heading lines

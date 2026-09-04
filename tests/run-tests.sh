@@ -20,9 +20,14 @@ unset MAINTAINER_FORCE MAINTAINER_POST MAINTAINER_PROFILE MAINTAINER_SETTINGS \
       MAINTAINER_STATE MAINTAINER_STATE_DIR MAINTAINER_SLUG MAINTAINER_REPO \
       MAINTAINER_TASKS MAINTAINER_SKILL MAINTAINER_IN_RUN MAINTAINER_SCRIPTS \
       MAINTAINER_BACKEND MAINTAINER_PROSE_STYLE MAINTAINER_ACCOUNT
-pass=0; fail=0
+pass=0; fail=0; skip=0
 ok()   { printf '  PASS  %s\n' "$1"; pass=$((pass+1)); }
 bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+# A skip is not a pass. It is counted separately, printed in the summary, and CI
+# requires the count to be zero, so a case that stops running because a tool went
+# missing shows up as a gap rather than as silence. The only user today is the
+# container verification, which needs podman or docker and cannot be faked.
+noenv(){ printf '  SKIP  %s\n' "$1"; skip=$((skip+1)); }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2')"; fi; }
 
 # A fake PATH: gh, claude, codex and notify-send never reach the real ones.
@@ -385,20 +390,20 @@ if [ "$gates" = "1" ]; then ok "exactly one executable implementation of the mer
 
 echo "== the PowerShell installer =="
 ps1="$root/platform/windows/Install-Maintainer.ps1"
-# Parsed by a real PowerShell when the image is already local, so the suite
-# stays offline. Counting braces was the previous check, and it would have
-# passed a file that pwsh refuses to load.
-if command -v podman >/dev/null 2>&1 && podman image exists mcr.microsoft.com/powershell:latest 2>/dev/null; then
-    if podman run --rm --network=none -v "$root/platform/windows:/w:ro" \
-        mcr.microsoft.com/powershell:latest pwsh -NoProfile -Command \
-        '$e=$null;$t=$null;[System.Management.Automation.Language.Parser]::ParseFile("/w/Install-Maintainer.ps1",[ref]$t,[ref]$e);exit $e.Count' >/dev/null 2>&1; then
-        ok "PowerShell: parses under a real pwsh"
-    else
-        bad "PowerShell: pwsh reports a parse error"
-    fi
-else
-    ok "PowerShell: pwsh parse skipped (no local image); cmdlet checks below still run"
-fi
+# The real parse runs in CI, in a job whose container IS powershell, so it
+# cannot be skipped. This used to attempt it here when the image happened to be
+# local and report a PASS when it did not, which made the case count differ
+# between machines and reported a check that had not run as one that had. A
+# suite that says "no network" should not contain a case that needs a 350 MB
+# pull. What is checked here is that the job which cannot be skipped still
+# exists and is still pinned to a PowerShell image.
+psjob="$root/.github/workflows/ci.yml"
+grep -q 'container: mcr.microsoft.com/powershell' "$psjob" \
+    && ok "PowerShell: CI parses the installer inside a real pwsh container" \
+    || bad "nothing parses Install-Maintainer.ps1 with a real PowerShell"
+grep -q 'Parser\]::ParseFile' "$psjob" \
+    && ok "PowerShell: and it parses rather than counting braces" \
+    || bad "the Windows job no longer calls the parser"
 # $Profile is an automatic PowerShell variable. Shadowing it in a param block is
 # legal and confusing, so the parameter is named ProfileName.
 grep -qE '\[string\]\$Profile\b' "$ps1" && bad "the param shadows PowerShell's automatic \$Profile" \
@@ -1098,6 +1103,25 @@ printf 'REPO_SLUG="o/r"\nTASKS="review"\nSTATE_DIR="$HOME/st"\nPOST="off"\n' \
     > "$ok2/.local/share/maintainer/profiles/plain/profile.env"
 HOME="$ok2" MAINTAINER_PROFILE=plain python3 "$root/bin/maintainer" status 2>&1 | grep -q 'o/r' \
     && ok "a plain profile name still works" || bad "the name check rejects a valid profile"
+# And it must survive a host with no systemd. `_next_runs` called systemctl by
+# name with no guard, so on macOS, Windows or in any container `status` printed
+# three lines and died with an uncaught FileNotFoundError. Three of the four
+# schedulers this project documents are not systemd. Found by running this suite
+# inside python:3.12, where it is not the test that fails but the tool.
+nosysd="$stub_dir/nosystemd"; mkdir -p "$nosysd"
+for t in git bash python3 grep sed; do
+    src="$(command -v "$t" 2>/dev/null)" && ln -sf "$src" "$nosysd/$t"
+done
+out=$(PATH="$nosysd" HOME="$ok2" MAINTAINER_PROFILE=plain \
+      python3 "$root/bin/maintainer" status 2>&1); rc=$?
+[ "$rc" = 0 ] && ok "status runs on a host with no systemctl" \
+    || bad "status died without a scheduler (rc=$rc)"
+printf '%s' "$out" | grep -q 'Traceback' \
+    && bad "status printed a Python traceback at the user" \
+    || ok "and it does so without a traceback"
+printf '%s' "$out" | grep -q 'task .*next' \
+    && ok "and still prints the task table, with no next-run column to fill" \
+    || bad "status stopped before the task table"
 
 echo "== the social preview is the size GitHub actually accepts =="
 # GitHub's own docs: at least 640x320, 1280x640 for best display, under 1MB,
@@ -1291,7 +1315,12 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
         && ok "a mutation that changes nothing is refused" \
         || bad "a no-op mutation produced a receipt"
 else
-    bad "no container runtime (podman or docker); the shell suite was never executed"
+    # One skip per case the if-branch would have run, so the suite reports the
+    # same number of cases on every machine. Emitting a single line here made
+    # the total differ by one between this laptop and a container, and
+    # scripts/check_claims.sh compares that total against the README.
+    noenv "the shell suite produced an observed receipt (needs podman or docker)"
+    noenv "a mutation that changes nothing is refused (needs podman or docker)"
 fi
 grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
     || bad "the gate requires one specific container runtime"
@@ -1638,6 +1667,60 @@ grep -q '"\$rt" --log-level=error run' "$mg" \
     && ok "the runtime is told to keep its warnings out of the log" \
     || bad "runtime warnings still land in the log the byte count reads"
 
+echo "== a skip is not a pass =="
+# The container cases used to `bad` when no runtime was installed, so the suite
+# could never be green on a machine without podman or docker, which is every
+# container. Counting them as passes would be worse: docs/lessons.md already has
+# an entry where a missing optional dependency turned a gate green over seven
+# real errors. They are their own count, printed, and CI requires it to be zero.
+grep -q 'skip=$((skip+1))' "$root/tests/run-tests.sh" \
+    && ok "a skip has its own counter" || bad "a skip is folded into pass or fail"
+grep -q 'skipped' "$root/.github/workflows/ci.yml" \
+    && ok "CI fails when the suite skips anything" \
+    || bad "CI would accept a run that skipped half the cases"
+# Proved by driving the summary: a suite with a skip must say so in its last line.
+probe="$stub_dir/skipprobe.sh"
+{ sed -n '1,/^check(){/p' "$root/tests/run-tests.sh"
+  printf 'noenv "a deliberate skip"\n'
+  sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' "$root/tests/run-tests.sh"; } > "$probe"
+out=$(bash "$probe" 2>&1)
+printf '%s' "$out" | grep -qE '0 passed, 0 failed, 1 skipped' \
+    && ok "and the summary line names the skipped count" \
+    || bad "a skipped case left no trace in the summary: $(printf '%s' "$out" | tail -1)"
+
+echo "== the gate needs nothing that is not already required =="
+# Run inside python:3.12, five tests failed with `jq: command not found`, and
+# the refusal read "#7 has  failing check(s)" with a blank where the number
+# goes. jq was the only dependency the gate had that nothing else here needs.
+# Whole-line comments dropped first. The paragraph explaining why jq is gone
+# matched a grep for jq, which is the same over-match that made the "CI reads no
+# secrets" check fail on the comment describing the policy.
+if grep -v '^[[:space:]]*#' "$mg" | grep -qE '\| *jq |\$\( *jq |^ *jq '; then
+    bad "maintainer-merge still shells out to jq"
+else
+    ok "maintainer-merge needs no jq; gh's own --jq is not a second binary"
+fi
+# And a count that is not a number must say so rather than interpolate a blank.
+make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo abcdef1234567890;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) printf 'not json at all';;
+    esac"
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    bash "$mg" receipt 9 abcdef1234567890 'proved' >/dev/null 2>&1
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+      bash "$mg" merge 9 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "an unreadable check list refuses the merge" \
+    || bad "the gate merged on a check list it could not read"
+printf '%s' "$out" | grep -qE 'could not read the check list|not a number' \
+    && ok "and it names the check list rather than reporting a blank count" \
+    || bad "the refusal blamed something else: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+
 echo "== the merge is pinned to the head that was checked =="
 grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
     || bad "a push landing mid-merge would be merged unchecked"
@@ -1646,5 +1729,10 @@ grep -q 'does not cover every changed path' "$mg" \
     && ok "an explicitly named suite must still cover the changed paths" \
     || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
 
-printf '\n  %d passed, %d failed\n' "$pass" "$fail"
+if [ "$skip" -gt 0 ]; then
+    printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+    printf '  A skip is a case this machine could not run. CI requires zero.\n'
+else
+    printf '\n  %d passed, %d failed\n' "$pass" "$fail"
+fi
 [ "$fail" -eq 0 ]

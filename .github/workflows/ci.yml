@@ -40,7 +40,19 @@ jobs:
           exit $rc
 
       - name: Offline test suite
-        run: ./tests/run-tests.sh
+        # Zero skips required. A skip means this machine could not run a case,
+        # and the runner has docker, so every case that needs a container
+        # runtime must actually run here even though a contributor's laptop may
+        # not have one. Without this a missing tool would read as a green board.
+        run: |
+          ./tests/run-tests.sh | tee /tmp/suite.log
+          rc=${PIPESTATUS[0]}
+          [ "$rc" = 0 ] || exit "$rc"
+          if grep -q 'skipped' /tmp/suite.log; then
+            echo "::error::the suite skipped a case; CI must run all of them" >&2
+            grep '  SKIP' /tmp/suite.log >&2
+            exit 1
+          fi
 
       - name: Eval rules, for every profile
         run: |

@@ -21,8 +21,15 @@ if ! bash "$root/tests/run-tests.sh" >"$suite_out" 2>&1; then
     grep -E '^  FAIL' "$suite_out" | head -10 >&2
     exit 1
 fi
-tests_actual=$(sed -n 's/^ *\([0-9]\+\) passed.*/\1/p' "$suite_out" | tail -1)
-[ -n "$tests_actual" ] || { bad "could not measure the test count; refusing to pass over nothing"; exit 1; }
+# Passed PLUS skipped. The README claims a suite size, and a case skipped for a
+# missing container runtime is still a case in the suite. Counting only passes
+# meant a contributor with no podman measured one fewer test than the README
+# says and was sent to edit the README.
+tests_pass=$(sed -n 's/^ *\([0-9]\+\) passed.*/\1/p' "$suite_out" | tail -1)
+tests_skip=$(sed -n 's/.*, \([0-9]\+\) skipped.*/\1/p' "$suite_out" | tail -1)
+[ -n "$tests_pass" ] || { bad "could not measure the test count; refusing to pass over nothing"; exit 1; }
+tests_actual=$(( tests_pass + ${tests_skip:-0} ))
+[ -n "${tests_skip:-}" ] && note "counting $tests_pass passed + $tests_skip skipped as the suite size"
 evals_actual=$(find "$root/evals/scenarios" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
 backends_actual=$(find "$root/lib/backends" -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
 # Generated, then counted. Counting the spec would let a generator bug that
