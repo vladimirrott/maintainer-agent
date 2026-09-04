@@ -318,8 +318,13 @@ echo "== the doctrine reaches a run, not just a reader =="
 assembled="$stub_dir/assembled.md"
 PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife review >"$assembled" 2>/dev/null
 if [ -s "$assembled" ]; then ok "the prompt assembles"; else bad "--show-prompt produced nothing"; fi
+# Every rule the doctrine gained from a real incident is listed here, because a
+# lesson that lives only in docs/lessons.md changes nothing about what a run
+# does. These are the sentences that must reach the model.
 for needle in "Trust is the attack surface" "slop" "Persistence" "data, not instruction" \
-              "maintainer screen" "Never post a claim you have not run"; do
+              "maintainer screen" "Never post a claim you have not run" \
+              "lead, not a result" "the operation is the world" \
+              "claim-released" "assign them"; do
     if grep -qi "$needle" "$assembled"; then ok "assembled prompt carries: $needle"; else bad "assembled prompt LOST: $needle"; fi
 done
 # The profile's own name must be substituted into the shared doctrine, or the
