@@ -1,0 +1,76 @@
+---
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "tag to release, e.g. v0.2.0"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  gates:
+    name: the gates, on the tag
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - name: Offline test suite
+        run: ./tests/run-tests.sh
+      - name: Eval rules, every profile
+        run: |
+          rc=0
+          for pe in profiles/*/profile.env; do
+            pn="$(basename "$(dirname "$pe")")"
+            [ "$pn" = "_template" ] && continue
+            MAINTAINER_PROFILE="$pn" ./evals/run-evals.sh || rc=1
+          done
+          exit $rc
+      - name: README numbers are derived
+        run: ./scripts/check_claims.sh
+
+  publish:
+    name: publish the release
+    needs: gates
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: The notes come from the CHANGELOG, not from commit subjects
+        id: notes
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          ver="${tag#v}"
+          # A human wrote the CHANGELOG deliberately. Generating notes from
+          # commit subjects is how a release announces "fix(daemon): gate
+          # mutating query actions" and never mentions the authorization fix.
+          python3 - "$ver" > /tmp/notes.md <<'PY'
+          import re, sys
+          ver = sys.argv[1]
+          text = open("CHANGELOG.md").read()
+          m = re.search(rf"^## \[{re.escape(ver)}\][^\n]*\n(.*?)(?=\n## \[|\Z)", text, re.S | re.M)
+          if not m:
+              sys.exit(f"CHANGELOG.md has no section for {ver}; refusing to invent release notes")
+          print(m.group(1).strip())
+          PY
+          echo "wrote $(wc -l < /tmp/notes.md) lines of notes"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release create "$tag" --title "$tag" --notes-file /tmp/notes.md --verify-tag

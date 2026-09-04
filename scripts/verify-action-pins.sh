@@ -41,7 +41,10 @@ while IFS= read -r line; do
     else
         printf '  FAIL    %-46s pinned %s but %s is %s\n' "$action" "${sha:0:8}" "$claim" "${real:0:8}"; fail=1
     fi
-done < <(grep -hoE 'uses: [^@ ]+@[0-9a-f]{40} *# *\S+' "$root"/.github/workflows/*.yml \
+# examples/ too: a pin somebody copies out of an example is the one most worth
+# being true.
+done < <(grep -hoE 'uses: [^@ ]+@[0-9a-f]{40} *# *\S+' \
+             "$root"/.github/workflows/*.yml "$root"/examples/*.yml 2>/dev/null \
          | sed 's/^uses: //' | sort -u)
 
 [ "$fail" = 0 ] && echo "  every pin is the tag it claims" || echo "  a pin does not match its comment" >&2

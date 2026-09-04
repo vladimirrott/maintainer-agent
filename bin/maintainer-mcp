@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""An MCP server over stdio for the maintainer agent. Standard library only.
+
+    maintainer-mcp            speak MCP on stdin/stdout
+    maintainer-mcp --tools    list what it exposes, and exit
+
+The rule this server is built on: **reads are free, and every mutation goes
+through the same gated path a human uses.** Nothing here reimplements a refusal.
+`merge` shells out to `maintainer-merge`, so the receipt, the identity gate, the
+check board, the merge state and POST=off all still apply, and a client that
+asks for a merge without a receipt gets the same refusal from the same code.
+
+Two things are deliberately absent:
+
+- **`maintainer-merge receipt`**, the asserted form. An agent that can write its
+  own receipt proves nothing, which is why the deny wall blocks it for the CLI.
+  Exposing it over MCP would be the same hole with a nicer interface.
+- **anything that publishes.** No release, no tag, no push. The CLI cannot do
+  those either.
+
+Tool arguments arrive from a model, so every one is validated here rather than
+interpolated. A pull request number is an integer or the call is refused.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+PROTOCOL = "2024-11-05"
+SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+HOME = os.path.expanduser("~")
+
+
+def run(cmd: list[str], timeout: int = 900) -> dict:
+    """Run a maintainer command and return its output verbatim.
+
+    Never raises on a non-zero exit: a refusal is the most useful thing this
+    server returns, and turning it into a protocol error would hide the reason.
+    """
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        return {"exit_code": p.returncode,
+                "stdout": p.stdout[-20000:], "stderr": p.stderr[-8000:]}
+    except subprocess.TimeoutExpired:
+        return {"exit_code": 124, "stdout": "", "stderr": f"timed out after {timeout}s"}
+    except FileNotFoundError:
+        return {"exit_code": 127, "stdout": "",
+                "stderr": f"{cmd[0]} is not installed; run ./install.sh"}
+
+
+def profile_env(profile: str | None) -> dict:
+    env = dict(os.environ)
+    if profile:
+        env["MAINTAINER_PROFILE"] = profile
+    return env
+
+
+def _pr(args: dict) -> int:
+    pr = args.get("pr")
+    if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
+        raise ValueError("pr must be a positive integer")
+    return pr
+
+
+def _profile(args: dict) -> str | None:
+    p = args.get("profile")
+    if p is None:
+        return None
+    if not isinstance(p, str) or not SAFE_NAME.match(p):
+        raise ValueError("profile must be a plain name")
+    return p
+
+
+TOOLS = [
+    {
+        "name": "maintainer_status",
+        "description": ("What the maintainer has run, what is due next, which version is "
+                        "deployed, and whether this profile posts to GitHub at all. Start here."),
+        "inputSchema": {"type": "object", "properties": {
+            "profile": {"type": "string", "description": "profile name; omit when only one is deployed"}}},
+    },
+    {
+        "name": "maintainer_screen",
+        "description": ("Decide whether a pull request may be EXECUTED on this machine. Returns "
+                        "DO NOT EXECUTE for anything a gate would run, and fails closed on "
+                        "anything it cannot classify. Call this before building any pull request."),
+        "inputSchema": {"type": "object", "properties": {
+            "pr": {"type": "integer"}, "profile": {"type": "string"}}, "required": ["pr"]},
+    },
+    {
+        "name": "maintainer_verify",
+        "description": ("Prove a guard bites: run the test clean, apply a mutation, run it again, "
+                        "and record an observed receipt only if it passed clean and failed mutated. "
+                        "Runs contributor code inside a hardened container with no network. "
+                        "Refuses when the mutation changes nothing, which is the finding."),
+        "inputSchema": {"type": "object", "properties": {
+            "pr": {"type": "integer"},
+            "head_sha": {"type": "string", "description": "the head this receipt will name"},
+            "test_filter": {"type": "string", "description": "which test to run"},
+            "mutation": {"type": "string", "description": "a sed expression that removes the guard"},
+            "suite": {"type": "string", "description": "optional; inferred from the changed paths"},
+            "profile": {"type": "string"}},
+            "required": ["pr", "head_sha", "test_filter", "mutation"]},
+    },
+    {
+        "name": "maintainer_merge",
+        "description": ("Merge a pull request THROUGH THE GATE. Refuses without an observed "
+                        "receipt, without an approving review, with any failing or pending check, "
+                        "with an empty check list, when the branch is behind its base, when "
+                        "production code moved since the receipt, under the wrong GitHub account, "
+                        "or when the profile is a rehearsal. It cannot be persuaded."),
+        "inputSchema": {"type": "object", "properties": {
+            "pr": {"type": "integer"}, "profile": {"type": "string"}}, "required": ["pr"]},
+    },
+    {
+        "name": "maintainer_release_check",
+        "description": ("Whether a release is owed and which digit moves, read from the CHANGELOG's "
+                        "Unreleased section. Never cuts one: a published version cannot be replaced."),
+        "inputSchema": {"type": "object", "properties": {"profile": {"type": "string"}}},
+    },
+    {
+        "name": "maintainer_prune",
+        "description": ("List branches merged into main, local and remote. Always a dry run over "
+                        "MCP: deleting is a decision, and this server does not make decisions."),
+        "inputSchema": {"type": "object", "properties": {"profile": {"type": "string"}}},
+    },
+]
+
+
+def call_tool(name: str, args: dict) -> dict:
+    profile = _profile(args)
+    env = profile_env(profile)
+    bin_ = os.path.join(HOME, ".local/bin")
+
+    def cmd(*parts): return [os.path.join(bin_, parts[0]), *parts[1:]]
+
+    if name == "maintainer_status":
+        p = subprocess.run(cmd("maintainer", "status"), capture_output=True, text=True, env=env)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    if name == "maintainer_screen":
+        pr = _pr(args)
+        p = subprocess.run(cmd("maintainer", "screen", str(pr)),
+                           capture_output=True, text=True, env=env, timeout=300)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    if name == "maintainer_verify":
+        pr = _pr(args)
+        for k in ("head_sha", "test_filter", "mutation"):
+            if not isinstance(args.get(k), str) or not args[k].strip():
+                raise ValueError(f"{k} must be a non-empty string")
+        argv = cmd("maintainer-merge", "verify", str(pr), args["head_sha"],
+                   args["test_filter"], args["mutation"])
+        if args.get("suite"):
+            if not SAFE_NAME.match(str(args["suite"])):
+                raise ValueError("suite must be a plain name")
+            argv.append(str(args["suite"]))
+        p = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=2400)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    if name == "maintainer_merge":
+        pr = _pr(args)
+        p = subprocess.run(cmd("maintainer-merge", "merge", str(pr)),
+                           capture_output=True, text=True, env=env, timeout=600)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    if name == "maintainer_release_check":
+        p = subprocess.run(cmd("maintainer-repo", "release-check"),
+                           capture_output=True, text=True, env=env, timeout=300)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    if name == "maintainer_prune":
+        p = subprocess.run(cmd("maintainer-repo", "prune", "--dry-run"),
+                           capture_output=True, text=True, env=env, timeout=300)
+        return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
+    raise ValueError(f"no tool named {name}")
+
+
+def resources() -> list[dict]:
+    return [
+        {"uri": "maintainer://lessons", "name": "What broke before, and what guards it now",
+         "mimeType": "text/markdown"},
+        {"uri": "maintainer://containment", "name": "What contains a hostile pull request",
+         "mimeType": "text/markdown"},
+        {"uri": "maintainer://user-stories", "name": "Forty situations a maintainer meets",
+         "mimeType": "text/markdown"},
+    ]
+
+
+def read_resource(uri: str) -> str:
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    names = {"maintainer://lessons": "docs/lessons.md",
+             "maintainer://containment": "docs/containment.md",
+             "maintainer://user-stories": "docs/user-stories.md"}
+    if uri not in names:
+        raise ValueError(f"no resource {uri}")
+    for base in (here, os.path.join(HOME, ".local/share/maintainer")):
+        path = os.path.join(base, names[uri])
+        if os.path.exists(path):
+            return open(path).read()
+    raise ValueError(f"{names[uri]} is not on this machine")
+
+
+def reply(rid, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": rid}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+
+def main() -> None:
+    if "--tools" in sys.argv:
+        for t in TOOLS:
+            print(f"{t['name']:26} {t['description'][:78]}")
+        for r in resources():
+            print(f"{r['uri']:26} {r['name']}")
+        return
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        method, rid = msg.get("method"), msg.get("id")
+        if method == "initialize":
+            reply(rid, {"protocolVersion": PROTOCOL,
+                        "capabilities": {"tools": {}, "resources": {}},
+                        "serverInfo": {"name": "maintainer-agent", "version": version()}})
+        elif method == "notifications/initialized":
+            continue
+        elif method == "tools/list":
+            reply(rid, {"tools": TOOLS})
+        elif method == "resources/list":
+            reply(rid, {"resources": resources()})
+        elif method == "resources/read":
+            uri = (msg.get("params") or {}).get("uri", "")
+            try:
+                reply(rid, {"contents": [{"uri": uri, "mimeType": "text/markdown",
+                                          "text": read_resource(uri)}]})
+            except ValueError as e:
+                reply(rid, error={"code": -32602, "message": str(e)})
+        elif method == "tools/call":
+            params = msg.get("params") or {}
+            try:
+                out = call_tool(params.get("name", ""), params.get("arguments") or {})
+                # A refusal is a result, not a protocol error: the client needs
+                # to read the reason, which is the whole point of the gate.
+                text = out["stdout"] or ""
+                if out["stderr"]:
+                    text += ("\n" if text else "") + out["stderr"]
+                reply(rid, {"content": [{"type": "text", "text": text.strip() or "(no output)"}],
+                            "isError": out["exit_code"] != 0})
+            except ValueError as e:
+                reply(rid, error={"code": -32602, "message": str(e)})
+            except Exception as e:  # noqa: BLE001
+                reply(rid, error={"code": -32603, "message": f"{type(e).__name__}: {e}"})
+        elif rid is not None:
+            reply(rid, error={"code": -32601, "message": f"no method {method}"})
+
+
+def version() -> str:
+    f = os.path.join(HOME, ".local/share/maintainer/VERSION")
+    if os.path.exists(f):
+        for line in open(f):
+            if line.startswith("version="):
+                return line.split("=", 1)[1].strip()
+    return "unstamped"
+
+
+if __name__ == "__main__":
+    main()

@@ -1274,5 +1274,57 @@ grep -q 'MAX_THINKING_TOKENS' "$root/lib/backends/claude.sh" \
     && ok "the backend names the mechanism rather than implying a flag" \
     || bad "the thinking budget is not wired into the claude backend"
 
+echo "== the MCP server speaks the protocol, and exposes no way round the gate =="
+mcp="$root/bin/maintainer-mcp"
+[ -x "$mcp" ] && ok "maintainer-mcp is present and executable" || bad "no MCP server"
+session() { printf '%s\n' "$@" | python3 "$mcp" 2>/dev/null; }
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+              '{"jsonrpc":"2.0","id":3,"method":"resources/list"}')
+printf '%s' "$out" | grep -q '"protocolVersion"' && ok "initialize answers with a protocol version" \
+    || bad "initialize did not answer"
+printf '%s' "$out" | grep -q '"tools"' && ok "tools/list answers" || bad "tools/list did not answer"
+printf '%s' "$out" | grep -q '"resources"' && ok "resources/list answers" || bad "resources/list did not answer"
+
+# The refusals must survive the change of interface. An MCP client is driven by
+# a model, so anything exposed here is exposed to a model.
+tools=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c "
+import json,sys
+for l in sys.stdin:
+    m=json.loads(l)
+    if 'result' in m and 'tools' in m['result']:
+        print(' '.join(t['name'] for t in m['result']['tools']))")
+# Named exactly, not by substring: the first version of this check flagged
+# maintainer_release_check, which only reports whether a release is owed and
+# cannot cut one. A crude needle produces a finding about the needle.
+for forbidden in maintainer_receipt maintainer_release maintainer_publish \
+                 maintainer_push maintainer_tag maintainer_exec maintainer_shell; do
+    printf ' %s ' "$tools" | grep -q " $forbidden " \
+        && bad "MCP exposes $forbidden" \
+        || ok "MCP exposes no $forbidden"
+done
+# And the tools it does expose must not be able to publish. release_check reads
+# the CHANGELOG and says which digit moves; it never tags.
+grep -q '"release-check"' "$mcp" && ok "release_check only asks maintainer-repo, which never tags" \
+    || bad "the release tool does something other than release-check"
+printf ' %s ' "$tools" | grep -q ' maintainer_verify ' \
+    && ok "verify is exposed (it is the only way to earn a receipt)" \
+    || bad "verify is missing, so a receipt can never be earned over MCP"
+# A model supplies these arguments. They are validated, not interpolated.
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_merge","arguments":{"pr":"7; rm -rf /"}}}')
+printf '%s' "$out" | grep -q 'positive integer' && ok "a non-integer pull request number is refused" \
+    || bad "MCP accepted a non-integer pr"
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_status","arguments":{"profile":"../../etc"}}}')
+printf '%s' "$out" | grep -q 'plain name' && ok "a profile name that is a path is refused" \
+    || bad "MCP accepted a path as a profile name"
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}')
+printf '%s' "$out" | grep -q 'no tool named' && ok "an unknown tool is refused" || bad "unknown tool not refused"
+# prune over MCP is always a dry run: deleting is a decision.
+grep -q '"prune", "--dry-run"' "$mcp" && ok "prune over MCP is always a dry run" \
+    || bad "MCP could delete branches"
+grep -q 'maintainer-merge", "merge"' "$mcp" \
+    && ok "merge shells out to the gate rather than reimplementing it" \
+    || bad "MCP does not route merges through maintainer-merge"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

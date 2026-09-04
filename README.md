@@ -269,6 +269,26 @@ is parsed by a real `pwsh` in a container when the image is present locally;
 counting braces was the previous check, and it would pass a file PowerShell
 refuses to load.
 
+## Driving it from an editor
+
+```sh
+maintainer-mcp --tools
+```
+
+An MCP server over stdio, standard library only, config in
+`assets/mcp.json.example`. Six tools: `status`, `screen`, `verify`, `merge`,
+`release_check`, `prune`.
+
+**Every mutation shells out to the same binary a human uses**, so the receipt,
+the identity gate, the check board, the merge state and `POST=off` all still
+apply. A client that asks to merge without a receipt gets the gate's own words
+back. Absent on purpose: the asserted form of `receipt`, and anything that
+publishes. Tool arguments come from a model, so each one is validated rather
+than interpolated.
+
+[`docs/deploy/`](docs/deploy/README.md) covers the four ways to run it and what
+each one asks you to trust.
+
 ## Another repository
 
 ```sh
@@ -452,12 +472,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 321 offline tests
+./tests/run-tests.sh        # 340 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-321 offline tests: no network, no GitHub, no model call. Every case tests a
+340 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
