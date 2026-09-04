@@ -1667,6 +1667,24 @@ grep -q '"\$rt" --log-level=error run' "$mg" \
     && ok "the runtime is told to keep its warnings out of the log" \
     || bad "runtime warnings still land in the log the byte count reads"
 
+echo "== every profile declares a budget for every task it runs =="
+# The template grew THINKING_<task> after profiles/magent had been generated
+# from it, so magent ran without one and the agent maintaining the merge gate
+# thought less about it than the agent maintaining the target repository did.
+# Nothing said so: a missing budget is not an error, it is a default.
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    tasks="$(sed -n 's/^TASKS="\(.*\)"/\1/p' "$pe")"
+    [ -n "$tasks" ] || { bad "$pn declares no TASKS"; continue; }
+    missing=""
+    for tk in $tasks; do
+        grep -q "^THINKING_$tk=" "$pe" || missing="$missing $tk"
+        grep -q "^MODEL_$tk=" "$pe" || missing="$missing $tk(model)"
+    done
+    [ -z "$missing" ] && ok "$pn budgets every task it runs" \
+        || bad "$pn runs$missing with no declared thinking budget or model"
+done
+
 echo "== the doctor reports on the profile it was asked about =="
 # It globbed `maintainer@*` in systemctl, so with MAINTAINER_PROFILE=magent it
 # counted sysknife's four timers and printed "4 systemd timer(s) registered, ok"

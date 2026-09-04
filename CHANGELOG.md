@@ -121,6 +121,12 @@ unnoticed.
 - A receipt's proof string was interpolated into JSON by a heredoc, so a proof
   containing a quote wrote a file the gate could not parse, and the refusal
   blamed the receipt rather than the quoting.
+- **`profiles/magent` declared no thinking budget**, because the template grew
+  `THINKING_<task>` after that profile had been generated from it. A missing
+  budget is a default, not an error, so nothing said so: the agent maintaining
+  the merge gate thought less about it than the agent maintaining the target
+  repository did. Every profile is now required to declare a model and a budget
+  for every task it runs.
 - **`maintainer-doctor` reported another profile's timers as this one's.** The
   scheduler check globbed `maintainer@*`, so asked about `magent` it counted
   `sysknife`'s four timers and said "4 systemd timer(s) registered, ok" while
