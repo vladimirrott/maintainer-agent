@@ -80,9 +80,17 @@ refuses unless **all** of these hold:
 | `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
 
 ```sh
-maintainer-merge receipt 348 0e37a664 "dropped GetSystemState from the allowlist; drift test went red"
-maintainer-merge merge 348
+maintainer-merge verify 365 7c6ed388 tests/e2e/story-metadata.test.sh 's/GUARD=on/GUARD=off/'
+maintainer-merge merge  365
 ```
+
+The suite comes from the profile (`profiles/<name>/verify.d/*.sh`) and is
+inferred from the paths the pull request touches. Each suite answers four
+questions: which paths it covers, the image to run in, the command, and how to
+tell that something really ran. That last one is what stops a receipt being
+worthless, and it cannot be generic: cargo prints `test result: ok. N passed`, a
+shell test prints whatever its author chose. **A profile with no suite covering
+the changed paths is refused rather than run under the wrong one.**
 
 Every refusal path is tested, including both directions of the production-diff
 rule against a real git repository.
@@ -409,7 +417,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-three entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the twenty-four entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -437,12 +445,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 300 offline tests
+./tests/run-tests.sh        # 313 offline tests
 ./evals/run-evals.sh        # 7 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-300 offline tests: no network, no GitHub, no model call. Every case tests a
+313 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

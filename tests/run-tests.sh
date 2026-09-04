@@ -1157,5 +1157,76 @@ grep -q 'secrets\.' "$root/.github/workflows/ci.yml" \
     && bad "CI reads a secret; a fork's pull request must not be able to" \
     || ok "CI reads no secrets, so a fork's PR is safe to run"
 
+echo "== the merge gate verifies more than one language =="
+# It assumed Rust in four places: the image, the command, the mutation glob and
+# the way it counts what ran. A pull request touching only shell could not earn
+# a receipt and therefore could never merge, which took a live contributor PR to
+# notice because refusing to merge is the safe outcome. Issue #11.
+vs="$root/profiles/sysknife/verify.d"
+[ -d "$vs" ] && ok "the profile declares verification suites" || bad "no verify.d/ for sysknife"
+for suite in rust shell; do
+    [ -f "$vs/$suite.sh" ] && ok "suite '$suite' exists" || bad "suite '$suite' is missing"
+done
+# Every suite must answer all four questions. A suite that cannot say how to
+# count what ran is a suite that can write a receipt for a vacuous pass.
+for suite in "$vs"/*.sh; do
+    n="$(basename "$suite" .sh)"
+    missing=""
+    for fn in suite_covers suite_image suite_mutate_glob suite_command suite_ran; do
+        grep -q "^$fn()" "$suite" || missing="$missing $fn"
+    done
+    [ -z "$missing" ] && ok "suite '$n' answers every question" \
+        || bad "suite '$n' is missing:$missing"
+done
+# Path inference: each suite must claim its own and disclaim the others.
+( . "$vs/rust.sh";  suite_covers "crates/x/src/lib.rs" ) && ok "rust claims a .rs path" || bad "rust does not claim .rs"
+( . "$vs/rust.sh";  suite_covers "scripts/x.sh" )        && bad "rust claims a .sh path" || ok "rust disclaims .sh"
+( . "$vs/shell.sh"; suite_covers "scripts/x.sh" )        && ok "shell claims a .sh path" || bad "shell does not claim .sh"
+( . "$vs/shell.sh"; suite_covers "crates/x/src/lib.rs" ) && bad "shell claims a .rs path" || ok "shell disclaims .rs"
+# A path no suite covers must be refused rather than silently run under Rust.
+grep -q 'no suite in .* covers every changed path' "$root/bin/maintainer-merge" \
+    && ok "an uncovered path is refused, not guessed at" \
+    || bad "verify would fall back to a suite that does not run the changed code"
+# The receipt has to say which suite proved it.
+grep -q '"suite": suite' "$root/bin/maintainer-merge" \
+    && ok "the receipt records which suite produced it" \
+    || bad "a receipt does not say what verified it"
+
+echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
+# End to end against a repository built here, because forcing this through a
+# real pull request proved only that a badly chosen mutation is refused.
+if command -v podman >/dev/null 2>&1 && podman image exists docker.io/library/bash:5 2>/dev/null; then
+    vr="$stub_dir/verifyrepo"; rm -rf "$vr"; mkdir -p "$vr"
+    git -C "$vr" init -q -b main; git -C "$vr" config user.email t@t; git -C "$vr" config user.name t
+    printf '#!/usr/bin/env bash\nGUARD=on\nif [ "$GUARD" = on ]; then echo "guard held"; exit 0; fi\necho "guard gone"; exit 1\n' \
+        > "$vr/check.sh"
+    git -C "$vr" add -A; git -C "$vr" commit -qm base
+    verify_head="$(git -C "$vr" rev-parse HEAD)"
+    git -C "$vr" update-ref "refs/pull/42/head" "$verify_head"
+    git -C "$vr" remote add origin "$vr"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo check.sh;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          bash "$mg" verify 42 "$verify_head" check.sh 's/GUARD=on/GUARD=off/' shell 2>&1)
+    if printf '%s' "$out" | grep -q 'receipt recorded\|observed'; then
+        ok "the shell suite produced an observed receipt"
+    else
+        bad "shell verify failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+    fi
+    # And the same run must refuse when the mutation changes nothing.
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate2" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          bash "$mg" verify 42 "$verify_head" check.sh 's/NOTHING/MATCHES/' shell 2>&1)
+    printf '%s' "$out" | grep -q 'THE GUARD DOES NOT BITE' \
+        && ok "a mutation that changes nothing is refused" \
+        || bad "a no-op mutation produced a receipt"
+else
+    bad "podman or docker.io/library/bash:5 absent; the shell suite was never executed"
+fi
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -69,10 +69,63 @@ EOF
 # mutation applied, and records a receipt only if it passed clean and failed
 # mutated. Either other outcome is a refusal, including the one that matters
 # most: a test that stays green when the guard is removed.
+# maintainer-merge verify <pr> <head-sha> <test filter> <sed mutation> [suite]
+#
+# Runs the filter in podman against the PR head, then again with the mutation
+# applied, and records a receipt only if it passed clean and failed mutated.
+# Either other outcome is a refusal, including the one that matters most: a test
+# that stays green when the guard is removed.
+#
+# The suite comes from the profile (profiles/<name>/verify.d/*.sh) and is
+# inferred from the paths the pull request touches. This used to be hardcoded to
+# Rust in four places, so a pull request touching only shell scripts could never
+# earn a receipt and therefore could never merge. See issue #11: it took a live
+# contributor PR to find, because refusing to merge is the safe outcome and
+# nothing looked wrong until somebody wanted the merge.
+suite_dir() {
+    local here; here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    for d in "${PROFILE_DIR:-}/verify.d" \
+             "$HOME/.local/share/maintainer/profiles/${MAINTAINER_PROFILE:-}/verify.d" \
+             "$here/../profiles/${MAINTAINER_PROFILE:-}/verify.d"; do
+        case "$d" in /verify.d) continue ;; esac
+        [ -d "$d" ] && { printf '%s' "$d"; return 0; }
+    done
+    return 1
+}
+
+# Which suite covers these paths? Named explicitly, or inferred, or refused.
+pick_suite() {  # $1 = named suite or empty, $2... = changed paths
+    local named="$1"; shift
+    local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
+    if [ -n "$named" ]; then
+        [ -f "$dir/$named.sh" ] || die "no suite '$named' in $dir"
+        printf '%s' "$named"; return 0
+    fi
+    local s name covered=""
+    for s in "$dir"/*.sh; do
+        [ -e "$s" ] || continue
+        name="$(basename "$s" .sh)"
+        ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
+    done
+    [ -n "$covered" ] || die "no suite in $dir covers every changed path:
+$(printf '    %s\n' "$@")
+  Add one, or name a suite explicitly. A receipt written by a suite that does
+  not run the changed code proves nothing."
+    printf '%s' "$covered"
+}
+
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
-    local crate="${5:-}"
+    local named="${5:-}"
     command -v podman >/dev/null || die "podman is required for verify; no container, no receipt"
+
+    local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
+    [ -n "$paths" ] || die "could not read the changed files for #$pr"
+    local suite; suite="$(pick_suite "$named" $paths)" || exit 1
+    local dir; dir="$(suite_dir)"
+    # shellcheck disable=SC1090
+    . "$dir/$suite.sh"
+    say "suite: $suite ($(suite_image))"
 
     local work; work="$(mktemp -d)"
     trap 'rm -rf "$work"' RETURN
@@ -84,18 +137,12 @@ cmd_verify() {
     git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
     mkdir -p "$work/.container-target"
 
-    local pkg=(); [ -n "$crate" ] && pkg=(-p "$crate")
-    # No target filter. `--bins` misses integration tests under tests/, which is
-    # how this gate once refused a good pull request after running zero tests.
     run_in_container() {
-        podman run --rm --network=none -v "$work:/repo:z" -v "$HOME/.cargo:/cargo:O" \
-            -w /repo -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
-            -e CARGO_NET_OFFLINE=true docker.io/library/rust:1-slim \
-            cargo test "${pkg[@]}" --offline "$filter" >>"$1" 2>&1
+        # shellcheck disable=SC2046
+        podman run --rm --network=none -v "$work:/repo:z" $(suite_podman_args) \
+            -w /repo "$(suite_image)" \
+            sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
-
-    # How many tests actually executed, summed across every target.
-    tests_run() { awk '/^test result:/ { for (i=1;i<=NF;i++) if ($i=="passed;") s+=$(i-1) } END { print s+0 }' "$1"; }
 
     local clean_log="$work/clean.log" mut_log="$work/mutated.log"
     say "running '$filter' unmutated"
@@ -106,16 +153,17 @@ $(tail -5 "$clean_log" | sed 's/^/    /')"
     # A filter that matches nothing "passes". Without this the gate can write a
     # receipt having executed zero tests: the clean run passes vacuously, and a
     # mutation that merely breaks compilation makes the second run fail, which
-    # reads as proof. Refuse before that can happen.
-    local ran; ran="$(tests_run "$clean_log")"
-    [ "${ran:-0}" -ge 1 ] || die "the filter '$filter' matched no tests; a vacuous pass proves nothing
-$(grep -m2 'filtered out' "$clean_log" | sed 's/^/    /')"
-    say "$ran test(s) matched and passed unmutated"
+    # reads as proof. Each suite says how to count; a suite that cannot say gets
+    # no receipt.
+    local ran; ran="$(suite_ran "$clean_log")"
+    [ "${ran:-0}" -ge 1 ] || die "'$filter' produced no evidence it ran anything; a vacuous pass proves nothing
+$(tail -3 "$clean_log" | sed 's/^/    /')"
+    say "$suite suite: evidence of $ran executed unit(s), passing unmutated"
 
     say "applying the mutation and re-running"
     # The mutation is applied inside the extracted tree only. The real
     # repository is never touched.
-    ( cd "$work" && find . -name '*.rs' -not -path './.container-target/*' -print0 \
+    ( cd "$work" && find . -name "$(suite_mutate_glob)" -not -path './.container-target/*' -print0 \
         | xargs -0 sed -i "$mutation" ) || die "mutation failed to apply"
     run_in_container "$mut_log"; local mut_rc=$?
 
@@ -126,11 +174,14 @@ $(grep -m2 'filtered out' "$clean_log" | sed 's/^/    /')"
 
     mkdir -p "$RECEIPTS"
     python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$filter" "$mutation" "$mut_rc" \
-        "$(grep -m1 -E 'panicked at|assertion|FAILED' "$mut_log" | cut -c1-200)" <<'PYEOF'
+        "$(grep -m1 -E 'panicked at|assertion|FAILED|Error|error' "$mut_log" | cut -c1-200)" \
+        "$suite" "$ran" <<'PYEOF'
 import json, sys, datetime, getpass
 out, pr, head, filt, mut, rc, msg = sys.argv[1:8]
+suite, ran = sys.argv[8], sys.argv[9]
 json.dump({
     "pr": int(pr), "head": head, "kind": "observed",
+    "suite": suite, "units_run": ran,
     "proof": f"`{filt}` passes clean and fails under `{mut}` (rc={rc})",
     "mutation": mut, "filter": filt, "observed_failure": msg,
     "recorded_at": datetime.datetime.now().astimezone().isoformat(),

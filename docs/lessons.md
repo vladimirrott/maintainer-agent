@@ -468,3 +468,28 @@ expected to pass under
 
 which it does. CI is the only place that check was ever going to come from,
 which is an argument for CI that has nothing to do with contributors.
+
+## 24. The claim check read a number out of a commit SHA
+
+`scripts/check_claims.sh` held the README's figures to the tree by grepping for
+`[0-9]+ (offline )?tests` and taking **the first match**. A new example in the
+README read
+
+    maintainer-merge verify 365 7c6ed388 tests/e2e/story-metadata.test.sh
+
+and the checker found `388 tests` inside the commit SHA, then refused the commit
+because the tree has 313. The number it complained about had never been written
+by anyone.
+
+Two defects in one line, and the second is worse. Taking the first match means a
+**second, stale copy of a figure further down the file is never checked at all**:
+the check would have passed happily with the correct number at the top and a
+wrong one below it.
+
+**Guard:** the number may not be the tail of a longer token, every occurrence is
+collected rather than the first, and figures that disagree with each other fail
+before either is compared to the tree. Adding a second, conflicting mention
+turns it red naming both.
+
+This is the third time a check in this repository has passed or failed for a
+reason unrelated to what it was checking. The other two are in §5.
