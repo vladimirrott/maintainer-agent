@@ -151,9 +151,40 @@ cmd_verify() {
     git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
     mkdir -p "$work/.container-target"
 
+    # Every control here is measured by tests/containment-probe.sh with a real
+    # adversarial payload, not assumed from the flag being present.
+    #
+    #   --network=none          the payload cannot phone home or fetch a stage 2
+    #   --cap-drop=ALL          no CAP_NET_RAW, no CAP_SYS_ADMIN, nothing
+    #   no-new-privileges       a setuid binary inside cannot elevate
+    #   --read-only             the image is immutable; only the mounts are not
+    #   --tmpfs /tmp noexec     scratch space that cannot be executed from
+    #   --pids-limit            a fork bomb hits a wall instead of the host
+    #   --memory, --cpus        a balloon or a spin cannot starve the machine
+    #   --timeout               an infinite loop cannot hold a timer for ever.
+    #                           This is podman's own flag, enforced by conmon.
+    #                           GNU `timeout` around the client does NOT work:
+    #                           it kills the CLI and leaves the container
+    #                           running. Measured, with two containers still
+    #                           spinning three minutes later and load at 5.5.
+    #
+    # What this is NOT: a boundary against a kernel exploit. Containers share
+    # the host kernel, and the 2026 consensus is that untrusted code deserves a
+    # user-space kernel (gVisor) or a micro-VM. docs/containment.md says so and
+    # says what it would take to get there.
     run_in_container() {
         # shellcheck disable=SC2046
-        "$rt" run --rm --network=none -v "$work:/repo:z" $(suite_podman_args) \
+        "$rt" run --rm \
+            --timeout "${MAINTAINER_VERIFY_TIMEOUT:-1800}" \
+            --network=none \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
+            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
+            --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
+            -v "$work:/repo:z" $(suite_podman_args) \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
