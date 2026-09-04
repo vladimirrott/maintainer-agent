@@ -70,6 +70,8 @@ model_var="MODEL_$task"; model="${!model_var:?no model configured for $task}"
 # from a dict in its own source, so a second repository needs no code change.
 skill_var="SKILL_$task"
 export MAINTAINER_TASKS="$TASKS" MAINTAINER_SKILL="${!skill_var:-}"
+# The backend reads THINKING_<task> out of the profile.
+export MAINTAINER_TASK="$task"
 
 # The scheduler is not the only thing that decides cadence, because not every
 # scheduler can express one. systemd says "every 5 days" and means it; launchd's

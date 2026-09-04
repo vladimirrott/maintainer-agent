@@ -217,6 +217,12 @@ safety: a broad allow re-opens the hole. `"cargo *": "allow"` permitted
 where last-match-wins puts them on top, and a test decides all fourteen probe
 commands to prove it.
 
+**Thinking budget.** Reasoning effort is not a flag. Claude Code reads
+`MAX_THINKING_TOKENS` from the environment, so the profile sets `THINKING_<task>`
+and the backend exports it: `review` reads diffs and thinks hard, the sweeps stay
+cheap, and a test measures what the process actually received rather than what
+the file says.
+
 Claude remains the default because it is the most capable at the work. Codex
 expresses a sandbox *mode* rather than a rule set. Cursor is weakest: its own
 documentation states the print-mode agent has full write access, so it never
@@ -446,12 +452,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 318 offline tests
+./tests/run-tests.sh        # 321 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-318 offline tests: no network, no GitHub, no model call. Every case tests a
+321 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

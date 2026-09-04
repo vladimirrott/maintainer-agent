@@ -1246,5 +1246,33 @@ for f in "$root"/profiles/*/verify.d/*.sh; do
         || bad "$f has no shebang and no shellcheck shell directive"
 done
 
+echo "== the thinking budget reaches the process, per task =="
+# Reasoning effort is not a CLI flag: Claude Code reads MAX_THINKING_TOKENS from
+# the environment. A setting nobody confirmed reached the process is the same
+# shape as the MAINTAINER_FORCE leak, so this measures rather than greps.
+tb="$stub_dir/thinkstub"; mkdir -p "$tb"
+printf '#!/usr/bin/env bash\nenv | grep -E "^MAX_THINKING_TOKENS=" >&2\nexit 0\n' > "$tb/claude"
+chmod +x "$tb/claude"
+tlog="$stub_dir/think.log"
+think_for() {  # $1 = task -> the budget the backend exported
+    : > "$tlog"
+    ( export PATH="$tb:$PATH" MAINTAINER_TASK="$1" PROFILE_DIR="$root/profiles/sysknife"
+      # shellcheck disable=SC1091
+      . "$root/profiles/sysknife/profile.env"
+      # shellcheck disable=SC1091
+      . "$root/lib/backends/claude.sh"
+      backend_run /dev/null opus "$tlog" /tmp >/dev/null 2>&1 )
+    sed -n 's/^MAX_THINKING_TOKENS=//p' "$tlog" | head -1
+}
+r_think="$(think_for review)"; c_think="$(think_for ci)"
+[ -n "$r_think" ] && ok "review exports a thinking budget ($r_think)" \
+    || bad "no MAX_THINKING_TOKENS reached the process for review"
+[ -n "$c_think" ] && [ "$c_think" != "$r_think" ] \
+    && ok "ci gets its own, smaller budget ($c_think)" \
+    || bad "every task got the same budget; the per-task setting does nothing"
+grep -q 'MAX_THINKING_TOKENS' "$root/lib/backends/claude.sh" \
+    && ok "the backend names the mechanism rather than implying a flag" \
+    || bad "the thinking budget is not wired into the claude backend"
+
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
