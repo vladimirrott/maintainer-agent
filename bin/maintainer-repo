@@ -99,7 +99,25 @@ cmd_release_check() {
     else
         prod="$(git diff --name-only "$tag"..origin/main -- "${globs[@]}" | wc -l)"
     fi
-    unrel="$(sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p' CHANGELOG.md 2>/dev/null)"
+    # Read from the working tree, because that is the file a human is about to
+    # tag, while every count above comes from origin/main. Those are two trees,
+    # and the verdict is only about one of them when they agree. Say which, and
+    # say when they do not: this check ran against a CHANGELOG whose Unreleased
+    # section had already been promoted to a version heading and reported "0
+    # removed-capability occurrences" for a release that removed six.
+    say "CHANGELOG read from:        the working tree ($(git rev-parse --abbrev-ref HEAD))"
+    if [ -n "$(git status --porcelain CHANGELOG.md)" ]; then
+        say "                           uncommitted, so origin/main does not have it yet"
+    elif ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
+        say "                           HEAD is not on origin/main; the counts above are"
+    fi
+    # The two heading lines are dropped, because sed prints both delimiters. An
+    # empty Unreleased section therefore came back as two lines, `-z` was false,
+    # and the "this verdict rests on file counts alone" warning below never
+    # printed once. It reported "0 removed-capability occurrences" for a release
+    # that removed six, without saying it had read nothing.
+    unrel="$(sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p' CHANGELOG.md 2>/dev/null \
+             | grep -v '^## \[')"
     sec="$(printf '%s' "$unrel" | grep -c '^### Security' || true)"
     added="$(printf '%s' "$unrel" | grep -c '^### Added' || true)"
     # "no longer", "can no longer", "used to" are how this project words a
@@ -109,9 +127,12 @@ cmd_release_check() {
     say "CHANGELOG Security section: $([ "$sec" -gt 0 ] && echo yes || echo no)"
     say "CHANGELOG Added section:    $([ "$added" -gt 0 ] && echo yes || echo no)"
     say "removed-capability wording: $breaking occurrence(s)"
-    if [ -z "$unrel" ]; then
-        say "WARNING: the Unreleased section is empty or unreadable, so this verdict"
-        say "         rests on file counts alone. Check CHANGELOG.md by hand."
+    if [ -z "$(printf '%s' "$unrel" | tr -d '[:space:]')" ]; then
+        say "WARNING: the Unreleased section is empty, so the three lines above read"
+        say "         nothing and this verdict rests on file counts alone."
+        local top; top="$(grep -m1 '^## \[[0-9]' CHANGELOG.md 2>/dev/null)"
+        [ -n "$top" ] && say "         The newest version heading is '${top#\#\# }'. If you have already"
+        [ -n "$top" ] && say "         promoted Unreleased into it, read that section instead."
     fi
 
     printf '\n'

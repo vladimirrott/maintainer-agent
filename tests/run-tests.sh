@@ -532,9 +532,48 @@ grep -qE 'case "\$br" in main\|master' "$mr" && ok "prune never touches main" ||
 # An earlier version read subject lines for the word "security" and scored a
 # genuine authorization fix as zero, because its subject said "gate mutating
 # query actions".
-grep -q 'Unreleased' "$mr" && ok "release-check reads the CHANGELOG Unreleased section" || bad "release-check no longer reads the CHANGELOG"
-grep -q 'rests on file counts alone' "$mr" && ok "release-check warns when the CHANGELOG is unreadable" || bad "release-check would pass silently over a missing CHANGELOG"
 if grep -q "format=%s.*grep -ciE 'security" "$mr"; then bad "release-check still guesses from commit subjects"; else ok "release-check does not guess from commit subjects"; fi
+# Driven, not grepped. A real repository with a tag, an origin, and a CHANGELOG
+# this test controls.
+rcrepo="$stub_dir/rcrepo"; rcorigin="$stub_dir/rcorigin"
+git init -q --bare "$rcorigin"
+git init -q -b main "$rcrepo"
+git -C "$rcrepo" config user.email t@t; git -C "$rcrepo" config user.name t
+mkdir -p "$rcrepo/bin"
+printf 'v1\n' > "$rcrepo/bin/tool"; printf '# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01\n' > "$rcrepo/CHANGELOG.md"
+git -C "$rcrepo" add -A >/dev/null; git -C "$rcrepo" commit -qm base
+git -C "$rcrepo" tag v0.1.0
+printf 'v2\n' > "$rcrepo/bin/tool"
+git -C "$rcrepo" commit -qam 'change production code'
+git -C "$rcrepo" remote add origin "$rcorigin"; git -C "$rcrepo" push -q --tags origin main
+rc_run() { PATH="$stub_dir:$PATH" MAINTAINER_SLUG=o/r MAINTAINER_REPO="$rcrepo" \
+    MAINTAINER_STATE="$stub_dir/rcstate" MAINTAINER_ACCOUNT=t PROD_GLOBS="bin/*" \
+    bash "$mr" release-check 2>&1; }
+out="$(rc_run)"
+printf '%s' "$out" | grep -q 'rests on file counts alone' \
+    && ok "an empty Unreleased section is reported as read nothing" \
+    || bad "release-check read an empty Unreleased section without saying so"
+# The delimiter bug: sed prints BOTH headings, so an empty section came back as
+# two lines and -z was false. The warning above never printed once in practice.
+printf '%s' "$out" | grep -q 'newest version heading' \
+    && ok "and it names the heading the entries were probably promoted into" \
+    || bad "the warning does not say where to look instead"
+printf '%s' "$out" | grep -q 'digit:   last' \
+    && ok "with nothing to read it does not claim a breaking change" \
+    || bad "release-check guessed a digit from an unread CHANGELOG"
+# Now a populated section that removes a capability.
+printf '# Changelog\n\n## [Unreleased]\n\n### Removed\n\n- A run can no longer assert a receipt.\n\n## [0.1.0] - 2026-01-01\n' \
+    > "$rcrepo/CHANGELOG.md"
+out="$(rc_run)"
+printf '%s' "$out" | grep -q 'RELEASE DUE' \
+    && ok "a removed capability makes the release due" \
+    || bad "a removed capability did not make the release due"
+printf '%s' "$out" | grep -q 'digit:   middle' \
+    && ok "and it moves the middle digit" \
+    || bad "a removed capability was scored as a patch"
+printf '%s' "$out" | grep -q 'CHANGELOG read from' \
+    && ok "it names which tree the CHANGELOG came from" \
+    || bad "the CHANGELOG source is unstated while the counts come from origin/main"
 
 
 echo "== --timers enables unit files that exist =="

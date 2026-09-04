@@ -562,3 +562,21 @@ command not found`, ten times, inflating `units_run` from 2 to 10.
 runtime now runs at `--log-level=error`, the extractor drops logfmt lines, and
 when nothing matches the failure pattern it falls back to the last line printed
 rather than recording an empty string.
+
+## 28. The warning that had never once printed
+
+`release-check` reads the CHANGELOG's Unreleased section and warns when it is
+empty, because the verdict then rests on file counts alone. The extraction was
+`sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p'`, and sed prints both delimiters.
+An empty section therefore came back as two heading lines, `[ -z "$unrel" ]` was
+false, and the warning had never printed in the life of the tool.
+
+It was found by using it: cutting this project's own 0.2.0, the check reported
+`removed-capability wording: 0 occurrence(s)` and `digit: last` for a release
+whose Removed section has six entries, and said nothing about having read an
+empty section. The two tests covering this were greps for a phrase in the source
+of `bin/maintainer-repo`, so both passed throughout.
+
+**A guard whose input is never empty in the author's tests is a guard that has
+never run.** Build the empty case as a fixture, not as an assertion about the
+source.

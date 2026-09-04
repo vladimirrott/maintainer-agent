@@ -10,6 +10,130 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-04
+
+The middle digit moves because six things that used to succeed now refuse. Every
+one of them turned up by pointing this agent at a repository and reading what it
+did.
+
+Most of what is here came from two live pull requests on
+[`lacs-project/sysknife`](https://github.com/lacs-project/sysknife). Both were
+correct, both were mergeable, and neither could be merged: one touched only
+shell scripts and one touched only prose, and the gate could verify neither.
+Refusing to merge is the safe outcome, which is exactly why both gaps sat there
+unnoticed.
+
+### Removed
+
+- **An unattended run can no longer assert a receipt.** `maintainer-merge
+  receipt` records a sentence a human typed; `verify` records what it watched
+  happen. A run may use only the second. `receipt` refuses inside a run, the
+  deny wall spells the command, and `merge` refuses any receipt that is not
+  `kind: observed` while a run is in progress. Only the third survives an agent
+  editing its own environment.
+- **An unsigned receipt no longer merges.** The receipt was a JSON file in the
+  state directory whose only protection was a deny rule on one CLI verb, while
+  the deny wall emits `Bash()` and `Read()` rules and nothing else. An agent
+  holding an ordinary write tool could create it by hand with
+  `"kind": "observed"`. Payloads are HMAC-signed by a key `install.sh` mints at
+  mode 0600, and an edited receipt is refused by name.
+- **A profile that declares no `PROD_GLOBS` no longer merges.** The list of
+  production paths was hardcoded to one project's directories, so on every other
+  repository it named paths that do not exist and every rebase looked harmless.
+  There is no default: guessing which paths are production is how the bug
+  worked.
+- **`maintainer` no longer guesses a profile.** With two deployed and none
+  named, it reported the wrong one, and `maintainer run review` would have
+  started a real posting run against the wrong repository. It enumerates and
+  refuses.
+- **A task name containing a hyphen is refused.** `run.sh` builds `MODEL_$task`
+  as a shell variable name and `cmd_finish` recovers the task from the run id,
+  so a hyphen made the baseline silently never promote.
+- **A tree whose symlinks leave it is refused verification.** The mutation step
+  runs on the host, and `sed -i` through a tracked symlink writes the target's
+  plaintext into a tree that is then mounted into the container. Reproduced end
+  to end. The first version of this refused *every* symlink and so refused
+  sysknife's own `docs/images/…` link, which had been on main for months.
+
+### Added
+
+- **An MCP server** (`bin/maintainer-mcp`), stdlib-only, over stdio. Six tools
+  and three resources. Every mutation shells out to the real binary rather than
+  reimplementing it, so the gate is the same gate. No `receipt`, no publish, no
+  tag, no shell. `prune` is always a dry run.
+- **Verification runs in a container**, hardened and probed:
+  `--network=none --cap-drop=ALL --security-opt=no-new-privileges --read-only`,
+  a `noexec,nosuid` tmpfs, pid, memory and CPU caps, and the runtime's own
+  `--timeout`. GNU `timeout` kills the client, not the container, which left two
+  containers spinning three minutes after the gate reported a refusal.
+  `tests/containment-probe.sh` runs eleven adversarial payloads against it.
+- **Verification suites per language** (`profiles/<name>/verify.d/*.sh`). Each
+  answers four questions: which paths it covers, the image, the command, and how
+  to tell that something ran. The `sysknife` profile ships `rust`, `shell` and
+  `docs`. A profile with no suite covering the changed paths is refused rather
+  than run under the wrong one.
+- **A thinking budget per task**, measured rather than assumed, and
+  `maintainer version` plus a drift warning in `maintainer status` when the
+  checkout and the deployed tree disagree.
+- `docs/user-stories.md`: forty situations a maintainer meets, each mapped to
+  what this does today and what it does not.
+- `docs/containment.md`, `docs/deploy/` and `examples/github-actions-review.yml`.
+- Release, CodeQL, Scorecard and secret-scanning workflows, every action pinned
+  by SHA with a script that checks each pin against the API.
+- A mark made of the characters the tool is made of.
+
+### Fixed
+
+- **The merge gate did not work from inside a run.** `lib/profile.sh` returned
+  early on `MAINTAINER_SLUG` and `MAINTAINER_REPO` alone while
+  `maintainer-merge` reads `MAINTAINER_ACCOUNT` under `set -u`, so every call
+  from a run died on an unbound variable, and a run is the only way an agent
+  ever calls it. The tests missed it by setting up a more complete environment
+  than production provides.
+- **The container runtime wrote the receipt.** podman logs
+  `level=warning msg="Error validating CNI config file …"` onto the container's
+  own stderr. It was the first line matching the failure grep, so a receipt
+  recorded a CNI warning as its proof, and it is bytes, so the vacuity check
+  that exists to refuse a receipt for a run that executed nothing counted it as
+  evidence. A missing optional `suite_podman_args` did the same thing ten times
+  over, taking `units_run` from 2 to 10.
+- **The shellcheck sweep lived only in CI**, so a commit could pass every gate
+  this project runs locally and a push would then report four SC1090s. It is
+  `scripts/shellcheck-sweep.sh` now, called by both, and it exits 127 rather
+  than 0 when shellcheck is missing.
+- `install.sh --timers` globbed a directory that does not exist, so it installed
+  nothing and said it had.
+- `run-instance.sh` split the systemd instance name on the first hyphen, so a
+  profile named after a hyphenated repository became profile `my`, task
+  `repo-review`.
+- The prompts named a command that had been renamed. A check now reads every
+  assembled prompt for commands that do not exist.
+- Live-mode evals died on an unbound `MAINTAINER_TASK` before reaching the
+  model, so the only mode that measures behaviour had never run.
+- A receipt's proof string was interpolated into JSON by a heredoc, so a proof
+  containing a quote wrote a file the gate could not parse, and the refusal
+  blamed the receipt rather than the quoting.
+- The claim check read `388 tests` out of the SHA `7c6ed388`.
+- `release-check`'s "the Unreleased section is empty" warning had never printed:
+  sed prints both delimiters, so an empty section came back as two heading lines
+  and the emptiness test was false. Found while cutting this release, which it
+  scored as a patch. It also names which tree it read the CHANGELOG from, since
+  every other number in that report comes from `origin/main`.
+- The fork-bomb probe was `if [ -n "$out" ] || true`, which is true whatever
+  happens: with `--pids-limit` deleted it still reported the bomb stopped. In
+  the file that exists to catch exactly that.
+
+### Security
+
+- Commit subjects go through the same filter as pull request titles. A
+  squash-merge subject is usually the pull request title, so the same
+  attacker-controlled text was filtered when read from the PR list and passed
+  through raw when read from the log.
+- `maintainer-doctor` validates the profile name before it reaches `python3 -c`,
+  which `bin/maintainer` already did and this did not.
+- The receipt-signing key sits in every profile's credential deny list.
+
+
 ## [0.1.0] - 2026-09-03
 
 First tagged version. It has maintained
@@ -60,5 +184,6 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.1.0
