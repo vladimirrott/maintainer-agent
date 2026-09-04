@@ -9,7 +9,8 @@
   "cooperative agent reaching a destructive verb, not a hostile one.",
   "The receipt-signing key sits in credential_paths on purpose: a receipt",
   "is only unforgeable while the key is unreadable, so it belongs beside",
-  "the SSH keys rather than in a list of its own."
+  "the SSH keys rather than in a list of its own.",
+  "The scheduler verbs are here because a run of the magent profile ran ./install.sh --uninstall against the live machine and turned off every timer, including another project's."
  ],
  "spelled_everywhere": [
   "cargo publish",
@@ -38,10 +39,14 @@
   "git reset --hard",
   "git restore",
   "git tag",
+  "install.sh --uninstall",
   "maintainer-merge receipt",
   "nc",
   "npm publish",
   "printenv",
+  "systemctl --user disable",
+  "systemctl --user mask",
+  "systemctl --user stop",
   "wget"
  ],
  "bare_exact": [

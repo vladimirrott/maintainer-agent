@@ -31,11 +31,48 @@ run() { if [ "$dry" = 1 ]; then say "would: $*"; else "$@"; fi; }
 # it is the record of what the agent published in someone's name, and a tool
 # that erases that on its way out is a tool nobody should have trusted.
 if [ "$uninstall" = 1 ]; then
+    # A live deployment is not removed without being asked twice.
+    #
+    # On 2026-09-04 an unattended run of the `magent` profile, reviewing this
+    # repository at POST=off, ran `./install.sh --uninstall` against the real
+    # HOME while root-causing a failing uninstall test. It disabled all six
+    # timers -- including the four that maintain a DIFFERENT project -- and then
+    # died before removing anything. Nothing ran unattended for three and a half
+    # hours and nothing said so. The rehearsal wall stopped it reaching GitHub
+    # and had nothing to say about the scheduler that runs it.
+    #
+    # docs/plan.md put it abstractly: an agent that reviews its own repository
+    # can change the rules it is reviewed under. This is the concrete form.
+    if [ "$dry" = 0 ] && [ "${MAINTAINER_UNINSTALL_YES:-}" != 1 ]; then
+        _live=0
+        if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+            _live="$(systemctl --user list-timers 'maintainer@*' --no-pager 2>/dev/null \
+                     | grep -c 'maintainer@' || true)"
+        fi
+        if [ "${_live:-0}" -gt 0 ]; then
+            echo "install.sh: $_live maintainer timer(s) are enabled on this machine." >&2
+            echo "            Removing them stops every profile, including any that" >&2
+            echo "            maintains a repository other than this one." >&2
+            echo "" >&2
+            echo "            Re-run with MAINTAINER_UNINSTALL_YES=1 to go ahead, or" >&2
+            echo "            --dry-run to see what would be removed." >&2
+            exit 3
+        fi
+    fi
     say "removing the maintainer agent"
+    # Nothing below may abort the rest. Every step records its own failure and
+    # the script reports them at the end, because the previous version put the
+    # cron removal at the end of an `&&` list, so a `crontab` that exists but
+    # cannot write killed the script under `set -e` AFTER the timers were off
+    # and BEFORE a single file was removed. Half-uninstalled and silent is worse
+    # than either finished state.
+    _failed=""
+    step() { if "$@"; then :; else _failed="$_failed
+  $*"; fi; }
     if command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
         for t in "$units"/maintainer@*.timer; do
             [ -e "$t" ] || continue
-            run systemctl --user disable --now "$(basename "$t")"
+            step run systemctl --user disable --now "$(basename "$t")"
         done
         for u in "$units"/maintainer*.service "$units"/maintainer@*.timer "$units"/podman-userns-warmup.service; do
             [ -e "$u" ] || continue
@@ -50,13 +87,20 @@ if [ "$uninstall" = 1 ]; then
             run rm -f "$pl"
         done
     fi
-    command -v crontab >/dev/null 2>&1 && [ -x "$root/platform/posix/install-cron.sh" ] \
-        && run "$root/platform/posix/install-cron.sh" --remove
+    if command -v crontab >/dev/null 2>&1 && [ -x "$root/platform/posix/install-cron.sh" ]; then
+        step run "$root/platform/posix/install-cron.sh" --remove
+    fi
     for f in maintainer maintainer-merge maintainer-doctor maintainer-repo; do
         [ -e "$bin/$f" ] && run rm -f "$bin/$f"
     done
-    run rm -rf "$share"
+    step run rm -rf "$share"
     say ""
+    if [ -n "$_failed" ]; then
+        say "SOME STEPS FAILED. This deployment is part-removed, and that is the"
+        say "state to fix rather than to leave:"
+        printf '%s\n' "$_failed" >&2
+        say ""
+    fi
     say "removed: $share, the four commands in $bin, and every scheduler entry."
     say "kept:    the audit trail. Delete it yourself if you want it gone:"
     for pe in "$root"/profiles/*/profile.env; do

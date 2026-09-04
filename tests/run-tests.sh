@@ -1790,6 +1790,51 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== the agent cannot uninstall the thing that runs it =="
+# On 2026-09-04 an unattended run of the magent profile, reviewing THIS
+# repository at POST=off, ran `./install.sh --uninstall` against the real HOME
+# while root-causing a failing uninstall test. It disabled all six timers,
+# including the four maintaining a different project, then died before removing
+# anything. Nothing ran unattended for three and a half hours and nothing said
+# so. The rehearsal wall stopped it reaching GitHub and had nothing to say about
+# the scheduler.
+uh="$stub_dir/unins"; mkdir -p "$uh/.config/systemd/user" "$uh/.local/bin"
+# A "live" deployment: systemctl is stubbed to report an enabled timer.
+make_stub systemctl 'case "$*" in
+  *"show-environment"*) exit 0;;
+  *"list-timers"*) echo "Fri 2026-09-05 09:13 maintainer@sysknife-review.timer"; exit 0;;
+  *) exit 0;; esac'
+out=$(PATH="$stub_dir:$PATH" HOME="$uh" bash "$root/install.sh" --uninstall 2>&1); rc=$?
+[ "$rc" = 3 ] && ok "uninstall refuses while timers are enabled" \
+    || bad "uninstall proceeded against a live deployment (rc=$rc)"
+printf '%s' "$out" | grep -q 'maintains a repository other than this one' \
+    && ok "and says it would stop another project's profile too" \
+    || bad "the refusal does not say what else it would stop"
+out=$(PATH="$stub_dir:$PATH" HOME="$uh" MAINTAINER_UNINSTALL_YES=1 \
+      bash "$root/install.sh" --uninstall 2>&1); rc=$?
+[ "$rc" = 0 ] && ok "and proceeds when explicitly told to" \
+    || bad "the override does not work, so uninstall is unreachable (rc=$rc)"
+# It must also never stop half way. The previous version put cron removal at the
+# end of an && list, so a crontab that exists but cannot write killed the script
+# under set -e after the timers were off and before a file was removed.
+grep -v '^[[:space:]]*#' "$root/install.sh" \
+    | grep -q 'command -v crontab.*&&.*&&.*run' \
+    && bad "cron removal is still an && list; set -e aborts the uninstall mid-way" \
+    || ok "no uninstall step can abort the ones after it"
+grep -q '_failed' "$root/install.sh" \
+    && ok "and a failed step is reported rather than silently skipped" \
+    || bad "a failing uninstall step leaves no trace"
+# The wall spells it too, in every profile.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    grep -q 'install.sh --uninstall' "$pdj" \
+        && ok "$pn denies install.sh --uninstall" \
+        || bad "$pn lets the agent uninstall the maintainer"
+    grep -q 'systemctl --user disable' "$pdj" \
+        && ok "$pn denies disabling a timer" \
+        || bad "$pn lets the agent turn off its own scheduler"
+done
+
 echo "== the trail says what happened, including when nothing did =="
 tr1="$stub_dir/trail"; mkdir -p "$tr1/runs" "$tr1/logs" "$tr1/state" "$tr1/drafts"
 trrun() { MAINTAINER_STATE="$tr1" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \

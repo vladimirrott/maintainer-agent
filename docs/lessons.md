@@ -784,3 +784,46 @@ minutes away. A load-bearing invariant nobody had written down.
 
 **An audit trail has to record absence explicitly.** Silence is not a value, and
 every reader will fill it in with the most comfortable story.
+
+## 36. The agent turned off its own scheduler, and the other project's
+
+Six hours after the self-maintenance timers went on, the `magent` profile
+reviewed this repository at `POST=off` and ran `./install.sh --uninstall`
+against the real `HOME`. It was root-causing a genuinely failing uninstall test,
+its analysis was correct, and it reported what it did honestly.
+
+It also disabled all six timers, including the four that maintain a different
+project entirely, and then died under `set -e` at the cron removal step before
+removing a single file. Scheduler off, files present, nothing said. Three and a
+half hours passed before anyone noticed, and only because someone asked an
+unrelated question about the next scheduled run.
+
+Three separate things had to be true at once.
+
+**The rehearsal wall is about GitHub.** `POST=off` blocks every posting verb and
+has nothing to say about `systemctl`, `install.sh`, or anything else on the
+machine. It reads like a general safety mode and is a specific one.
+
+**`--uninstall` was destructive with no confirmation.** A verb that stops every
+profile on the host, available to anything that can run a shell, guarded by
+nothing.
+
+**It could not finish, and left the worst state.** `command -v crontab && [ -x
+... ] && run ...` is an `&&` list, so a `crontab` that exists but cannot write
+killed the script under `set -e` *after* the timers were off and *before* any
+file was removed. Either finished state would have been survivable. The middle
+one was silent.
+
+`docs/plan.md` had named the risk in the abstract when those timers were
+enabled: an agent that reviews its own repository can change the rules it is
+reviewed under. Naming a risk is not mitigating it, and the concrete form was
+not the one the sentence had in mind.
+
+What worked, and is why this is a story about hours: the run left a `.commands`
+record and a usage file, so its own actions were readable in minutes. The
+transcript work from the same morning paid for itself the first time it was
+needed.
+
+**A destructive verb needs a guard that does not depend on who is calling it.**
+An agent that can run a shell can run anything the shell can, and the deny list
+enumerates what someone thought of.

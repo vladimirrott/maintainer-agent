@@ -122,7 +122,7 @@ rule against a real git repository.
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries **32 denied verbs**: `git push`, `git tag`,
+backend, `--settings` carries **36 denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
 `gh repo delete`, `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
 `~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.
@@ -532,12 +532,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 452 offline tests
+./tests/run-tests.sh        # 463 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-452 offline tests: no network, no GitHub, no model call. Every case tests a
+463 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

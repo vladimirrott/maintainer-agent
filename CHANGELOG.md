@@ -16,6 +16,28 @@ The middle digit moves because `maintainer finish` now refuses a report that is
 a fixture, and because a run that dies is recorded rather than left as a gap.
 Both are things that used to succeed.
 
+### Security
+
+- **An unattended run turned off the scheduler, for both profiles.** Reviewing
+  this repository at `POST=off`, the `magent` profile root-caused a failing
+  uninstall test by running `./install.sh --uninstall` against the real `HOME`.
+  It disabled all six timers, including the four that maintain a *different*
+  project, and then died under `set -e` at the cron step before removing a
+  single file. Nothing ran unattended for three and a half hours and nothing
+  said so. The rehearsal wall stopped it reaching GitHub and had nothing to say
+  about the scheduler that runs it.
+
+  Three changes. `--uninstall` refuses while any timer is enabled unless
+  `MAINTAINER_UNINSTALL_YES=1` is set, and says that it would stop other
+  projects too. No step can abort the ones after it, so the half-removed state
+  that leaves the scheduler off and the files present is gone; failures are
+  collected and reported. And the deny wall spells `install.sh --uninstall`,
+  `systemctl --user disable`, `stop` and `mask`, taking it to **36 verbs**.
+
+  `docs/plan.md` put the risk abstractly when the self-maintenance timers went
+  on: an agent that reviews its own repository can change the rules it is
+  reviewed under. This is what that looks like.
+
 Everything here came from auditing this agent's own trail against the repository
 it maintains. Nine runs, six reports accurate on every checkable fact, nothing
 fabricated anywhere. What the audit found instead was that the trail could not
