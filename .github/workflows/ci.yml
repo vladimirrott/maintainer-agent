@@ -39,6 +39,20 @@ jobs:
           done
           exit $rc
 
+      # The same suite with no deployed tree, which is what a fresh machine and
+      # every CI runner look like. A cursor-wall test read
+      # $HOME/.local/share/maintainer/... and so measured the laptop that wrote
+      # it: green locally, four failures on the release workflow, after the tag
+      # was already pushed. Running it twice costs seconds and catches the whole
+      # class, which is a test that passes because of something it did not build.
+      - name: Offline test suite, with no deployed tree
+        run: |
+          set -euo pipefail
+          scratch="$(mktemp -d)"
+          HOME="$scratch" ./tests/run-tests.sh | tail -3
+          rc=${PIPESTATUS[0]}
+          [ "$rc" = 0 ] || { echo "::error::the suite depends on a deployed tree" >&2; exit "$rc"; }
+
       - name: Offline test suite
         # Zero skips required. A skip means this machine could not run a case,
         # and the runner has docker, so every case that needs a container

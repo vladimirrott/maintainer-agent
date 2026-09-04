@@ -932,3 +932,37 @@ because I had not yet made one when I wrote them.
 match on the wording of a release, which works until somebody phrases one
 differently, and fails silently when they do. A marker the writer must add is
 worse ergonomics and cannot be wrong.
+
+## 40. The test measured the laptop that wrote it
+
+`v0.4.0` was tagged, pushed, and the release workflow failed on four cases the
+local suite had reported green minutes earlier:
+
+```
+FAIL  magent has no cursor wall
+FAIL  sysknife has no cursor wall
+```
+
+The test read `$HOME/.local/share/maintainer/profiles/<p>/cursor/cli-config.json`
+— the **deployed** tree. That file exists on the machine that ran `./install.sh`
+and on no CI runner. The suite was not measuring the repository; it was
+measuring this laptop, and the repository happened to be nearby.
+
+The deny-wall cases fifty lines above it get this right: they render into a
+scratch directory with a fake home, because a wall read out of a deployment is a
+wall somebody already installed. The new test read the artifact instead of
+building it, which is the shorter path and the wrong one.
+
+Two things worth keeping from it.
+
+**The check is one line.** `HOME="$(mktemp -d)" ./tests/run-tests.sh` reproduces
+a fresh machine exactly, catches the entire class, and takes seconds. It is a CI
+step now, run before the ordinary one, so the failure names the cause rather
+than appearing as an unrelated test going red.
+
+**And the tag went out first.** The release workflow runs the gates on the tag,
+which is the right design and it ran too late to stop me: I had already
+announced the release. A gate that runs after the irreversible-looking step
+protects the artifact and not the person. Nothing was published, because the
+publish job is gated on those gates, and that is the part of the design that
+worked.

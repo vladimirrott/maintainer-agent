@@ -481,9 +481,17 @@ grep -q 'CURSOR_CONFIG_DIR' "$cb" && ok "and it points cursor at a per-profile w
 grep -v '^[[:space:]]*#' "$cb" | grep -q 'no per-command deny list' \
     && bad "the stale claim is back in the cursor backend" \
     || ok "the stale no-deny-list claim is gone"
-for prof in magent sysknife _template; do
-    f="$HOME/.local/share/maintainer/profiles/$prof/cursor/cli-config.json"
-    [ "$prof" = _template ] && continue
+# Rendered into a scratch directory from the repository, never read out of the
+# deployed tree. The first version read $HOME/.local/share/maintainer/..., which
+# exists on the machine that wrote it and on no CI runner: it passed here and
+# failed the release workflow, which is a test measuring this laptop rather than
+# the repository. Same shape as the deny-wall cases above, which render into
+# $stub_dir with a fake home for exactly this reason.
+for prof in magent sysknife; do
+    cw="$stub_dir/cursorwall-$prof"; rm -rf "$cw"; mkdir -p "$cw"
+    cp "$root/profiles/$prof/deny.json" "$cw/deny.json"
+    python3 "$root/scripts/render-settings.py" "$cw" /home/fakeuser >/dev/null 2>&1
+    f="$cw/cursor/cli-config.json"
     [ -f "$f" ] && ok "$prof renders a cursor wall" || bad "$prof has no cursor wall"
     python3 - "$f" <<'PYEOF'
 import json, sys
