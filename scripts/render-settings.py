@@ -169,6 +169,44 @@ def main() -> None:
                 bash[f"{p}{verb}*"] = "deny"
         (pdir / "opencode-rehearsal.json").write_text(json.dumps(cfg, indent=1) + "\n")
 
+    # Cursor takes the same shape under a different name, and CURSOR_CONFIG_DIR
+    # points it at a directory of our choosing, which is what makes a
+    # per-profile wall possible at all.
+    #
+    # lib/backends/cursor.sh used to say Cursor has "no per-command deny list",
+    # so the backend was restricted to read-only tasks on that premise. The
+    # documented configuration has carried `permissions.allow` and
+    # `permissions.deny` with Shell(), Read() and Write() patterns for some
+    # time. The claim was stale, and a stale claim about containment makes a
+    # tool less capable than it is while reading like caution.
+    cur = pdir / "cursor"
+    cur.mkdir(exist_ok=True)
+    def cursor_cfg(verbs):
+        return {
+            "version": 1,
+            "permissions": {
+                "allow": [],
+                # Shell(<verb>) matches the base command; the args form is
+                # Shell(cmd:*). Both are emitted, for the same reason the Claude
+                # wall spells every install directory: one spelling is not a wall.
+                # The bare form only for a single-word verb. `Shell(git)` denies
+                # EVERY git, including the `git log` and `git diff` a review is
+                # made of, so deriving it from "git push" would ship a wall that
+                # blocks the work rather than the damage. Caught by reading the
+                # rendered file rather than by trusting the generator.
+                "deny": sorted(
+                    {f"Shell({v})" for v in verbs if " " not in v}
+                    | {f"Shell({v}:*)" for v in verbs}
+                    | {f"Read({c})" for c in spec.get("credential_paths", [])}
+                    | {f"Write({c})" for c in spec.get("credential_paths", [])}),
+            },
+        }
+    verbs = spec.get("spelled_everywhere", []) + spec.get("bare_exact", [])
+    (cur / "cli-config.json").write_text(json.dumps(cursor_cfg(verbs), indent=1) + "\n")
+    (pdir / "cursor-rehearsal").mkdir(exist_ok=True)
+    (pdir / "cursor-rehearsal" / "cli-config.json").write_text(
+        json.dumps(cursor_cfg(verbs + list(POSTING)), indent=1) + "\n")
+
     print(f"  {pdir.name}: {len(live)} deny rules, {len(rehearsal)} in rehearsal")
 
 

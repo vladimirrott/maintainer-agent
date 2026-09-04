@@ -421,9 +421,39 @@ done
 grep -q 'StartWhenAvailable' "$ps1" && ok "PowerShell sets StartWhenAvailable (the Persistent=true analogue)" || bad "missed-run catch-up not configured"
 grep -q 'RunLevel Limited' "$ps1" && ok "PowerShell task runs unelevated" || bad "PowerShell task may run elevated"
 
-echo "== the cursor backend cannot be handed a posting task =="
+echo "== cursor has a wall now, and is still restricted until it is proven =="
+# The backend used to say Cursor has "no per-command deny list" and restrict
+# itself on that basis. The claim was stale: the documented configuration
+# carries permissions.allow/deny with Shell(), Read() and Write() patterns, and
+# CURSOR_CONFIG_DIR points the CLI at a directory we choose. The wall is
+# generated from the same deny.json as every other backend.
+#
+# The restriction stays until somebody watches cursor-agent refuse a denied
+# command. A guard lifted because a configuration ought to work is the shape
+# docs/lessons.md keeps recording.
 cb="$root/lib/backends/cursor.sh"
-grep -q 'backend_allowed_tasks' "$cb" && ok "cursor declares its allowed tasks" || bad "cursor no longer restricts itself"
+grep -q 'backend_allowed_tasks' "$cb" && ok "cursor is still restricted while the wall is unproven" \
+    || bad "cursor dropped its restriction; has the containment probe actually run?"
+grep -q 'CURSOR_CONFIG_DIR' "$cb" && ok "and it points cursor at a per-profile wall" \
+    || bad "cursor takes no config directory, so its wall cannot be per-profile"
+grep -v '^[[:space:]]*#' "$cb" | grep -q 'no per-command deny list' \
+    && bad "the stale claim is back in the cursor backend" \
+    || ok "the stale no-deny-list claim is gone"
+for prof in magent sysknife _template; do
+    f="$HOME/.local/share/maintainer/profiles/$prof/cursor/cli-config.json"
+    [ "$prof" = _template ] && continue
+    [ -f "$f" ] && ok "$prof renders a cursor wall" || bad "$prof has no cursor wall"
+    python3 - "$f" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))["permissions"]["deny"]
+# Shell(git) would deny `git log` and `git diff`, which a review is made of. The
+# bare form belongs only to a single-word verb.
+bad = [x for x in ("Shell(git)", "Shell(gh)", "Shell(cargo)", "Shell(npm)") if x in d]
+sys.exit(f"blanket denies that would break every run: {bad}" if bad else 0)
+PYEOF
+    [ $? = 0 ] && ok "$prof denies verbs, not whole commands" \
+        || bad "$prof would block the work rather than the damage"
+done
 grep -q 'backend_allowed_tasks' "$root/lib/run.sh" && ok "run.sh enforces the declaration" || bad "run.sh ignores backend task restrictions"
 # Only executable lines count. The file explains at length why --force is
 # absent, and an earlier version of this check read those comments as usage.
