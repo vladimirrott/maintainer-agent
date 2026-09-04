@@ -94,7 +94,11 @@ jobs:
               case "$(head -c 80 "$f" 2>/dev/null)" in
                 *"#!/usr/bin/env bash"*|*"#!/bin/bash"*|*"#!/bin/sh"*) printf '%s\n' "$f" ;;
               esac
-            done
+              # Sourced fragments carry no shebang and are still shell. The
+              # verify suites decide what a receipt is worth, so they are the
+              # last place to skip a linter.
+              case "$f" in profiles/*/verify.d/*.sh) printf '%s\n' "$f" ;; esac
+            done | sort -u
           )
           printf 'checking %d scripts\n' "${#files[@]}"
           [ "${#files[@]}" -gt 0 ] || { echo "no scripts found; this gate inspected nothing" >&2; exit 1; }

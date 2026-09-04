@@ -88,6 +88,9 @@ Write the run report to the path named in the context block before you finish.
 `maintainer finish` refuses an empty report on purpose: a run nobody can
 audit did not happen.
 
+Open the report with the version named in the first line of this prompt, so a
+reader six weeks from now knows which build wrote it.
+
 Record in it: the SHA you worked from, every command you ran with its outcome,
 every finding with its evidence, everything you posted with its URL, and
 everything you decided not to do and why.

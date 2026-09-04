@@ -1195,7 +1195,13 @@ grep -q '"suite": suite' "$root/bin/maintainer-merge" \
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
 # real pull request proved only that a badly chosen mutation is refused.
-if command -v podman >/dev/null 2>&1 && podman image exists docker.io/library/bash:5 2>/dev/null; then
+# podman or docker, whichever this machine has. Requiring podman made CI red for
+# a reason unrelated to the change: the runners have docker.
+rt=""
+command -v podman >/dev/null 2>&1 && rt=podman
+[ -z "$rt" ] && command -v docker >/dev/null 2>&1 && rt=docker
+if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&1 \
+                     || "$rt" pull -q docker.io/library/bash:5 >/dev/null 2>&1 ); then
     vr="$stub_dir/verifyrepo"; rm -rf "$vr"; mkdir -p "$vr"
     git -C "$vr" init -q -b main; git -C "$vr" config user.email t@t; git -C "$vr" config user.name t
     printf '#!/usr/bin/env bash\nGUARD=on\nif [ "$GUARD" = on ]; then echo "guard held"; exit 0; fi\necho "guard gone"; exit 1\n' \
@@ -1225,8 +1231,13 @@ if command -v podman >/dev/null 2>&1 && podman image exists docker.io/library/ba
         && ok "a mutation that changes nothing is refused" \
         || bad "a no-op mutation produced a receipt"
 else
-    bad "podman or docker.io/library/bash:5 absent; the shell suite was never executed"
+    bad "no container runtime (podman or docker); the shell suite was never executed"
 fi
+grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
+    || bad "the gate requires one specific container runtime"
+grep -q 'suite_requires' "$root/profiles/sysknife/verify.d/rust.sh" \
+    && ok "a suite that needs a specific runtime says so" \
+    || bad "the rust suite does not declare its podman requirement"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

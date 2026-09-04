@@ -105,6 +105,7 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     for s in "$dir"/*.sh; do
         [ -e "$s" ] || continue
         name="$(basename "$s" .sh)"
+        # shellcheck disable=SC1090
         ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
     done
     [ -n "$covered" ] || die "no suite in $dir covers every changed path:
@@ -114,10 +115,18 @@ $(printf '    %s\n' "$@")
     printf '%s' "$covered"
 }
 
+# podman if it is there, docker otherwise. Requiring podman meant a contributor
+# with docker could not run the gate at all, and CI has docker.
+container_runtime() {
+    if command -v podman >/dev/null 2>&1; then printf 'podman'
+    elif command -v docker >/dev/null 2>&1; then printf 'docker'
+    else return 1; fi
+}
+
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     local named="${5:-}"
-    command -v podman >/dev/null || die "podman is required for verify; no container, no receipt"
+    local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
 
     local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
     [ -n "$paths" ] || die "could not read the changed files for #$pr"
@@ -125,7 +134,12 @@ cmd_verify() {
     local dir; dir="$(suite_dir)"
     # shellcheck disable=SC1090
     . "$dir/$suite.sh"
-    say "suite: $suite ($(suite_image))"
+    # A suite may need a runtime feature the other lacks, and saying so beats a
+    # confusing mount error.
+    if declare -F suite_requires >/dev/null && ! suite_requires "$rt"; then
+        die "the '$suite' suite needs $(suite_requires_name), and this machine has $rt"
+    fi
+    say "suite: $suite ($(suite_image) under $rt)"
 
     local work; work="$(mktemp -d)"
     trap 'rm -rf "$work"' RETURN
@@ -139,7 +153,7 @@ cmd_verify() {
 
     run_in_container() {
         # shellcheck disable=SC2046
-        podman run --rm --network=none -v "$work:/repo:z" $(suite_podman_args) \
+        "$rt" run --rm --network=none -v "$work:/repo:z" $(suite_podman_args) \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }

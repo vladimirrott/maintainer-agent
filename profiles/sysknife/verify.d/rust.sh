@@ -15,6 +15,13 @@ suite_covers() {  # $1 = a path from the pull request
 
 suite_image() { printf 'docker.io/library/rust:1-slim'; }
 
+# The cargo cache is mounted with podman's :O overlay so writes stay in an
+# overlay and never touch the host's ~/.cargo. docker has no equivalent, and
+# mounting it writable there would let a contributor's build write to the real
+# cache, so this suite says podman or nothing.
+suite_requires() { [ "$1" = podman ]; }
+suite_requires_name() { printf 'podman (for the :O overlay mount on ~/.cargo)'; }
+
 # Files the sed mutation is applied to inside the extracted tree.
 suite_mutate_glob() { printf '*.rs'; }
 
