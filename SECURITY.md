@@ -7,9 +7,18 @@ matters most here.
 
 ## Reporting
 
-**Do not open a public issue.** Use GitHub's private vulnerability reporting on
-this repository (Security, Report a vulnerability). If that is unavailable to
-you, contact the maintainers privately before publishing anything.
+**Do not open a public issue.** Report it privately here:
+
+**<https://github.com/vladimirrott/maintainer-agent/security/advisories/new>**
+
+Private vulnerability reporting is enabled on this repository, so that link
+works for anyone with a GitHub account and the report is visible only to the
+maintainers. If it is unavailable to you, write to
+<sysknife-development@protonmail.com> before publishing anything.
+
+Expect an acknowledgement within a few days. This is a small project with two
+maintainers and no paid on-call, and saying so is more useful than promising an
+hour.
 
 The agent that maintains this repository is instructed to file a **draft**
 advisory and say in public only that the rest is handled privately. It never
