@@ -507,14 +507,14 @@ def cmd_audit(which: str) -> None:
     if not ids:
         print("maintainer: no runs to audit")
         return
-    worst = 0
+    worst = unknown = 0
     for rid in ids:
         verdict, missing, n = audit_run(rid)
         flag = " "
         if verdict.startswith("NO REPORT") or "are not in the record" in verdict:
             flag, worst = "!", 1
         elif "no command record" in verdict:
-            flag = "?"
+            flag, unknown = "?", 1
         print(f"{flag} {rid:26} {verdict}")
         for m in missing:
             print(f"      claimed, never run:  {safe_for_prompt(m, 100)}")
@@ -522,7 +522,11 @@ def cmd_audit(which: str) -> None:
         print("\n! a report quotes a command the transcript does not contain. That is")
         print("  sloppy wording or a claim nothing executed, and only reading it tells")
         print("  you which.")
-    print("? no command record exists for that run, so nothing could be compared.")
+    # Only the legends that apply. The first version printed the `?` line
+    # unconditionally, so a single clean audit ended on a sentence about a
+    # symbol that had not appeared, which reads as a finding.
+    if unknown:
+        print("\n? no command record exists for that run, so nothing could be compared.")
 
 
 def cmd_gc(dry: bool) -> None:

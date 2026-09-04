@@ -1931,6 +1931,12 @@ rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
     && ok "a run with no transcript says so rather than passing" \
     || bad "a missing transcript read as a clean audit"
+# And a clean audit ends clean. The first version printed the `?` legend
+# unconditionally, so auditing one good run finished on a sentence about a
+# symbol that never appeared, which reads as a finding.
+aurun 2026-01-01T00-00-review | grep -q '^?' \
+    && bad "a legend printed for a symbol no run produced" \
+    || ok "only the legends that apply are printed"
 
 echo "== the state directory does not grow forever =="
 gcd="$stub_dir/gc"; mkdir -p "$gcd/logs" "$gcd/drafts/old" "$gcd/runs"
