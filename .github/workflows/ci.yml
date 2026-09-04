@@ -48,7 +48,11 @@ jobs:
           ./tests/run-tests.sh | tee /tmp/suite.log
           rc=${PIPESTATUS[0]}
           [ "$rc" = 0 ] || exit "$rc"
-          if grep -q 'skipped' /tmp/suite.log; then
+          # Anchored on the summary line. `grep -q skipped` over the whole log
+          # matched the NAME of the test that proves skips are counted, so a run
+          # with zero skips failed for containing the word. Third time today a
+          # check has matched its own documentation.
+          if grep -qE '^ +[0-9]+ passed, [0-9]+ failed, [0-9]+ skipped' /tmp/suite.log; then
             echo "::error::the suite skipped a case; CI must run all of them" >&2
             grep '  SKIP' /tmp/suite.log >&2
             exit 1

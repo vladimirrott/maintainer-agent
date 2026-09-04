@@ -636,3 +636,25 @@ fixes from the reader.
 **Anything that takes a profile must ask for that profile by name, every time.**
 A per-profile tool with a wildcard query is a tool that reports on whoever
 answers first.
+
+## 31. Three checks in one day matched their own documentation
+
+Each of these was a text search over a file that also *describes* what it
+searches for.
+
+- `grep -q 'secrets\.' ci.yml` enforces "CI reads no repository secret". Writing
+  the words `secrets.GITHUB_TOKEN` in the comment that explains the policy made
+  the check fail.
+- `grep -nE '\bjq\b' bin/maintainer-merge` enforces "the gate needs no jq". The
+  paragraph explaining why jq was removed matched it.
+- `grep -q 'skipped' suite.log` enforces "CI must run every case". The name of
+  the test that proves skips are counted, `and the summary line names the
+  skipped count`, matched it, so a run with zero skips failed CI for containing
+  the word.
+
+All three passed their own tests, because their tests fed them the failing
+input and never the *documented* input.
+
+**A grep-based check has to say what part of the file is in scope.** Strip
+comments, anchor on a line shape, or read a structured field. A bare search over
+a file that talks about itself will eventually match the sentence explaining it.
