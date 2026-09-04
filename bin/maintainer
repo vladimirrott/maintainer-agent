@@ -176,6 +176,11 @@ SENTINELS = (SENTINEL, "<!-- sysknife-maint: report not yet written -->")
 # comment, and the only thing that distinguishes a release from an offer, which
 # are otherwise the same sentence shape addressed to the same person.
 RELEASE_MARKER = "<!-- maintainer: claim-released -->"
+
+# Subcommands run.sh calls and a person does not. They are deliberately absent
+# from docs/cli.md, and tests/run-tests.sh requires that every OTHER subcommand
+# appears there: six had accumulated undocumented before anything checked.
+INTERNAL_COMMANDS = {"start", "finish", "abort", "failed", "ok"}
 TASKS = _setting("MAINTAINER_TASKS", "TASKS", "review issues ci audit").split()
 SKILL = os.environ.get("MAINTAINER_SKILL", "")
 

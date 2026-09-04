@@ -12,6 +12,7 @@
 
 # Running it
 
+- [Command reference](cli.md)
 - [Deploying it](deploy/README.md)
 - [Going public](going-public.md)
 
@@ -19,3 +20,4 @@
 
 - [Thirty-six defects, and what found them](lessons.md)
 - [The hard parts, and what they turned out to be](plan.md)
+- [Where everything goes](roadmap.md)

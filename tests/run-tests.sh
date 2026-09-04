@@ -421,6 +421,48 @@ done
 grep -q 'StartWhenAvailable' "$ps1" && ok "PowerShell sets StartWhenAvailable (the Persistent=true analogue)" || bad "missed-run catch-up not configured"
 grep -q 'RunLevel Limited' "$ps1" && ok "PowerShell task runs unelevated" || bad "PowerShell task may run elevated"
 
+echo "== every command a person can type is documented =="
+# Six subcommands had accumulated with no mention in any doc, because nothing
+# compared the two. A command nobody can find is a command nobody uses, and the
+# drift is silent in both directions: a doc naming a command that was renamed
+# out of existence is the defect in docs/lessons.md 12.
+python3 - "$root" <<'PYEOF'
+import pathlib, re, sys
+root = pathlib.Path(sys.argv[1])
+src = (root / "bin/maintainer").read_text()
+internal = set(re.findall(r'"([a-z_-]+)"', re.search(r'INTERNAL_COMMANDS = \{(.*?)\}', src, re.S).group(1)))
+cmds = set(re.findall(r'cmd == "([a-z_-]+)"', src))
+for f, pat in (("bin/maintainer-merge", r'^\s+(receipt|verify|merge|show)\)'),
+               ("bin/maintainer-repo", r'^\s+(prune|release-check)\)')):
+    tool = f.split("/")[-1]
+    for m in re.findall(pat, (root / f).read_text(), re.M):
+        cmds.add(f"{tool} {m}")
+docs = "\n".join(p.read_text() for p in
+                  [root / "README.md", root / "CONTRIBUTING.md"] + list((root / "docs").rglob("*.md")))
+missing = sorted(c for c in cmds - internal
+                 if (c if " " in c else f"maintainer {c}") not in docs)
+# An internal command must not be advertised where a person is told what to
+# type. Narrative prose legitimately discusses internals: docs/lessons.md
+# explains what `maintainer start` computes, and the first version of this check
+# read that as advertising. Fourth time today a check over prose over-matched;
+# the fix is always to say which prose is in scope.
+reference = "\n".join(p.read_text() for p in (root / "README.md", root / "docs/cli.md"))
+told_to_type = reference.split("## Called by run.sh")[0]
+leaked = sorted(c for c in internal if f"`maintainer {c}`" in told_to_type)
+errs = []
+if missing:
+    errs.append(f"undocumented: {missing}")
+if leaked:
+    errs.append(f"internal commands presented as user-facing: {leaked}")
+sys.exit("; ".join(errs) if errs else 0)
+PYEOF
+[ $? = 0 ] && ok "every non-internal subcommand appears in the docs" \
+    || bad "a command exists that no document mentions"
+[ -f "$root/docs/cli.md" ] && ok "there is a command reference" || bad "no docs/cli.md"
+grep -q 'cli.md' "$root/docs/SUMMARY.md" \
+    && ok "and the book links it, so it is reachable" \
+    || bad "docs/cli.md exists and the site does not link it"
+
 echo "== cursor has a wall now, and is still restricted until it is proven =="
 # The backend used to say Cursor has "no per-command deny list" and restrict
 # itself on that basis. The claim was stale: the documented configuration
