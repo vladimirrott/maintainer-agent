@@ -1807,7 +1807,7 @@ J
   *issues/11/comments*) echo '[{"u":"owner","b":"@greedy and this one"}]';;
   *issues/12/comments*) echo '[{"u":"owner","b":"@busy yours"},{"u":"busy","b":"on it"}]';;
   *issues/13/comments*) echo '[]';;
-  *issues/14/comments*) echo '[]';;
+  *issues/14/comments*) echo '[{"u":"owner","b":"@gone yours"},{"u":"owner","b":"@gone releasing this <!-- maintainer: claim-released -->"}]';;
 esac
 GHEOF
 chmod +x "$stub_dir/gh"
@@ -1820,12 +1820,25 @@ printf '%s' "$out" | grep -q 'OVER-OFFERED: 2 unanswered' \
 printf '%s' "$out" | grep -qE 'busy .*working on #12' \
     && ok "an ANSWERED open issue counts as a full queue, not as availability" \
     || bad "somebody mid-task reads as eligible for another"
-printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+printf '%s' "$out" | grep -qE '[0-9]+ issue\(s\) free to offer' \
     && ok "a reserved issue is not counted as free" \
     || bad "twir-listed or maintainer-only issues were offered as free"
 printf '%s' "$out" | grep -q 'holds nothing does not' \
     && ok "and it says what an eligible person looks like" \
     || bad "an empty list of blocked people reads as nobody being available"
+# A release and an offer are the same sentence shape to the same person. Reading
+# any @mention as an offer made a claim released minutes earlier read as
+# "working on #272" and held the issue out of the free pool. Found by running
+# this against a release posted an hour after the tool shipped.
+printf '%s' "$out" | grep -q '^gone ' \
+    && bad "a released claim still reads as held" \
+    || ok "a released claim frees the person"
+# #14 is the only free one: #10 and #11 hold unanswered offers, #12 is answered
+# and in progress, #13 is reserved. It is free only because its mentions carry
+# the release marker, so this number IS the assertion.
+printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+    && ok "and puts the issue back in the free pool" \
+    || bad "the released issue is still counted as spoken for: $(printf '%s' "$out" | head -1)"
 
 echo "== a profile variable the tool reads must be in the allowlist =="
 # _profile_env sources profile.env and reads back a literal tuple of key names.

@@ -19,7 +19,11 @@ Invoke the `sysknife-issues` skill and follow it. Read
 3. Check `claimed` labels. Anything claimed roughly a week with no branch gets a
    check-in that offers an exit, in the shape used on #219 and #248. Release a
    claim that has already had one unanswered check-in, warmly, and say the issue
-   is theirs again on request.
+   is theirs again on request. A release takes all three: the comment, then
+   `--remove-label claimed --remove-assignee <user>`, and the comment must end
+   with `<!-- maintainer: claim-released -->`. A release and an offer are the
+   same sentence to the same person, so without that marker `maintainer offers`
+   reads the release as an offer and keeps the issue out of the pool.
 4. **Run `maintainer offers` before offering anything.** It lists, per person,
    how many open issues they hold and how many they have never answered, and
    names anyone already over the one-offer rule. That rule was prose until

@@ -902,3 +902,33 @@ tuple.
 
 **A capability check is a claim about the world; the operation is the world.**
 When they are cheap and reversible, run the operation.
+
+## 39. A release and an offer are the same sentence
+
+`maintainer offers` shipped, and an hour later I used it on the tracker it was
+built for. It reported `atanishka308  no: working on #272` about an issue I had
+released from them twenty minutes earlier, and it held two released issues out
+of the free pool.
+
+The tool counted an offer as "a comment by the maintainer mentioning this
+person on an open issue". A release is also a comment by the maintainer
+mentioning that person on that open issue. Structurally they are identical:
+same author, same mention, same thread, and in both cases the contributor has
+not replied. No amount of care in the prose separates them, because the
+difference is intent and intent is not a field.
+
+So the release carries a marker, `<!-- maintainer: claim-released -->`,
+invisible in the rendered comment and unambiguous to anything reading the
+thread. The last maintainer comment mentioning a person decides their state on
+that issue.
+
+Two things this is really about.
+
+**The tool was found wrong by being used, not by being tested.** Its own suite
+was green and its cases were reasonable; none of them had a release in it,
+because I had not yet made one when I wrote them.
+
+**And the fix is a convention, not a heuristic.** The tempting version was to
+match on the wording of a release, which works until somebody phrases one
+differently, and fails silently when they do. A marker the writer must add is
+worse ergonomics and cannot be wrong.

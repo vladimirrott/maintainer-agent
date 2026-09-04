@@ -172,6 +172,10 @@ INDEX = ROOT / "index.md"
 SENTINEL = "<!-- maintainer: report not yet written -->"
 # A report opened by an older `start` carries the previous spelling on line 1.
 SENTINELS = (SENTINEL, "<!-- sysknife-maint: report not yet written -->")
+# Written into a comment that gives a claim back. Invisible in the rendered
+# comment, and the only thing that distinguishes a release from an offer, which
+# are otherwise the same sentence shape addressed to the same person.
+RELEASE_MARKER = "<!-- maintainer: claim-released -->"
 TASKS = _setting("MAINTAINER_TASKS", "TASKS", "review issues ci audit").split()
 SKILL = os.environ.get("MAINTAINER_SKILL", "")
 
@@ -690,8 +694,24 @@ def cmd_offers() -> None:
             continue
         comments = gh_json("api", f"repos/{SLUG}/issues/{i['number']}/comments",
                            "--jq", "[.[]|{u:.user.login,b:.body}]") or []
-        mentioned = {m for c in comments if c["u"] == owner
-                     for m in re.findall(r"@([A-Za-z0-9-]+)", c["b"] or "")}
+        # An offer and a release are the same shape in prose: the maintainer
+        # mentions the person, they have not replied, the issue is free. Reading
+        # any @mention as an offer made a RELEASED claim read as "working on
+        # #272" and kept the issue out of the free count, which is the opposite
+        # of what a release is for. Found by running this an hour after shipping
+        # it, against a release I had just posted.
+        #
+        # So the release says so, in a marker the reader never sees and this can
+        # never misread. The last maintainer comment mentioning a person decides
+        # their state on that issue.
+        mentioned = {}
+        for c in comments:
+            if c["u"] != owner:
+                continue
+            body = c["b"] or ""
+            for m in re.findall(r"@([A-Za-z0-9-]+)", body):
+                mentioned[m] = RELEASE_MARKER not in body
+        mentioned = {m for m, live in mentioned.items() if live}
         posted = {c["u"] for c in comments}
         if not mentioned:
             if label not in names:
