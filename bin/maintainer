@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Refresh the sysknife checkout and keep an auditable record of each maintenance run.
 
+    maintainer version                         which build is deployed, and whether it is stale
     maintainer status                          what has run, what is due, is it posting
     maintainer run [--show-prompt] <task>      run one task now, or print its prompt
     maintainer start  <task>                   refresh, diff against the last run, open a report
@@ -43,6 +44,32 @@ _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 if not _SAFE_NAME.match(PROFILE):
     raise SystemExit(f"maintainer: refusing a profile name that is not a plain "
                      f"word: {PROFILE!r}")
+
+
+def deployed_version() -> dict:
+    """What the DEPLOYED tree says it is, and whether the checkout has moved on.
+
+    Never `git describe` here. The checkout can be ahead of what is installed,
+    so reporting it would name a build that is not running, and "but I fixed
+    that" is almost always a deployment a few commits behind.
+    """
+    out = {"version": "unstamped", "commit": "?", "installed_at": "?", "drift": None}
+    f = Path.home() / ".local/share/maintainer/VERSION"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            k, _, v = line.partition("=")
+            out[k.strip()] = v.strip()
+    src = out.get("installed_from")
+    if src and Path(src, ".git").exists():
+        head = subprocess.run(("git", "-C", src, "rev-parse", "--short", "HEAD"),
+                              capture_output=True, text=True)
+        if head.returncode == 0 and head.stdout.strip() != out.get("commit"):
+            ahead = subprocess.run(("git", "-C", src, "rev-list", "--count",
+                                    f"{out.get('commit')}..HEAD"),
+                                   capture_output=True, text=True).stdout.strip()
+            out["drift"] = (f"the checkout is at {head.stdout.strip()}, "
+                            f"{ahead or 'some'} commit(s) ahead of what is installed")
+    return out
 
 
 def _profile_env(profile: str = PROFILE) -> dict:
@@ -521,6 +548,14 @@ def _duration(sec: float) -> str:
 
 
 def cmd_status() -> None:
+    ver = deployed_version()
+    print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
+    if ver["version"] == "unstamped":
+        print("  no version stamp on this deployment; re-run ./install.sh")
+    if ver["drift"]:
+        print(f"  \033[33mthis is NOT the code you are editing:\033[0m {ver['drift']}")
+        print("  run ./install.sh to deploy it")
+    print()
     env = _ENV
     # _profile_env sources the file, so this is the evaluated value. A profile
     # that fails to source yields "", and the safe reading of an unknown state
@@ -605,7 +640,14 @@ def main() -> None:
     if len(sys.argv) < 2:
         raise SystemExit(__doc__)
     cmd = sys.argv[1]
-    if cmd == "status":
+    if cmd == "version":
+        v = deployed_version()
+        for k in ("version", "commit", "installed_at", "installed_from"):
+            print(f"{k:15} {v.get(k, '?')}")
+        if v["drift"]:
+            print(f"{'drift':15} {v['drift']}")
+        raise SystemExit(1 if v["version"] == "unstamped" else 0)
+    elif cmd == "status":
         cmd_status()
     elif cmd == "run":
         cmd_run(sys.argv[2:])

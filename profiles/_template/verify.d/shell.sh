@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shell suite. sysknife's release scripts and end-to-end tests are bash, and a
 # pull request touching only those had no way to earn a receipt until this
 # existed: see issue #11.

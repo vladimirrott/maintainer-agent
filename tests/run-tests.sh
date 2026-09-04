@@ -1238,6 +1238,13 @@ grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
 grep -q 'suite_requires' "$root/profiles/sysknife/verify.d/rust.sh" \
     && ok "a suite that needs a specific runtime says so" \
     || bad "the rust suite does not declare its podman requirement"
+# A fragment with no shebang leaves shellcheck unable to pick a dialect, which
+# made the lint gate red rather than telling anyone what was wrong with the code.
+for f in "$root"/profiles/*/verify.d/*.sh; do
+    head -1 "$f" | grep -q 'shellcheck shell=' \
+        && ok "$(basename "$(dirname "$(dirname "$f")")")/$(basename "$f") declares its shell" \
+        || bad "$f has no shebang and no shellcheck shell directive"
+done
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Rust suite. The one `maintainer-merge verify` used to assume every repository
 # was.
 #
