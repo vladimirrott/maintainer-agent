@@ -1,9 +1,25 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512"
+     role="img" aria-label="maintainer-agent">
+  <title>maintainer-agent</title>
+  <desc>Two bars and a check, drawn in characters. It holds, then it proves.</desc>
   <rect width="512" height="512" rx="112" fill="#14171c"/>
-  <g fill="#e8e6e1">
-    <rect x="120" y="150" width="46" height="212" rx="23"/>
-    <rect x="192" y="150" width="46" height="212" rx="23"/>
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="44.0"
+     text-rendering="geometricPrecision">
+    <text x="30.7" y="111.7" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="156.6" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="201.4" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="246.3" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="291.2" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="336.1" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="381.0" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="425.8" fill="#e8e6e1" font-weight="bold" xml:space="preserve">██ ██            </text>
+    <text x="30.7" y="111.7" fill="#e0a44c" font-weight="bold" xml:space="preserve">                ╱</text>
+    <text x="30.7" y="156.6" fill="#e0a44c" font-weight="bold" xml:space="preserve">               ╱ </text>
+    <text x="30.7" y="201.4" fill="#e0a44c" font-weight="bold" xml:space="preserve">              ╱  </text>
+    <text x="30.7" y="246.3" fill="#e0a44c" font-weight="bold" xml:space="preserve">             ╱   </text>
+    <text x="30.7" y="291.2" fill="#e0a44c" font-weight="bold" xml:space="preserve">            ╱    </text>
+    <text x="30.7" y="336.1" fill="#e0a44c" font-weight="bold" xml:space="preserve">      ╲    ╱     </text>
+    <text x="30.7" y="381.0" fill="#e0a44c" font-weight="bold" xml:space="preserve">       ╲  ╱      </text>
+    <text x="30.7" y="425.8" fill="#e0a44c" font-weight="bold" xml:space="preserve">        ╲╱       </text>
   </g>
-  <path d="M 282 270 L 322 344 L 396 168" fill="none" stroke="#e0a44c" stroke-width="50"
-        stroke-linecap="round" stroke-linejoin="round"/>
 </svg>

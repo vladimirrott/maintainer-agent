@@ -1,7 +1,16 @@
 # Brand assets
 
-`logo.svg` is the mark: two bars and a check. The project holds, then it proves.
-It survives to 22px, which is the size that decides whether a mark is any good.
+`logo.svg` is the mark: two bars and a check, **drawn in characters**. The tool
+lives in a terminal, so the mark is made of the same thing the tool is.
+
+Two layers on one monospace grid: the bars in off-white, the check in amber. The
+check's rise is seven cells against a two-cell fall, which is what makes it read
+as a check rather than a V. Both files are generated from that grid, so there is
+no second drawing to keep in step.
+
+The glyphs are all single-cell (`█ ╲ ╱`), so the shape survives a font
+substitution: a viewer without DejaVu Sans Mono gets a different typeface and
+the same silhouette.
 
 `social-preview.png` is 1280x640, which is what GitHub recommends (minimum
 640x320, maximum 1MB), cropped to 2:1. Every pixel that matters sits at least

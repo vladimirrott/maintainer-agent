@@ -1,19 +1,30 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
-  <!-- 1280x640 is GitHub's recommended social preview size, cropped 2:1, and the
-       docs warn to keep anything that matters 50px clear of every edge. -->
   <rect width="1280" height="640" fill="#14171c"/>
-  <g transform="translate(132,196) scale(0.484)">
-    <rect width="512" height="512" rx="112" fill="#20252d"/>
-    <g fill="#e8e6e1">
-      <rect x="120" y="150" width="46" height="212" rx="23"/>
-      <rect x="192" y="150" width="46" height="212" rx="23"/>
-    </g>
-    <path d="M 282 270 L 322 344 L 396 168" fill="none" stroke="#e0a44c" stroke-width="50"
-          stroke-linecap="round" stroke-linejoin="round"/>
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="30.0"
+     text-rendering="geometricPrecision">
+    <text x="96" y="150.0" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="180.6" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="211.2" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="241.8" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="272.4" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="303.0" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="333.6" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="364.2" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
+    <text x="96" y="150.0" fill="#e0a44c" xml:space="preserve">                ╱</text>
+    <text x="96" y="180.6" fill="#e0a44c" xml:space="preserve">               ╱ </text>
+    <text x="96" y="211.2" fill="#e0a44c" xml:space="preserve">              ╱  </text>
+    <text x="96" y="241.8" fill="#e0a44c" xml:space="preserve">             ╱   </text>
+    <text x="96" y="272.4" fill="#e0a44c" xml:space="preserve">            ╱    </text>
+    <text x="96" y="303.0" fill="#e0a44c" xml:space="preserve">      ╲    ╱     </text>
+    <text x="96" y="333.6" fill="#e0a44c" xml:space="preserve">       ╲  ╱      </text>
+    <text x="96" y="364.2" fill="#e0a44c" xml:space="preserve">        ╲╱       </text>
   </g>
-  <g font-family="DejaVu Sans Mono, monospace">
-    <text x="424" y="296" font-size="66" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
-    <text x="428" y="356" font-size="27" fill="#98a0ab">an unattended maintainer for one repository</text>
-    <text x="428" y="400" font-size="27" fill="#e0a44c">merges only against proof that a guard bites</text>
+  <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
+    <text x="376" y="248" font-size="62" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
+    <text x="380" y="300" font-size="26" fill="#8a919c">an unattended maintainer for one repository</text>
+
+    <text x="380" y="378" font-size="26" fill="#c96a5f" xml:space="preserve">- merged because the board was green</text>
+    <text x="380" y="416" font-size="26" fill="#7ba86b" xml:space="preserve">+ merged because the guard went red</text>
+    <text x="380" y="454" font-size="26" fill="#7ba86b" xml:space="preserve">+   when I took the fix away</text>
   </g>
 </svg>
