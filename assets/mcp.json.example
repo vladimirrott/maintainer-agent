@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "maintainer-agent": {
+      "command": "/home/you/.local/bin/maintainer-mcp",
+      "env": {
+        "MAINTAINER_PROFILE": "yourrepo"
+      }
+    }
+  }
+}

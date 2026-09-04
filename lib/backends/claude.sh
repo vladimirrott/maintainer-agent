@@ -26,6 +26,13 @@ backend_check() {
 # backend_run <prompt-file> <model> <log-file> <extra-readable-dir>
 backend_run() {
     local prompt_file="$1" model="$2" log="$3" extra_dir="$4"
+    # Reasoning effort is not a CLI flag. Claude Code takes the thinking budget
+    # from MAX_THINKING_TOKENS in the environment, so the profile sets it per
+    # task and this exports it. Naming the mechanism beats implying a flag
+    # exists that does not.
+    local think_var="THINKING_$MAINTAINER_TASK"
+    local think="${!think_var:-${MAINTAINER_THINKING:-}}"
+    [ -n "$think" ] && export MAX_THINKING_TOKENS="$think"
     # MAINTAINER_SETTINGS is how run.sh swaps in the rehearsal wall. Defaulting
     # here rather than requiring it keeps a direct call working.
     local settings="${MAINTAINER_SETTINGS:-$PROFILE_DIR/settings.json}"

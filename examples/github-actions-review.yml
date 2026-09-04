@@ -1,0 +1,49 @@
+---
+# A starting point for running the maintainer from GitHub Actions.
+# Read docs/deploy/README.md section 3 before enabling this: the trust model is
+# different from a machine you own, and worse in one specific way.
+name: maintainer-review
+
+on:
+  pull_request:          # NOT pull_request_target: a fork's code must not see secrets
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write   # only because the review is posted as a comment
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Install the maintainer
+        run: ./install.sh
+
+      - name: Scaffold a profile for this repository
+        run: |
+          ./new-profile.sh ci "${{ github.repository }}" "$PWD" \
+            "${{ github.actor }}" "${{ github.actor }}"
+          ./install.sh
+
+      - name: Read the prompt this run will use
+        run: ./lib/run.sh --show-prompt ci review
+
+      # POST=off by default in a scaffolded profile, so this writes a report and
+      # posts nothing. Turn it on only after reading a week of reports, and even
+      # then never let CI merge: the receipt needs a container and a mutation,
+      # and a run that cannot produce one must not be able to skip it.
+      - name: Rehearse a review
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          MAINTAINER_PROFILE: ci
+        run: maintainer run review
+
+      - name: Upload the run report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: maintainer-report
+          path: ~/.local/state/ci-maint/runs/

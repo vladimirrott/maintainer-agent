@@ -85,6 +85,19 @@ run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
 run cp "$root/lib/profile.sh" "$share/profile.sh"
 if [ "$dry" = 1 ]; then say "would stamp $share/VERSION"; else stamp_version > "$share/VERSION"; fi
+# The key that makes a verification receipt unforgeable. Before this, a receipt
+# was a JSON file in the state directory and the only thing protecting it was a
+# deny rule on `maintainer-merge receipt`: the deny wall emits Bash() and Read()
+# rules and nothing else, so an agent with an ordinary file-write tool could
+# write the receipt directly and skip verification entirely. Minted once, never
+# rotated automatically, and never printed.
+if [ "$dry" = 1 ]; then
+    say "would mint $share/receipt.key if absent"
+elif [ ! -f "$share/receipt.key" ]; then
+    ( umask 077; head -c 32 /dev/urandom | od -An -tx1 | tr -d " \n" > "$share/receipt.key" )
+    chmod 600 "$share/receipt.key"
+    say "minted a receipt-signing key"
+fi
 run mkdir -p "$share/scripts"
 # Every script, not a list. render-settings.py was deployed and transcript.py
 # was not, and the backend's fallback made the missing one invisible: runs kept
@@ -122,7 +135,8 @@ run cp "$root/bin/maintainer" "$bin/maintainer"
 run cp "$root/bin/maintainer-merge" "$bin/maintainer-merge"
 run cp "$root/bin/maintainer-doctor" "$bin/maintainer-doctor"
 run cp "$root/bin/maintainer-repo" "$bin/maintainer-repo"
-run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor" "$bin/maintainer-repo"
+run cp "$root/bin/maintainer-mcp" "$bin/maintainer-mcp"
+run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor" "$bin/maintainer-repo" "$bin/maintainer-mcp"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.

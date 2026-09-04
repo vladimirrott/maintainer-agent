@@ -31,6 +31,12 @@ stub_dir="$(mktemp -d)"
 # trail. It did: 22 empty logs from --show-prompt calls landed in the live one.
 export MAINTAINER_STATE_DIR="$stub_dir/state-root"
 mkdir -p "$MAINTAINER_STATE_DIR/state"
+# And a scratch signing key. Without this the suite signs with the key
+# install.sh minted on the developer's laptop, so it passed here and failed in
+# CI, where no key exists at all. The forgery cases below override it again with
+# a key of their own.
+export MAINTAINER_RECEIPT_KEY="$stub_dir/receipt.key"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MAINTAINER_RECEIPT_KEY"
 trap 'rm -rf "$stub_dir"' EXIT
 make_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$stub_dir/$1"; chmod +x "$stub_dir/$1"; }
 make_stub notify-send 'exit 0'
@@ -175,6 +181,10 @@ grep -q 'report not yet written' "$root/bin/maintainer" \
 echo "== the merge gate refuses without a valid receipt =="
 mg="$root/bin/maintainer-merge"
 export MAINTAINER_STATE="$stub_dir/state" MAINTAINER_ACCOUNT="testuser" MAINTAINER_SLUG="o/r" MAINTAINER_REPO="$stub_dir/repo"
+# These cases are about the other conditions, so they need a profile that has
+# declared its production paths. A merge with none declared is refused, which is
+# asserted on its own just below.
+export PROD_GLOBS="crates/*/src/*"
 mkdir -p "$MAINTAINER_STATE" "$MAINTAINER_REPO"
 
 # Identity is checked before anything else.
@@ -859,7 +869,11 @@ J
       *) exit 1 ;;
     esac"
 }
-screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
+# MAINTAINER_PROFILE is named rather than left to a default: `maintainer` used
+# to fall back to "sysknife" when nothing said otherwise, and now enumerates the
+# deployed profiles and refuses. That refusal has its own test; these cases are
+# about how the screen classifies files, so they pin the profile.
+screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_PROFILE=sysknife MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
 screen_case() {  # $1 label, $2 expected substring
     out="$(screen_run)"
     if printf '%s' "$out" | grep -qF "$2"; then ok "$1"
@@ -1153,9 +1167,16 @@ done
 # The workflow needs no write access and no secrets.
 grep -q 'contents: read' "$root/.github/workflows/ci.yml" \
     && ok "CI asks for read-only permissions" || bad "CI does not restrict its permissions"
-grep -q 'secrets\.' "$root/.github/workflows/ci.yml" \
-    && bad "CI reads a secret; a fork's pull request must not be able to" \
-    || ok "CI reads no secrets, so a fork's PR is safe to run"
+# Comments stripped first. This grep ran over the whole file, so writing the
+# words `secrets.GITHUB_TOKEN` in a comment that EXPLAINS the policy failed the
+# check that enforces it. GITHUB_TOKEN itself is allowed: it is the automatic
+# token, scoped by `permissions:` above, and GitHub hands a fork's pull request
+# a read-only copy. Any other secret is a repository secret, which a fork's
+# `pull_request` run must never see.
+othersecret=$(sed 's/#.*//' "$root/.github/workflows/ci.yml" \
+    | grep -oE 'secrets\.[A-Za-z_][A-Za-z0-9_]*' | grep -v '^secrets\.GITHUB_TOKEN$' || true)
+if [ -z "$othersecret" ]; then ok "CI reads no repository secret, so a fork's PR is safe to run"
+else bad "CI reads a secret a fork's pull request must not be able to: $othersecret"; fi
 
 echo "== the merge gate verifies more than one language =="
 # It assumed Rust in four places: the image, the command, the mutation glob and
@@ -1245,6 +1266,346 @@ for f in "$root"/profiles/*/verify.d/*.sh; do
         && ok "$(basename "$(dirname "$(dirname "$f")")")/$(basename "$f") declares its shell" \
         || bad "$f has no shebang and no shellcheck shell directive"
 done
+
+echo "== the thinking budget reaches the process, per task =="
+# Reasoning effort is not a CLI flag: Claude Code reads MAX_THINKING_TOKENS from
+# the environment. A setting nobody confirmed reached the process is the same
+# shape as the MAINTAINER_FORCE leak, so this measures rather than greps.
+tb="$stub_dir/thinkstub"; mkdir -p "$tb"
+printf '#!/usr/bin/env bash\nenv | grep -E "^MAX_THINKING_TOKENS=" >&2\nexit 0\n' > "$tb/claude"
+chmod +x "$tb/claude"
+tlog="$stub_dir/think.log"
+think_for() {  # $1 = task -> the budget the backend exported
+    : > "$tlog"
+    ( export PATH="$tb:$PATH" MAINTAINER_TASK="$1" PROFILE_DIR="$root/profiles/sysknife"
+      # shellcheck disable=SC1091
+      . "$root/profiles/sysknife/profile.env"
+      # shellcheck disable=SC1091
+      . "$root/lib/backends/claude.sh"
+      backend_run /dev/null opus "$tlog" /tmp >/dev/null 2>&1 )
+    sed -n 's/^MAX_THINKING_TOKENS=//p' "$tlog" | head -1
+}
+r_think="$(think_for review)"; c_think="$(think_for ci)"
+[ -n "$r_think" ] && ok "review exports a thinking budget ($r_think)" \
+    || bad "no MAX_THINKING_TOKENS reached the process for review"
+[ -n "$c_think" ] && [ "$c_think" != "$r_think" ] \
+    && ok "ci gets its own, smaller budget ($c_think)" \
+    || bad "every task got the same budget; the per-task setting does nothing"
+grep -q 'MAX_THINKING_TOKENS' "$root/lib/backends/claude.sh" \
+    && ok "the backend names the mechanism rather than implying a flag" \
+    || bad "the thinking budget is not wired into the claude backend"
+
+echo "== the MCP server speaks the protocol, and exposes no way round the gate =="
+mcp="$root/bin/maintainer-mcp"
+[ -x "$mcp" ] && ok "maintainer-mcp is present and executable" || bad "no MCP server"
+session() { printf '%s\n' "$@" | python3 "$mcp" 2>/dev/null; }
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+              '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+              '{"jsonrpc":"2.0","id":3,"method":"resources/list"}')
+printf '%s' "$out" | grep -q '"protocolVersion"' && ok "initialize answers with a protocol version" \
+    || bad "initialize did not answer"
+printf '%s' "$out" | grep -q '"tools"' && ok "tools/list answers" || bad "tools/list did not answer"
+printf '%s' "$out" | grep -q '"resources"' && ok "resources/list answers" || bad "resources/list did not answer"
+
+# The refusals must survive the change of interface. An MCP client is driven by
+# a model, so anything exposed here is exposed to a model.
+tools=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | python3 -c "
+import json,sys
+for l in sys.stdin:
+    m=json.loads(l)
+    if 'result' in m and 'tools' in m['result']:
+        print(' '.join(t['name'] for t in m['result']['tools']))")
+# Named exactly, not by substring: the first version of this check flagged
+# maintainer_release_check, which only reports whether a release is owed and
+# cannot cut one. A crude needle produces a finding about the needle.
+for forbidden in maintainer_receipt maintainer_release maintainer_publish \
+                 maintainer_push maintainer_tag maintainer_exec maintainer_shell; do
+    printf ' %s ' "$tools" | grep -q " $forbidden " \
+        && bad "MCP exposes $forbidden" \
+        || ok "MCP exposes no $forbidden"
+done
+# And the tools it does expose must not be able to publish. release_check reads
+# the CHANGELOG and says which digit moves; it never tags.
+grep -q '"release-check"' "$mcp" && ok "release_check only asks maintainer-repo, which never tags" \
+    || bad "the release tool does something other than release-check"
+printf ' %s ' "$tools" | grep -q ' maintainer_verify ' \
+    && ok "verify is exposed (it is the only way to earn a receipt)" \
+    || bad "verify is missing, so a receipt can never be earned over MCP"
+# A model supplies these arguments. They are validated, not interpolated.
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_merge","arguments":{"pr":"7; rm -rf /"}}}')
+printf '%s' "$out" | grep -q 'positive integer' && ok "a non-integer pull request number is refused" \
+    || bad "MCP accepted a non-integer pr"
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_status","arguments":{"profile":"../../etc"}}}')
+printf '%s' "$out" | grep -q 'plain name' && ok "a profile name that is a path is refused" \
+    || bad "MCP accepted a path as a profile name"
+out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}')
+printf '%s' "$out" | grep -q 'no tool named' && ok "an unknown tool is refused" || bad "unknown tool not refused"
+# prune over MCP is always a dry run: deleting is a decision.
+grep -q '"prune", "--dry-run"' "$mcp" && ok "prune over MCP is always a dry run" \
+    || bad "MCP could delete branches"
+grep -q 'maintainer-merge", "merge"' "$mcp" \
+    && ok "merge shells out to the gate rather than reimplementing it" \
+    || bad "MCP does not route merges through maintainer-merge"
+
+echo "== the receipt dies on the paths THIS repository calls production =="
+# The globs were sysknife's directory names, so on any other repository they
+# matched nothing: a pull request could earn a receipt at one head, push a
+# rewritten bin/ at the next, and the gate would say "no production diff,
+# receipt still applies". A merge against a receipt describing a tree that is
+# gone is the exact failure the receipt exists to prevent.
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    grep -q '^PROD_GLOBS=' "$pe" && ok "$pn declares which paths are production" \
+        || bad "$pn declares no PROD_GLOBS, so a receipt can survive a rewrite"
+done
+grep -q 'PROD_GLOBS:-' "$root/bin/maintainer-merge" \
+    && ok "the gate reads the globs from the profile" \
+    || bad "the gate still carries a hardcoded production path list"
+# Executed, not grepped: a merge with no production paths declared must refuse.
+out=$(env -u PROD_GLOBS PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/state" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
+      bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'declares no PROD_GLOBS'; then
+    ok "a profile with no globs is refused a merge, not given a default"
+else
+    bad "the gate merged, or failed for another reason, with no production paths declared (rc=$rc)"
+fi
+
+# Executed, against a real repository, on a path THIS profile calls production.
+pg="$stub_dir/prodglobs"; rm -rf "$pg"; mkdir -p "$pg/bin" "$pg/docs"
+git -C "$pg" init -q -b main; git -C "$pg" config user.email t@t; git -C "$pg" config user.name t
+echo "code" > "$pg/bin/tool"; echo "words" > "$pg/docs/x.md"
+git -C "$pg" add -A; git -C "$pg" commit -qm base
+pg_verified="$(git -C "$pg" rev-parse HEAD)"
+echo "changed" > "$pg/docs/x.md"; git -C "$pg" add -A; git -C "$pg" commit -qm docs
+pg_docs="$(git -C "$pg" rev-parse HEAD)"
+echo "rewritten" > "$pg/bin/tool"; git -C "$pg" add -A; git -C "$pg" commit -qm prod
+pg_prod="$(git -C "$pg" rev-parse HEAD)"
+git -C "$pg" remote add origin "$pg"
+git -C "$pg" update-ref refs/pull/21/head "$pg_docs"
+git -C "$pg" update-ref refs/pull/22/head "$pg_prod"
+pg_case() {  # $1 pr, $2 head, $3 expected substring, $4 label
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/pgstate" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$pg" PROD_GLOBS="bin/*" \
+        bash "$mg" receipt "$1" "$pg_verified" "proved" >/dev/null 2>&1
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $2;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) echo '[{\"name\":\"x\",\"bucket\":\"pass\"}]';;
+      *'pr merge'*) echo MERGED_STUB;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/pgstate" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$pg" PROD_GLOBS="bin/*" MAINTAINER_POST=off \
+          bash "$mg" merge "$1" 2>&1)
+    printf '%s' "$out" | grep -q "$3" && ok "$4" \
+        || bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"
+}
+pg_case 21 "$pg_docs" "receipt still applies" "a docs-only move keeps the receipt"
+pg_case 22 "$pg_prod" "production code changed" "a rewrite of bin/ kills the receipt"
+
+echo "== a receipt cannot be written by anything but the gate =="
+# It used to be an unsigned JSON file whose only protection was a deny rule on
+# one CLI verb, while the deny wall emits only Bash() and Read() rules. An agent
+# with an ordinary write tool could create the file by hand, with
+# "kind": "observed", and merge without ever running a mutation. That is
+# SECURITY.md's own first named threat.
+rk="$stub_dir/rkey"; printf 'deadbeefcafe\n' > "$rk"
+forge="$stub_dir/forged"; mkdir -p "$forge/receipts"
+make_stub gh 'case "$*" in *"api user"*) echo testuser;; esac; exit 0'
+printf '{"pr":1,"head":"abcdef1234567890","kind":"observed","proof":"written by hand"}\n' \
+    > "$forge/receipts/1.json"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+      bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'carries no signature'; then
+    ok "a hand-written receipt is refused"
+else
+    bad "a hand-written receipt merged or failed for another reason (rc=$rc)"
+fi
+# And one with a signature that does not match the payload.
+printf '{"pr":2,"head":"abcdef1234567890","kind":"observed","proof":"edited","signature":"00"}\n' \
+    > "$forge/receipts/2.json"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+      bash "$mg" merge 2 2>&1)
+printf '%s' "$out" | grep -q 'does not match its signature' \
+    && ok "a receipt edited after signing is refused" \
+    || bad "an edited receipt was accepted"
+
+echo "== an unattended run cannot assert; it can only observe =="
+# Signing alone does not separate an agent from a human: both run as this user,
+# so both can reach the key. What separates them is that `verify` records
+# something re-checkable and `receipt` records a sentence. So a run may not use
+# `receipt`, and may not merge on what `receipt` writes. Three layers, and only
+# the third is un-evadable by an agent that edits its own environment.
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      bash "$mg" receipt 3 abcdef1234567890 'I promise' 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'may not assert a receipt'; then
+    ok "a run is refused the receipt command"
+else
+    bad "a run wrote an asserted receipt (rc=$rc)"
+fi
+[ -f "$forge/receipts/3.json" ] && bad "the refusal still left a receipt on disk" \
+    || ok "the refusal wrote nothing"
+# Layer 2: the deny wall spells the command, in every profile.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    grep -q 'maintainer-merge receipt' "$pdj" \
+        && ok "$pn denies the receipt command to the agent" \
+        || bad "$pn lets an agent run maintainer-merge receipt"
+done
+# Layer 3, the one that holds when the other two are evaded: a properly signed
+# asserted receipt, written outside a run, is still refused inside one.
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    bash "$mg" receipt 4 abcdef1234567890 'proved by hand' >/dev/null 2>&1
+if [ -f "$forge/receipts/4.json" ]; then
+    ok "outside a run the receipt command still works"
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('signature') and d['kind']=='asserted' else 1)" \
+        "$forge/receipts/4.json" && ok "and what it writes is signed and marked asserted" \
+        || bad "the asserted receipt is unsigned or mislabelled"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
+          MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+          bash "$mg" merge 4 2>&1)
+    printf '%s' "$out" | grep -q "is 'asserted', not 'observed'" \
+        && ok "a run may not merge on an asserted receipt" \
+        || bad "a run merged on a claim nothing checked"
+else
+    bad "the receipt command wrote nothing outside a run"
+fi
+# A proof string is a human sentence, so it contains quotes. The heredoc that
+# used to write this file interpolated it raw and produced JSON merge could not
+# parse, and the refusal then blamed the receipt rather than the quoting.
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    bash "$mg" receipt 5 abcdef1234567890 'reverting `|| true` leaves it "green": 0 bytes' >/dev/null 2>&1
+python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$forge/receipts/5.json" 2>/dev/null \
+    && ok "a proof containing quotes and backticks still writes valid JSON" \
+    || bad "a quoted proof string produced an unparseable receipt"
+
+# The key must be denied to readers, in every profile.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    grep -q 'receipt.key' "$pdj" && ok "$pn denies the receipt key to readers" \
+        || bad "$pn leaves the receipt-signing key readable"
+done
+
+echo "== a symlink may not leave the tree the gate edits =="
+# The mutation step runs on the HOST, outside the container. A tracked symlink
+# harness.sh -> ~/.ssh/id_ed25519 survives git archive, and `sed -i` follows it:
+# the key's plaintext lands in the extracted tree, which is then bind-mounted
+# into the container where the pull request's own test can print it, and 200
+# characters of it land in the receipt. Every container flag is irrelevant,
+# because the read happens before the container exists.
+# Driven through the real function rather than grepped out of the source. The
+# first two cases here were `grep -q 'ships symlink' "$mg"`, which passes for any
+# file that contains the words and says nothing about what the gate does.
+# One helper for every call into maintainer-merge's own functions. $mg is
+# resolved at runtime, which shellcheck cannot follow, so the directive lives
+# here once instead of above each of the five call sites.
+# shellcheck disable=SC1090
+mgfn() { local fn="$1"; shift; ( . "$mg" >/dev/null 2>&1; "$fn" "$@" ) 2>/dev/null; }
+esc() { mgfn tree_escapes "$1"; }
+tr1="$stub_dir/tree1"; mkdir -p "$tr1/docs/images" "$tr1/assets"
+printf 'png\n' > "$tr1/assets/social.png"
+ln -sf ../../assets/social.png "$tr1/docs/images/social.png"
+[ -z "$(esc "$tr1")" ] && ok "an in-tree relative symlink is allowed" \
+    || bad "a repository's own docs symlink is refused: $(esc "$tr1")"
+outside="$stub_dir/outside-key"; printf 'CANARY\n' > "$outside"
+ln -sf "$outside" "$tr1/harness.sh"
+printf '%s' "$(esc "$tr1")" | grep -q 'harness.sh' \
+    && ok "a symlink to an absolute path outside the tree is reported" \
+    || bad "an escaping symlink was not reported"
+rm -f "$tr1/harness.sh"
+ln -sf ../../../../etc/passwd "$tr1/docs/images/trav.sh"
+printf '%s' "$(esc "$tr1")" | grep -q 'trav.sh' \
+    && ok "a ../ traversal out of the tree is reported" \
+    || bad "a traversing symlink was not reported"
+rm -f "$tr1/docs/images/trav.sh"
+[ -z "$(esc "$tr1")" ] && ok "and the tree reads clean once it is removed" \
+    || bad "the scan reports an escape that is no longer there"
+grep -q 'find . -type f -name' "$mg" && ok "the mutation touches regular files only" \
+    || bad "the mutation step would still follow a symlink"
+# Demonstrated: sed -i through a symlink materialises the target.
+sl="$stub_dir/symlinkdemo"; mkdir -p "$sl"; secret="$stub_dir/fake-key"
+printf 'CANARY-KEY-MATERIAL\n' > "$secret"; ln -sf "$secret" "$sl/evil.sh"
+( cd "$sl" && find . -type f -name '*.sh' -print0 | xargs -0 -r sed -i 's/x/y/' )
+grep -q CANARY "$sl/evil.sh" && [ -L "$sl/evil.sh" ] \
+    && ok "with -type f the symlink is left alone" \
+    || bad "the symlink was dereferenced even with -type f"
+
+echo "== the shellcheck sweep runs locally, or says it did not =="
+# It lived inline in ci.yml, so the pre-commit hook could not run it and a push
+# was the first thing to report SC1090 on four lines that had passed every gate
+# this machine knows about. A local-first project whose linter is CI-only is not
+# local-first.
+sw="$root/scripts/shellcheck-sweep.sh"
+[ -x "$sw" ] && ok "the sweep is a script, not a workflow step" \
+    || bad "the shellcheck sweep is not runnable outside CI"
+grep -q 'shellcheck-sweep.sh' "$root/.githooks/pre-commit" \
+    && ok "the pre-commit hook runs the same sweep" \
+    || bad "the local gate still skips shellcheck"
+grep -q 'shellcheck-sweep.sh' "$root/.github/workflows/ci.yml" \
+    && ok "CI runs the same sweep, not a second copy of it" \
+    || bad "CI has its own copy of the sweep, which will drift"
+# And it must fail when the linter is absent. A gate that reports success over
+# code nothing inspected is the shape docs/lessons.md keeps recording.
+# A PATH with everything the sweep needs EXCEPT shellcheck. Stripping PATH
+# entirely proves nothing: the shell then cannot find `bash` either.
+noshell="$stub_dir/nolinter"; mkdir -p "$noshell"
+for t in git head tr sort bash readlink dirname grep sed; do
+    src="$(command -v "$t" 2>/dev/null)" && ln -sf "$src" "$noshell/$t"
+done
+out=$(PATH="$noshell" bash "$sw" 2>&1); rc=$?
+[ "$rc" = 127 ] && ok "with no shellcheck on PATH the sweep exits 127" \
+    || bad "the sweep reported rc=$rc with no linter installed"
+printf '%s' "$out" | grep -q 'inspected nothing' \
+    && ok "and it says the gate inspected nothing" \
+    || bad "the sweep failed silently: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
+
+echo "== the container runtime's own noise is not evidence =="
+# Measured on sysknife#365: podman writes
+#   time="..." level=warning msg="Error validating CNI config file ..."
+# to the same stderr the container uses, on every run. It became the receipt's
+# `observed_failure`, and it is enough bytes on its own to satisfy the shell
+# suite's proof that the test ran at all.
+noise="$stub_dir/noise.log"
+{ printf 'time="2026-09-04T06:43:41-06:00" level=warning msg="Error validating CNI config file"\n'
+  printf 'time="2026-09-04T06:43:41-06:00" level=error msg="failed to find plugin bridge"\n'
+  printf 'FAIL  story-7.sh header claims story 97\n'
+  printf 'some later error\n'; } > "$noise"
+ffl="$(mgfn first_failure_line "$noise")"
+[ "$ffl" = "FAIL  story-7.sh header claims story 97" ] \
+    && ok "the runtime's logfmt is skipped and the test's own line is taken" \
+    || bad "the receipt would record '$ffl'"
+printf 'time="x" level=warning msg="Error validating CNI config"\n' > "$noise"
+[ -z "$(mgfn first_failure_line "$noise")" ] \
+    && ok "a log that is only runtime noise yields no observed failure" \
+    || bad "runtime noise alone was recorded as the observed failure"
+# A failure that matches no Rust-shaped keyword still has to leave evidence.
+# sysknife's prose claim screen reports a mismatched figure in plain English, and
+# the receipt for #366 recorded an empty observed_failure the first time.
+{ printf 'Published figures match the evidence artifacts.\n'
+  printf 'README.md claims 9,999 Rust tests; the artifact records 1,837.\n'; } > "$noise"
+[ "$(mgfn first_failure_line "$noise")" = \
+  "README.md claims 9,999 Rust tests; the artifact records 1,837." ] \
+    && ok "a plain-English failure falls back to the last line printed" \
+    || bad "a failure with no Rust keyword left the receipt with no evidence"
+grep -q '"\$rt" --log-level=error run' "$mg" \
+    && ok "the runtime is told to keep its warnings out of the log" \
+    || bad "runtime warnings still land in the log the byte count reads"
+
+echo "== the merge is pinned to the head that was checked =="
+grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
+    || bad "a push landing mid-merge would be merged unchecked"
+echo "== naming a suite does not skip the coverage check =="
+grep -q 'does not cover every changed path' "$mg" \
+    && ok "an explicitly named suite must still cover the changed paths" \
+    || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

@@ -72,7 +72,7 @@ refuses unless **all** of these hold:
 | Condition | Why |
 |---|---|
 | a **verification receipt** exists for the PR | somebody mutated the guard and watched it go red |
-| **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved `crates/*/src`, `.github` or a manifest, the receipt describes a tree that is gone |
+| **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved anything the profile calls production, the receipt describes a tree that is gone. The paths come from `PROD_GLOBS` in the profile, and a profile that declares none gets no merge |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
 | zero failing **and zero pending** checks | pending is not green |
 | `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
@@ -91,6 +91,28 @@ tell that something really ran. That last one is what stops a receipt being
 worthless, and it cannot be generic: cargo prints `test result: ok. N passed`, a
 shell test prints whatever its author chose. **A profile with no suite covering
 the changed paths is refused rather than run under the wrong one.**
+
+The `sysknife` profile ships three: `rust` runs `cargo nextest` and mutates
+`*.rs`, `shell` runs a script under `bash:5` and mutates `*.sh`, `docs` runs the
+prose claim screen under `python:3.12-slim` and mutates `*.md`. Each of the last
+two was written because a real pull request could not be merged without it, and
+refusing to merge is the safe outcome, so both gaps were invisible until someone
+hit them.
+
+A receipt comes in two kinds, and only one of them merges unattended:
+
+| kind | written by | who may merge on it |
+|---|---|---|
+| `observed` | `maintainer-merge verify`, which runs the mutation and records what it saw | anyone, including a timer |
+| `asserted` | `maintainer-merge receipt`, which records a sentence a human typed | a human only |
+
+Signing stops a receipt being written with a text editor, and that is all it
+stops: the agent runs as the same user as its owner, so it can reach the same
+key. What separates them is that `verify` records something a reader can
+re-check. So `receipt` refuses to run inside a run, the deny wall spells the
+command, and `merge` refuses any receipt that is not `observed` while a run is in
+progress. Only the third of those survives an agent editing its own environment,
+which is why it exists.
 
 Every refusal path is tested, including both directions of the production-diff
 rule against a real git repository.
@@ -217,6 +239,12 @@ safety: a broad allow re-opens the hole. `"cargo *": "allow"` permitted
 where last-match-wins puts them on top, and a test decides all fourteen probe
 commands to prove it.
 
+**Thinking budget.** Reasoning effort is not a flag. Claude Code reads
+`MAX_THINKING_TOKENS` from the environment, so the profile sets `THINKING_<task>`
+and the backend exports it: `review` reads diffs and thinks hard, the sweeps stay
+cheap, and a test measures what the process actually received rather than what
+the file says.
+
 Claude remains the default because it is the most capable at the work. Codex
 expresses a sandbox *mode* rather than a rule set. Cursor is weakest: its own
 documentation states the print-mode agent has full write access, so it never
@@ -262,6 +290,26 @@ repository needs a profile and no edit to any of them. The PowerShell installer
 is parsed by a real `pwsh` in a container when the image is present locally;
 counting braces was the previous check, and it would pass a file PowerShell
 refuses to load.
+
+## Driving it from an editor
+
+```sh
+maintainer-mcp --tools
+```
+
+An MCP server over stdio, standard library only, config in
+`assets/mcp.json.example`. Six tools: `status`, `screen`, `verify`, `merge`,
+`release_check`, `prune`.
+
+**Every mutation shells out to the same binary a human uses**, so the receipt,
+the identity gate, the check board, the merge state and `POST=off` all still
+apply. A client that asks to merge without a receipt gets the gate's own words
+back. Absent on purpose: the asserted form of `receipt`, and anything that
+publishes. Tool arguments come from a model, so each one is validated rather
+than interpolated.
+
+[`docs/deploy/`](docs/deploy/README.md) covers the four ways to run it and what
+each one asks you to trust.
 
 ## Another repository
 
@@ -418,7 +466,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-four entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the twenty-five entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -446,12 +494,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 318 offline tests
+./tests/run-tests.sh        # 380 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-318 offline tests: no network, no GitHub, no model call. Every case tests a
+380 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

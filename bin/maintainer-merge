@@ -13,11 +13,20 @@ set -uo pipefail
 
 . "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/profile.sh" 2>/dev/null \
   || . "$HOME/.local/share/maintainer/profile.sh"
-maintainer_load_profile || exit 64
-REPO_SLUG="$MAINTAINER_SLUG"
-REPO_PATH="$MAINTAINER_REPO"
-STATE="$MAINTAINER_STATE"
-ACCOUNT="$MAINTAINER_ACCOUNT"
+# Sourced rather than executed, this file defines its functions and stops. The
+# test suite drives tree_escapes that way, because a test that greps this file
+# for a phrase proves only that the phrase is in the file, and two such tests
+# here passed for months over a function whose behaviour nothing exercised.
+_executed() { [ "${BASH_SOURCE[0]}" = "$0" ]; }
+if _executed; then
+    maintainer_load_profile || exit 64
+    : "${MAINTAINER_SLUG:?}" "${MAINTAINER_REPO:?}" \
+      "${MAINTAINER_STATE:?}" "${MAINTAINER_ACCOUNT:?}"
+fi
+REPO_SLUG="${MAINTAINER_SLUG:-}"
+REPO_PATH="${MAINTAINER_REPO:-}"
+STATE="${MAINTAINER_STATE:-}"
+ACCOUNT="${MAINTAINER_ACCOUNT:-}"
 RECEIPTS="$STATE/receipts"
 # Same reasoning as maintainer-repo: `gh pr merge` runs inside this script, so
 # no Bash deny rule sees it. Without this, a POST=off rehearsal could merge a
@@ -26,9 +35,57 @@ POST="${MAINTAINER_POST:-on}"
 # Paths whose change invalidates a receipt. Tests, docs and the evidence
 # artifact may move between the verified head and the merged one; production
 # code and CI configuration may not.
-PROD_GLOBS=('crates/*/src/*' 'apps/*/src/*' 'packaging/*' '.github/*' '*/Cargo.toml' 'Cargo.lock')
+#
+# This was a hardcoded list of sysknife's directories, which meant that on every
+# other repository it named paths that do not exist. A pull request could earn a
+# receipt at one head, then push a rewritten bin/ or lib/ at the next, and the
+# gate would report "no production diff; receipt still applies" because bin/ was
+# not on sysknife's list. That is a merge against a receipt describing a tree
+# that is gone, which is the exact failure the receipt exists to prevent.
+#
+# It comes from the profile now, and a profile that does not declare it gets no
+# merge. There is no default: guessing which paths are production is how the
+# original bug worked.
+read -r -a PROD_GLOBS <<< "${PROD_GLOBS:-}"
 
 die() { printf 'maintainer-merge: %s\n' "$1" >&2; exit 1; }
+
+# A receipt is signed, and merge recomputes the signature.
+#
+# It used to be an unsigned JSON file whose only protection was a deny rule on
+# one CLI verb. The deny wall emits Bash() and Read() rules and nothing else, so
+# an agent holding an ordinary write tool could create
+# `$RECEIPTS/<pr>.json` by hand, with `"kind": "observed"`, and merge without
+# ever running a mutation. That is SECURITY.md's own first named threat.
+#
+# Now the payload is signed with a key minted by install.sh at mode 0600, which
+# the wall denies to every reader it knows how to spell. Forging a receipt takes
+# the key, not a text editor. This is not unbreakable: an agent that can read the
+# key can still sign one, which is why the key is 0600, outside the repository,
+# and never printed. It moves the bar from "write a file" to "defeat the wall
+# AND the file mode".
+RECEIPT_KEY="${MAINTAINER_RECEIPT_KEY:-$HOME/.local/share/maintainer/receipt.key}"
+
+receipt_sign() {  # stdin: the canonical payload -> hex signature
+    [ -f "$RECEIPT_KEY" ] || die "no receipt key at $RECEIPT_KEY; run ./install.sh"
+    python3 -c "
+import hmac, hashlib, sys, pathlib
+key = pathlib.Path(sys.argv[1]).read_text().strip().encode()
+print(hmac.new(key, sys.stdin.buffer.read(), hashlib.sha256).hexdigest())
+" "$RECEIPT_KEY"
+}
+
+# Both writers end here. The signature covers the payload exactly as it sits on
+# disk, so any later edit invalidates it, and `merge` recomputes this same form.
+receipt_seal() {  # $1 = receipt path
+    local sig; sig="$(receipt_sign < "$1")" || exit 1
+    python3 - "$1" "$sig" <<'PYEOF'
+import json, sys
+p, sig = sys.argv[1], sys.argv[2]
+d = json.load(open(p)); d["signature"] = sig
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+}
 say() { printf '  %s\n' "$1"; }
 
 identity() {
@@ -48,18 +105,32 @@ identity() {
 # fabricate the result.
 cmd_receipt() {
     local pr="${1:?pr}" sha="${2:?head sha}" proof="${3:?what was proved}"
+    # An unattended run may not assert. `verify` is the only receipt an agent can
+    # earn, because only `verify` watches the mutation fail. Three layers say so:
+    # this one, a deny rule on the command, and a refusal in `merge` for any
+    # receipt that is not `observed` while a run is in progress. The first two
+    # are evadable by an agent that unsets a variable or spells a path
+    # differently; the third is not, which is why it exists.
+    [ -z "${MAINTAINER_IN_RUN:-}" ] || die "an unattended run may not assert a receipt.
+  Only \`maintainer-merge verify\` earns one, because only it observes the
+  mutation. If this pull request cannot be mutation-proven, say so in the report
+  and leave the merge to a human."
     mkdir -p "$RECEIPTS"
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
-    cat > "$RECEIPTS/$pr.json" <<EOF
-{
-  "pr": $pr,
-  "head": "$sha",
-  "proof": "$proof",
-  "kind": "asserted",
-  "recorded_at": "$(date -Is)",
-  "recorded_by": "$(id -un)"
-}
-EOF
+    # Built by json.dump rather than a heredoc. The heredoc interpolated the
+    # proof string straight into JSON, so a proof containing a quote or a
+    # newline wrote a file the merge gate could not parse, and the refusal
+    # blamed the receipt rather than the quoting.
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$sha" "$proof" <<'PYEOF' || die "could not record the receipt (is '$pr' a pull request number?)"
+import json, sys, datetime, getpass
+out, pr, head, proof = sys.argv[1:5]
+json.dump({
+    "pr": int(pr), "head": head, "kind": "asserted", "proof": proof,
+    "recorded_at": datetime.datetime.now().astimezone().isoformat(),
+    "recorded_by": getpass.getuser(),
+}, open(out, "w"), indent=2)
+PYEOF
+    receipt_seal "$RECEIPTS/$pr.json"
     say "receipt recorded for #$pr at $sha (asserted, not observed)"
 }
 
@@ -99,6 +170,15 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
     if [ -n "$named" ]; then
         [ -f "$dir/$named.sh" ] || die "no suite '$named' in $dir"
+        # Naming a suite used to skip this entirely, and the name is reachable
+        # from an MCP client. A receipt from a suite that does not run the
+        # changed code proves nothing, whether the suite was inferred or asked
+        # for by name.
+        # shellcheck disable=SC1090
+        ( . "$dir/$named.sh"; for p in "$@"; do suite_covers "$p" || exit 1; done ) \
+            || die "the '$named' suite does not cover every changed path:
+$(printf '    %s\n' "$@")
+  A receipt from a suite that does not run the changed code proves nothing."
         printf '%s' "$named"; return 0
     fi
     local s name covered=""
@@ -123,14 +203,78 @@ container_runtime() {
     else return 1; fi
 }
 
+# suite_podman_args is optional: a suite that needs no extra runtime flag should
+# not have to declare an empty function, and the docs suite did not, so every
+# container run printed `suite_podman_args: command not found` to the log that is
+# then read as evidence.
+suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args; }
+
+# Symlinks that leave the tree, listed.
+#
+# The mutation step runs on the HOST, outside the container. A tracked symlink
+# `harness.sh -> ~/.ssh/id_ed25519` survives `git archive | tar -x`, and if
+# anything here dereferences it, the key's plaintext is written into the
+# extracted tree, which is then bind-mounted into the container where the pull
+# request's own test can print it, and 200 characters of it land in the receipt.
+# Reproduced end to end. Every container flag is irrelevant, because the read
+# happens before the container exists. `find -type f` in the mutation closes
+# that specific path; this is the second lock, for whatever runs here next.
+#
+# It reports only links whose target resolves OUTSIDE the tree. The first
+# version reported every symlink and refused the whole run, which on a real
+# repository meant refusing `docs/images/x.png -> ../../assets/x.png`: a link
+# that had been on main for months, that the pull request did not touch, and
+# that goes nowhere near the host. It blamed the contributor for the
+# repository's own layout.
+tree_escapes() {  # $1 = tree root -> "path -> target" per escaping link
+    python3 - "$1" <<'PYEOF'
+import os, sys
+root = os.path.realpath(sys.argv[1])
+out = []
+for dirpath, dirnames, filenames in os.walk(root):   # does not follow links
+    for name in dirnames + filenames:
+        p = os.path.join(dirpath, name)
+        if not os.path.islink(p):
+            continue
+        # realpath resolves the whole chain, and normalises `..` without
+        # touching the disk, so a dangling in-tree link still reads as in-tree.
+        target = os.path.realpath(p)
+        if target != root and not target.startswith(root + os.sep):
+            out.append(f"{os.path.relpath(p, root)} -> {os.readlink(p)}")
+print("\n".join(sorted(out)))
+PYEOF
+}
+
+# The line of a failed run that goes into the receipt as the observed failure.
+#
+# Container-runtime logfmt is dropped first. Podman and docker write their own
+# warnings to the same stream as the container, in `time=... level=warning
+# msg=...` form, and one of those was the first line matching the pattern below,
+# so a receipt recorded a CNI configuration warning as the proof that a guard
+# bit. Anything that looks like the runtime talking about itself is not evidence
+# about the pull request.
+first_failure_line() {  # $1 = log -> one line, at most 200 characters
+    local clean; clean="$(grep -vE '^time="[^"]*" level=(debug|info|warning|error)' "$1")"
+    local hit; hit="$(printf '%s\n' "$clean" | grep -m1 -E 'panicked at|assertion|FAILED|FAIL |Error|error')"
+    # The pattern above is Rust-shaped, and it found nothing in sysknife's prose
+    # claim screen, which reports a mismatched figure in plain English. An empty
+    # `observed_failure` is the worst outcome here: the receipt then says a
+    # mutation failed and shows nothing for it. The last line the run printed is
+    # always better than that.
+    [ -n "$hit" ] || hit="$(printf '%s\n' "$clean" | grep . | tail -1)"
+    printf '%s' "$hit" | cut -c1-200
+}
+
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     local named="${5:-}"
+    [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
 
     local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
     [ -n "$paths" ] || die "could not read the changed files for #$pr"
-    local suite; suite="$(pick_suite "$named" $paths)" || exit 1
+    local -a path_list; mapfile -t path_list <<< "$paths"
+    local suite; suite="$(pick_suite "$named" "${path_list[@]}")" || exit 1
     local dir; dir="$(suite_dir)"
     # shellcheck disable=SC1090
     . "$dir/$suite.sh"
@@ -149,11 +293,59 @@ cmd_verify() {
         die "head is $real_head, not the $sha you named" ;; esac
     git -C "$REPO_PATH" archive "v-$pr" | tar -x -C "$work"
     git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
+
+    local links; links="$(tree_escapes "$work")"
+    if [ -n "$links" ]; then
+        die "the tree for #$pr contains symlink(s) pointing outside itself, and the
+  mutation step runs on the host:
+$(printf '%s\n' "$links" | sed 's/^/    /')
+  Refusing. Review this by reading."
+    fi
     mkdir -p "$work/.container-target"
 
+    # Every control here is measured by tests/containment-probe.sh with a real
+    # adversarial payload, not assumed from the flag being present.
+    #
+    #   --network=none          the payload cannot phone home or fetch a stage 2
+    #   --cap-drop=ALL          no CAP_NET_RAW, no CAP_SYS_ADMIN, nothing
+    #   no-new-privileges       a setuid binary inside cannot elevate
+    #   --read-only             the image is immutable; only the mounts are not
+    #   --tmpfs /tmp noexec     scratch space that cannot be executed from
+    #   --pids-limit            a fork bomb hits a wall instead of the host
+    #   --memory, --cpus        a balloon or a spin cannot starve the machine
+    #   --timeout               an infinite loop cannot hold a timer for ever.
+    #                           This is podman's own flag, enforced by conmon.
+    #                           GNU `timeout` around the client does NOT work:
+    #                           it kills the CLI and leaves the container
+    #                           running. Measured, with two containers still
+    #                           spinning three minutes later and load at 5.5.
+    #
+    # What this is NOT: a boundary against a kernel exploit. Containers share
+    # the host kernel, and the 2026 consensus is that untrusted code deserves a
+    # user-space kernel (gVisor) or a micro-VM. docs/containment.md says so and
+    # says what it would take to get there.
     run_in_container() {
+        # --log-level=error, before the subcommand, because the runtime writes
+        # its own diagnostics onto the same stderr the container uses, and this
+        # log is then read as evidence twice. On this machine podman emits
+        #   level=warning msg="Error validating CNI config file ..."
+        # on every single run, and that one line did two things: it satisfied the
+        # shell suite's `suite_ran` byte count, so a test that printed nothing
+        # would have counted as having run, and it was the first line matching
+        # the failure grep, so the receipt for sysknife#365 recorded a CNI
+        # warning where the observed failure belongs.
         # shellcheck disable=SC2046
-        "$rt" run --rm --network=none -v "$work:/repo:z" $(suite_podman_args) \
+        "$rt" --log-level=error run --rm \
+            --timeout "${MAINTAINER_VERIFY_TIMEOUT:-1800}" \
+            --network=none \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
+            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
+            --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
+            -v "$work:/repo:z" $(suite_extra_args) \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
@@ -177,7 +369,10 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     say "applying the mutation and re-running"
     # The mutation is applied inside the extracted tree only. The real
     # repository is never touched.
-    ( cd "$work" && find . -name "$(suite_mutate_glob)" -not -path './.container-target/*' -print0 \
+    # -type f as well as the refusal above: `sed -i` on a symlink replaces it
+    # with the dereferenced content, so this must never see one.
+    ( cd "$work" && find . -type f -name "$(suite_mutate_glob)" \
+        -not -path './.container-target/*' -print0 \
         | xargs -0 sed -i "$mutation" ) || die "mutation failed to apply"
     run_in_container "$mut_log"; local mut_rc=$?
 
@@ -188,7 +383,7 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
 
     mkdir -p "$RECEIPTS"
     python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$filter" "$mutation" "$mut_rc" \
-        "$(grep -m1 -E 'panicked at|assertion|FAILED|Error|error' "$mut_log" | cut -c1-200)" \
+        "$(first_failure_line "$mut_log")" \
         "$suite" "$ran" <<'PYEOF'
 import json, sys, datetime, getpass
 out, pr, head, filt, mut, rc, msg = sys.argv[1:8]
@@ -202,6 +397,7 @@ json.dump({
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
 PYEOF
+    receipt_seal "$RECEIPTS/$pr.json"
     say "receipt recorded for #$pr at ${real_head:0:8} (observed: clean pass, mutated fail)"
 }
 
@@ -216,11 +412,43 @@ cmd_show() {
 
 cmd_merge() {
     local pr="${1:?pr}"
+    [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
+  whether production code moved since the receipt. Set it in profile.env, for example:
+    PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
     identity
 
     local receipt="$RECEIPTS/$pr.json"
     [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
-    local verified_head; verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+    # Recompute the signature over the payload with the signature removed. An
+    # unsigned or hand-edited receipt is refused here, which is the whole point.
+    local payload sig want
+    payload="$(python3 - "$receipt" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("signature", None)
+json.dump(d, sys.stdout, indent=2)
+PYEOF
+)" || die "receipt for #$pr is not readable JSON"
+    sig="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('signature',''))" "$receipt")"
+    [ -n "$sig" ] || die "the receipt for #$pr carries no signature, so it was not written by
+  \`maintainer-merge verify\`. A receipt that anything can write proves nothing.
+  Run: maintainer-merge verify $pr <head> <test> <mutation>"
+    want="$(printf '%s' "$payload" | receipt_sign)"
+    [ "$sig" = "$want" ] || die "the receipt for #$pr does not match its signature: it was edited
+  after it was written, or written by something other than the gate."
+    local verified_head kind
+    verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+    kind="$(python3 -c "import json;print(json.load(open('$receipt')).get('kind',''))")"
+    # The layer that is not evadable. An asserted receipt is a human's claim
+    # that a guard bites; nothing checked it. A human may merge on one. An
+    # unattended run may not, whatever it managed to write.
+    if [ -n "${MAINTAINER_IN_RUN:-}" ] && [ "$kind" != observed ]; then
+        die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
+  only on a receipt \`maintainer-merge verify\` produced by watching the
+  mutation fail."
+    fi
+    [ "$kind" = observed ] || say "the receipt is ASSERTED, not observed: it records a claim a
+     human made, and nothing here checked it"
 
     local head state review
     head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
@@ -274,11 +502,16 @@ $(printf '%s' "$diff" | sed 's/^/    /')
         say "         re-run with posting on to land it"
         return 0
     fi
-    gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch || die "merge failed"
+    # Pinned to the head that was checked. Without --match-head-commit a push
+    # landing between the production diff above and this line is merged
+    # unchecked, because `gh pr merge` merges whatever is current when it runs.
+    gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch \
+        --match-head-commit "$head" || die "merge failed"
     say "merged #$pr"
     rm -f "$receipt"
 }
 
+_executed || return 0
 case "${1:-}" in
     receipt) shift; cmd_receipt "$@" ;;
     verify)  shift; cmd_verify "$@" ;;

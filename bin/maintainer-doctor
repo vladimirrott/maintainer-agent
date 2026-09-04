@@ -14,6 +14,15 @@ bin="$HOME/.local/bin"
 # One deployed profile needs no naming; several do. Defaulting to a particular
 # repository's name is how a tool ends up reporting on somebody else's project.
 profile="${MAINTAINER_PROFILE:-}"
+# Validated before it reaches a `python3 -c` string below. bin/maintainer hardens
+# the same variable against the same class of bug; this file did not.
+# An empty value does not match: a bracket expression needs a character to
+# reject, so the unset case falls through to the enumeration below, which is
+# where it belongs.
+case "$profile" in
+    *[!A-Za-z0-9._-]*)
+        echo "maintainer-doctor: '$profile' is not a plain profile name" >&2; exit 64 ;;
+esac
 if [ -z "$profile" ]; then
     _found=()
     for _d in "$HOME/.local/share/maintainer/profiles"/*/profile.env; do

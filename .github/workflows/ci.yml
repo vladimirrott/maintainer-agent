@@ -6,10 +6,12 @@ on:
     branches: [main]
   pull_request:
 
-# Read-only, and no secrets are used anywhere in this file. A fork's pull
-# request runs the same gates as a branch, which is the point: the gates used to
-# live only in a pre-commit hook on one laptop, so a contributor had no way to
-# know whether their change passed before a maintainer told them.
+# Read-only. One job uses `github.token`, which is the same credential as
+# `secrets.GITHUB_TOKEN` under another name, and it is scoped by the
+# `permissions: contents: read` above. No other secret is used, and none is
+# needed: a fork's pull request runs the same gates as a branch, which is the
+# point. The gates used to live only in a pre-commit hook on one laptop, so a
+# contributor had no way to know whether their change passed.
 permissions:
   contents: read
 
@@ -86,23 +88,11 @@ jobs:
       - name: Install shellcheck
         run: sudo apt-get update -qq && sudo apt-get install -y -qq shellcheck
 
+      # The sweep lives in scripts/ so the pre-commit hook runs the same one.
+      # It was inline here, which meant a contributor could pass every local
+      # gate and still be told about SC1090 by a push.
       - name: Run it over every shell script
-        run: |
-          mapfile -t files < <(
-            for f in $(git ls-files); do
-              [ -f "$f" ] || continue
-              case "$(head -c 80 "$f" 2>/dev/null)" in
-                *"#!/usr/bin/env bash"*|*"#!/bin/bash"*|*"#!/bin/sh"*) printf '%s\n' "$f" ;;
-              esac
-              # Sourced fragments carry no shebang and are still shell. The
-              # verify suites decide what a receipt is worth, so they are the
-              # last place to skip a linter.
-              case "$f" in profiles/*/verify.d/*.sh) printf '%s\n' "$f" ;; esac
-            done | sort -u
-          )
-          printf 'checking %d scripts\n' "${#files[@]}"
-          [ "${#files[@]}" -gt 0 ] || { echo "no scripts found; this gate inspected nothing" >&2; exit 1; }
-          shellcheck --severity=warning "${files[@]}"
+        run: scripts/shellcheck-sweep.sh
 
   powershell:
     name: the Windows installer parses
