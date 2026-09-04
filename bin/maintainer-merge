@@ -457,6 +457,43 @@ PYEOF
 
     [ "$review" = "APPROVED" ] || die "#$pr reviewDecision is '$review', not APPROVED"
 
+    # A pull request may not close an issue somebody else has claimed.
+    #
+    # Measured on lacs-project/sysknife on 2026-09-04. A contributor said "I am
+    # taking this" on #355; the maintainer replied "it is yours" and applied the
+    # `claimed` label, saying in the same comment that the label "is what the
+    # other contributors read". Ten hours later a different contributor opened a
+    # pull request closing it. The review approved it, this gate merged it, and
+    # the person who claimed it had nothing.
+    #
+    # The label is the project's promise to whoever claimed the issue. Nothing
+    # was enforcing it, so it was a promise the tooling could break without
+    # noticing. CLAIM_LABEL comes from the profile; a project that does not use
+    # one sets it empty and this check does nothing.
+    local claim_label="${CLAIM_LABEL:-}"
+    if [ -n "$claim_label" ]; then
+        local author closes
+        author="$(gh pr view "$pr" --repo "$REPO_SLUG" --json author --jq .author.login)"
+        closes="$(gh pr view "$pr" --repo "$REPO_SLUG" --json closingIssuesReferences \
+                  --jq '.closingIssuesReferences[].number' 2>/dev/null)"
+        local iss
+        for iss in $closes; do
+            gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
+                --jq '[.labels[].name]|index("'"$claim_label"'")' 2>/dev/null | grep -qv '^null$' || continue
+            # Who claimed it: the first commenter the maintainer answered with
+            # the label. Reading the thread is the human's job; the gate only
+            # has to stop and say which issue and which author.
+            [ "$(gh issue view "$iss" --repo "$REPO_SLUG" --json comments \
+                 --jq '[.comments[].author.login]|index("'"$author"'")' 2>/dev/null)" != "null" ] && continue
+            die "#$pr closes #$iss, which carries the '$claim_label' label and to which
+  $author has never posted. Somebody else was told that issue was theirs.
+
+  Merging this takes their work away, and the label is public: other
+  contributors read it and stayed off the issue. Talk to both of them first.
+  If the claim is genuinely stale, release it on the thread before merging."
+        done
+    fi
+
     # mergeStateStatus was fetched and thrown away for as long as this gate has
     # existed, which shellcheck found by noticing the variable was never read.
     # BEHIND is the one that matters: the branch is not up to date with its

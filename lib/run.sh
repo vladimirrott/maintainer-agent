@@ -63,6 +63,7 @@ export PROFILE_DIR REPO_PATH
 # called from inside a run must not have to re-derive what the run already knows.
 export MAINTAINER_REPO="$REPO_PATH" MAINTAINER_SLUG="$REPO_SLUG" MAINTAINER_STATE="$STATE_DIR"
 export MAINTAINER_ACCOUNT="$GH_ACCOUNT" PROD_GLOBS="${PROD_GLOBS:-}"
+export CLAIM_LABEL="${CLAIM_LABEL:-}"
 # And the profile name itself. bin/maintainer stopped defaulting to a hardcoded
 # profile in v0.2.0 and now enumerates the deployed ones and refuses when two
 # are present, which is right. But run.sh calls `maintainer start` without

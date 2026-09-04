@@ -1790,6 +1790,79 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== a claimed issue is a promise the gate has to keep =="
+# Measured on lacs-project/sysknife, 2026-09-04. A contributor said "I am taking
+# this" on #355; the maintainer replied "it is yours", applied `claimed`, and
+# said in the same comment that the label "is what the other contributors read".
+# Ten hours later a different contributor opened a pull request closing it. The
+# review approved it, the gate merged it, and the claimant had nothing.
+cl="$stub_dir/claimstate"; mkdir -p "$cl/receipts"
+# A real repository, because the gate fetches refs/pull/N/head before it compares
+# the verified head. The pass-path cases died there against /tmp and read as the
+# claim check firing on every PR, which is the opposite of what they measure.
+clr="$stub_dir/clrepo"; git init -q -b main "$clr"
+git -C "$clr" config user.email t@t; git -C "$clr" config user.name t
+printf 'x\n' > "$clr/f"; git -C "$clr" add -A >/dev/null; git -C "$clr" commit -qm base
+clsha="$(git -C "$clr" rev-parse HEAD)"
+git -C "$clr" update-ref refs/pull/1/head "$clsha"
+git -C "$clr" remote add origin "$clr"
+# The stub is written as a plain heredoc, not through make_stub. Nested quoting
+# through a `make_stub "..."` argument mangled the case patterns, so the stub
+# answered nothing, the gate sailed past the check, and all five cases failed
+# while the guard itself was working.
+cl_gh() {  # $1 = label index (0 = claimed, null = not), $2 = author's comment index
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *closingIssuesReferences*) echo 355;;
+  *'pr view'*author*) echo newcomer;;
+  *'issue view'*labels*) echo $1;;
+  *'issue view'*comments*) echo $2;;
+  *headRefOid*) echo $clsha;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
+  *'pr merge'*) echo MERGED_STUB;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+cl_merge() { PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL="${1-claimed}" \
+    MAINTAINER_POST=off bash "$mg" merge 1 2>&1; }
+cl_gh 0 null
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" \
+    bash "$mg" receipt 1 "$clsha" 'proved' >/dev/null 2>&1
+
+# Claimed by someone else, and this author never posted on it.
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q "closes #355, which carries the 'claimed' label" \
+    && ok "a PR closing another person's claimed issue is refused" \
+    || bad "the gate merged over a claim: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+printf '%s' "$out" | grep -q 'takes their work away' \
+    && ok "and says why, rather than naming a rule" || bad "the refusal does not say what it protects"
+# The author DID post on it, so it is their own claim.
+cl_gh 0 2
+cl_merge | grep -q 'receipt valid' \
+    && ok "the author's own claim does not block them" \
+    || bad "a contributor is refused their own claimed issue"
+# No claim label on the issue.
+cl_gh null null
+cl_merge | grep -q 'receipt valid' \
+    && ok "an unclaimed issue merges normally" || bad "the check fires on every PR"
+# A project that does not use claims switches it off.
+cl_gh 0 null
+cl_merge "" | grep -q 'receipt valid' \
+    && ok "an empty CLAIM_LABEL disables the check" || bad "the check cannot be turned off"
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    grep -q '^CLAIM_LABEL=' "$pe" && ok "$pn states whether it uses a claim label" \
+        || bad "$pn leaves CLAIM_LABEL undeclared, so the check silently does nothing"
+done
+
 echo "== the agent cannot uninstall the thing that runs it =="
 # On 2026-09-04 an unattended run of the magent profile, reviewing THIS
 # repository at POST=off, ran `./install.sh --uninstall` against the real HOME

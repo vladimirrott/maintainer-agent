@@ -827,3 +827,33 @@ needed.
 **A destructive verb needs a guard that does not depend on who is calling it.**
 An agent that can run a shell can run anything the shell can, and the deny list
 enumerates what someone thought of.
+
+## 37. The label was a promise nothing kept
+
+A contributor commented "I am taking this" on sysknife#355. The maintainer
+replied "it is yours", applied the `claimed` label, and said in the same comment
+that the label "is what the other contributors read". Ten hours later a
+different contributor opened a pull request closing that issue. The review
+approved it, the merge gate merged it, and the person who claimed it had
+nothing to show for a day's work.
+
+Every part of that system worked as built. The label was applied. The reply was
+warm and specific. The review checked the diff, traced it to a live path, and
+mutation-proved both guards. The gate checked the review state, the board, the
+merge state, the head, and the production diff. Not one of them knew the issue
+had been promised to somebody.
+
+The failure is a category error about what a label is for. `claimed` was
+treated as documentation, a note for humans to read. It was actually a
+commitment, and the sentence that made it one was published in the same breath:
+other contributors read that label and stayed off the issue. A promise that only
+some of your tooling can see is a promise you will break by accident.
+
+It is in the merge gate now, beside the receipt and the production diff, because
+that is the last place before the irreversible act and the only one that cannot
+be talked past. A pull request closing an issue that carries the claim label,
+whose author has never posted on it, is refused with both names in the message.
+
+**Anything a project publishes as a commitment has to be enforced where the
+commitment can be broken.** Not where it is convenient to check, and not by
+asking a reviewer to remember.
