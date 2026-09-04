@@ -10,6 +10,19 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-04
+
+The middle digit moves because `maintainer finish` now refuses a report that is
+a fixture, and because a run that dies is recorded rather than left as a gap.
+Both are things that used to succeed.
+
+Everything here came from auditing this agent's own trail against the repository
+it maintains. Nine runs, six reports accurate on every checkable fact, nothing
+fabricated anywhere. What the audit found instead was that the trail could not
+speak: the runs that produced no report left no trace in the one document a
+reader consults.
+
+
 ### Added
 
 - **`maintainer audit`**, which compares a run report against the transcript of
@@ -291,6 +304,7 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.2.0
 [0.1.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.1.0
