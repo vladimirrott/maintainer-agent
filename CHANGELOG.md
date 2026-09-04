@@ -121,6 +121,12 @@ unnoticed.
 - A receipt's proof string was interpolated into JSON by a heredoc, so a proof
   containing a quote wrote a file the gate could not parse, and the refusal
   blamed the receipt rather than the quoting.
+- **`maintainer-doctor` reported another profile's timers as this one's.** The
+  scheduler check globbed `maintainer@*`, so asked about `magent` it counted
+  `sysknife`'s four timers and said "4 systemd timer(s) registered, ok" while
+  `magent` had two timer files, both disabled, and had never fired. It names the
+  profile now, and separates a timer that is missing from one that is installed
+  and never enabled, because those need different fixes.
 - **`maintainer status` died on any host without systemd.** `_next_runs` called
   `systemctl` by name with no guard, so it printed three lines and then an
   uncaught `FileNotFoundError`. Three of the four schedulers this project

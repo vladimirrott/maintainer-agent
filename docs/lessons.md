@@ -612,3 +612,27 @@ line where the branch it replaced ran two cases. Host and container now agree
 on 396.
 
 **A suite that has only ever run in one place is measuring that place.**
+
+## 30. The health check read the other project's health
+
+`maintainer-doctor` asked systemd for `maintainer@*` and counted what came back.
+Run as `MAINTAINER_PROFILE=magent` it counted sysknife's four timers and printed
+`4 systemd timer(s) registered, ok`, while magent's two timer files sat disabled
+and had never fired once.
+
+This is the third time this shape has appeared here. `bin/maintainer` defaulted
+`MAINTAINER_PROFILE` to a hardcoded `"sysknife"`, so a second profile printed its
+own header above the first profile's run history. The merge gate's `PROD_GLOBS`
+were one project's directories, so on any other repository the production-diff
+rule compared nothing. Now the doctor.
+
+`systemctl list-timers` shows loaded units, so a disabled timer is *absent* from
+it rather than listed as off. That is why the wrong glob read as healthy rather
+than as a contradiction: the four that answered were real, they were simply
+somebody else's. Counting the unit *files* separately is what distinguishes "no
+timer installed" from "installed and never enabled", and those need different
+fixes from the reader.
+
+**Anything that takes a profile must ask for that profile by name, every time.**
+A per-profile tool with a wildcard query is a tool that reports on whoever
+answers first.

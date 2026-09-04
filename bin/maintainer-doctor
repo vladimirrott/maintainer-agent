@@ -167,13 +167,33 @@ head_ "Scheduler"
 case "$(uname -s)" in
   Linux)
     if command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; then
-        t=$(systemctl --user list-timers 'maintainer@*' --all --no-pager 2>/dev/null | grep -c 'maintainer@')
-        [ "$t" -gt 0 ] && green "$t systemd timer(s) registered" || yellow "no timers registered" "./install.sh --timers"
+        # Scoped to THIS profile. It globbed `maintainer@*`, so running with
+        # MAINTAINER_PROFILE=magent it counted sysknife's four timers and
+        # reported "4 systemd timer(s) registered, ok" while magent had two
+        # timer files, both disabled, and had never fired. Same shape as the
+        # hardcoded profile default in bin/maintainer: a per-profile check
+        # reading another profile's data.
+        #
+        # And enabled is the property that matters. `list-timers` shows loaded
+        # units only, so a disabled timer is absent from it rather than listed
+        # as off, which is why the wrong glob read as healthy.
+        t=$(systemctl --user list-timers "maintainer@$profile-*" --all --no-pager 2>/dev/null \
+            | grep -c "maintainer@$profile-")
+        u=$(systemctl --user list-unit-files "maintainer@$profile-*.timer" --no-pager 2>/dev/null \
+            | grep -c "^maintainer@$profile-")
+        if [ "$t" -gt 0 ]; then
+            green "$t systemd timer(s) enabled for $profile"
+        elif [ "$u" -gt 0 ]; then
+            yellow "$u timer file(s) for $profile, none enabled: nothing runs unattended" \
+                   "./install.sh --timers"
+        else
+            yellow "no timers for $profile" "./install.sh --timers"
+        fi
         [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ] \
             && green "lingering on: timers run without a login session" \
             || yellow "lingering off: timers stop when you log out" "sudo loginctl enable-linger $USER"
         # Lesson 8: a timer about to fire immediately is usually a catch-up.
-        systemctl --user list-timers 'maintainer@*' --all --no-pager 2>/dev/null | grep -qE '^\S+ +[0-9]+s ' \
+        systemctl --user list-timers "maintainer@$profile-*" --all --no-pager 2>/dev/null | grep -qE '^\S+ +[0-9]+s ' \
             && yellow "a timer fires within seconds; Persistent=true may be catching up" "expected after enabling; otherwise check the stamp files"
     else yellow "no systemd user session" "use platform/posix/install-cron.sh"; fi ;;
   Darwin)

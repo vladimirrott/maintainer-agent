@@ -1667,6 +1667,28 @@ grep -q '"\$rt" --log-level=error run' "$mg" \
     && ok "the runtime is told to keep its warnings out of the log" \
     || bad "runtime warnings still land in the log the byte count reads"
 
+echo "== the doctor reports on the profile it was asked about =="
+# It globbed `maintainer@*` in systemctl, so with MAINTAINER_PROFILE=magent it
+# counted sysknife's four timers and printed "4 systemd timer(s) registered, ok"
+# while magent had two timer files, both disabled, and had never fired once.
+# Same shape as the hardcoded profile default in bin/maintainer.
+md="$root/bin/maintainer-doctor"
+grep -q "maintainer@\$profile-\*" "$md" \
+    && ok "the scheduler check names the profile" \
+    || bad "the doctor counts every profile's timers and calls them this one's"
+grep -q "list-timers 'maintainer@\*'" "$md" \
+    && bad "an unscoped timer glob is still in maintainer-doctor" \
+    || ok "no unscoped timer glob remains"
+# list-timers shows loaded units only, so a disabled timer is absent rather than
+# listed as off. Counting the unit FILES is what separates "none installed" from
+# "installed and never enabled", and those need different fixes.
+grep -q 'list-unit-files' "$md" \
+    && ok "it separates a missing timer from a disabled one" \
+    || bad "a disabled timer reads the same as a missing one"
+grep -q 'none enabled: nothing runs unattended' "$md" \
+    && ok "and it says out loud that nothing runs unattended" \
+    || bad "a profile with no enabled timer is not told so"
+
 echo "== a skip is not a pass =="
 # The container cases used to `bad` when no runtime was installed, so the suite
 # could never be green on a machine without podman or docker, which is every
