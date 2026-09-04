@@ -1504,7 +1504,12 @@ echo "== a symlink may not leave the tree the gate edits =="
 # Driven through the real function rather than grepped out of the source. The
 # first two cases here were `grep -q 'ships symlink' "$mg"`, which passes for any
 # file that contains the words and says nothing about what the gate does.
-esc() { ( . "$mg" >/dev/null 2>&1; tree_escapes "$1" ) 2>/dev/null; }
+# One helper for every call into maintainer-merge's own functions. $mg is
+# resolved at runtime, which shellcheck cannot follow, so the directive lives
+# here once instead of above each of the five call sites.
+# shellcheck disable=SC1090
+mgfn() { local fn="$1"; shift; ( . "$mg" >/dev/null 2>&1; "$fn" "$@" ) 2>/dev/null; }
+esc() { mgfn tree_escapes "$1"; }
 tr1="$stub_dir/tree1"; mkdir -p "$tr1/docs/images" "$tr1/assets"
 printf 'png\n' > "$tr1/assets/social.png"
 ln -sf ../../assets/social.png "$tr1/docs/images/social.png"
@@ -1533,6 +1538,35 @@ grep -q CANARY "$sl/evil.sh" && [ -L "$sl/evil.sh" ] \
     && ok "with -type f the symlink is left alone" \
     || bad "the symlink was dereferenced even with -type f"
 
+echo "== the shellcheck sweep runs locally, or says it did not =="
+# It lived inline in ci.yml, so the pre-commit hook could not run it and a push
+# was the first thing to report SC1090 on four lines that had passed every gate
+# this machine knows about. A local-first project whose linter is CI-only is not
+# local-first.
+sw="$root/scripts/shellcheck-sweep.sh"
+[ -x "$sw" ] && ok "the sweep is a script, not a workflow step" \
+    || bad "the shellcheck sweep is not runnable outside CI"
+grep -q 'shellcheck-sweep.sh' "$root/.githooks/pre-commit" \
+    && ok "the pre-commit hook runs the same sweep" \
+    || bad "the local gate still skips shellcheck"
+grep -q 'shellcheck-sweep.sh' "$root/.github/workflows/ci.yml" \
+    && ok "CI runs the same sweep, not a second copy of it" \
+    || bad "CI has its own copy of the sweep, which will drift"
+# And it must fail when the linter is absent. A gate that reports success over
+# code nothing inspected is the shape docs/lessons.md keeps recording.
+# A PATH with everything the sweep needs EXCEPT shellcheck. Stripping PATH
+# entirely proves nothing: the shell then cannot find `bash` either.
+noshell="$stub_dir/nolinter"; mkdir -p "$noshell"
+for t in git head tr sort bash readlink dirname grep sed; do
+    src="$(command -v "$t" 2>/dev/null)" && ln -sf "$src" "$noshell/$t"
+done
+out=$(PATH="$noshell" bash "$sw" 2>&1); rc=$?
+[ "$rc" = 127 ] && ok "with no shellcheck on PATH the sweep exits 127" \
+    || bad "the sweep reported rc=$rc with no linter installed"
+printf '%s' "$out" | grep -q 'inspected nothing' \
+    && ok "and it says the gate inspected nothing" \
+    || bad "the sweep failed silently: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
+
 echo "== the container runtime's own noise is not evidence =="
 # Measured on sysknife#365: podman writes
 #   time="..." level=warning msg="Error validating CNI config file ..."
@@ -1544,12 +1578,12 @@ noise="$stub_dir/noise.log"
   printf 'time="2026-09-04T06:43:41-06:00" level=error msg="failed to find plugin bridge"\n'
   printf 'FAIL  story-7.sh header claims story 97\n'
   printf 'some later error\n'; } > "$noise"
-ffl="$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )"
+ffl="$(mgfn first_failure_line "$noise")"
 [ "$ffl" = "FAIL  story-7.sh header claims story 97" ] \
     && ok "the runtime's logfmt is skipped and the test's own line is taken" \
     || bad "the receipt would record '$ffl'"
 printf 'time="x" level=warning msg="Error validating CNI config"\n' > "$noise"
-[ -z "$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )" ] \
+[ -z "$(mgfn first_failure_line "$noise")" ] \
     && ok "a log that is only runtime noise yields no observed failure" \
     || bad "runtime noise alone was recorded as the observed failure"
 # A failure that matches no Rust-shaped keyword still has to leave evidence.
@@ -1557,7 +1591,7 @@ printf 'time="x" level=warning msg="Error validating CNI config"\n' > "$noise"
 # the receipt for #366 recorded an empty observed_failure the first time.
 { printf 'Published figures match the evidence artifacts.\n'
   printf 'README.md claims 9,999 Rust tests; the artifact records 1,837.\n'; } > "$noise"
-[ "$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )" = \
+[ "$(mgfn first_failure_line "$noise")" = \
   "README.md claims 9,999 Rust tests; the artifact records 1,837." ] \
     && ok "a plain-English failure falls back to the last line printed" \
     || bad "a failure with no Rust keyword left the receipt with no evidence"
