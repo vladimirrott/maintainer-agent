@@ -59,7 +59,10 @@ PROFILE_DIR="$local_root/profiles/$profile"
 # shellcheck disable=SC1091
 . "$PROFILE_DIR/profile.env"
 export PROFILE_DIR REPO_PATH
+# ACCOUNT and PROD_GLOBS travel too: maintainer-merge reads both, and a tool
+# called from inside a run must not have to re-derive what the run already knows.
 export MAINTAINER_REPO="$REPO_PATH" MAINTAINER_SLUG="$REPO_SLUG" MAINTAINER_STATE="$STATE_DIR"
+export MAINTAINER_ACCOUNT="$GH_ACCOUNT" PROD_GLOBS="${PROD_GLOBS:-}"
 # scripts/ sits under local_root in both layouts: repo/scripts, and $share/scripts
 # once installed. local_root already accounts for the difference.
 [ -d "$local_root/scripts" ] && export MAINTAINER_SCRIPTS="$local_root/scripts"

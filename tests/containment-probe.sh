@@ -64,10 +64,22 @@ out="$(hardened 'grep NoNewPrivs /proc/self/status')"
 printf '%s' "$out" | grep -q 'NoNewPrivs:.*1' && ok "privilege escalation (NoNewPrivs=1)" \
     || bad "NoNewPrivs is not set: $out"
 
-out="$(hardened ':(){ :|:& };: 2>&1; echo done' 2>&1)"
-# A fork bomb either hits the pid wall or the timeout kills it. Either is a stop;
-# the host still being responsive is the property that matters.
-if [ -n "$out" ] || true; then ok "fork bomb (pids-limit, then timeout)"; fi
+# `if [ -n "$out" ] || true` was the first version of this, which is true
+# whatever happens: with --pids-limit deleted the probe still reported "stopped".
+# A check that cannot fail is the exact defect this file exists to catch, in the
+# file that exists to catch it.
+#
+# The measurable property: with a pid cap, a fork bomb cannot reach the cap's
+# worth of processes before the container dies. Count what it managed.
+out="$(hardened 'n=0; while [ $n -lt 4000 ]; do sleep 30 & n=$((n+1)); done 2>/dev/null; echo spawned=$n')"
+spawned="$(printf '%s' "$out" | sed -n 's/.*spawned=\([0-9]*\).*/\1/p' | tail -1)"
+if [ -z "$spawned" ]; then
+    ok "fork bomb (the container died before it could report)"
+elif [ "$spawned" -lt 1000 ]; then
+    ok "fork bomb (stopped at $spawned processes, cap is 512)"
+else
+    bad "fork bomb spawned $spawned processes; the pid cap is not in force"
+fi
 
 out="$(hardened 'head -c 4G /dev/zero > /tmp/balloon 2>&1; echo rc=$?')"
 printf '%s' "$out" | grep -q 'rc=0' && bad "allocating 4G in a 256m tmpfs" || ok "memory balloon"

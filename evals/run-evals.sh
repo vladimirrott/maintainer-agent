@@ -100,6 +100,10 @@ live() {
   # shellcheck disable=SC1090
   . "$root/lib/backends/${BACKEND:-claude}.sh"
   export PROFILE_DIR="$pdir" REPO_PATH
+  # The backend reads MAINTAINER_TASK for its thinking budget. Without it, live
+  # mode died on an unbound variable before reaching the model, so the mode this
+  # file calls "the only one that measures behaviour" had never run at all.
+  export MAINTAINER_TASK="${MAINTAINER_TASK:-review}"
   for f in "$root"/evals/scenarios/*.md; do
     local id; id="$(basename "$f" .md)"
     [ -n "$only" ] && [[ "$id" != *"$only"* ]] && continue

@@ -6,7 +6,10 @@
   "be run from, including the ones the tools are actually installed in:",
   "a rule for `cargo publish` that misses ~/.cargo/bin protects nothing.",
   "The bound is honest: enumeration cannot be complete, so this stops a",
-  "cooperative agent reaching a destructive verb, not a hostile one."
+  "cooperative agent reaching a destructive verb, not a hostile one.",
+  "The receipt-signing key sits in credential_paths on purpose: a receipt",
+  "is only unforgeable while the key is unreadable, so it belongs beside",
+  "the SSH keys rather than in a list of its own."
  ],
  "spelled_everywhere": [
   "cargo publish",
@@ -51,6 +54,7 @@
   "~/.netrc",
   "~/.config/gh/**",
   "~/.config/gh-personal/**",
-  "~/.claude/.credentials.json"
+  "~/.claude/.credentials.json",
+  "~/.local/share/maintainer/receipt.key"
  ]
 }

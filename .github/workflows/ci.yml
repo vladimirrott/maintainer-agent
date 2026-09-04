@@ -6,10 +6,12 @@ on:
     branches: [main]
   pull_request:
 
-# Read-only, and no secrets are used anywhere in this file. A fork's pull
-# request runs the same gates as a branch, which is the point: the gates used to
-# live only in a pre-commit hook on one laptop, so a contributor had no way to
-# know whether their change passed before a maintainer told them.
+# Read-only. One job uses `github.token`, which is the same credential as
+# `secrets.GITHUB_TOKEN` under another name, and it is scoped by the
+# `permissions: contents: read` above. No other secret is used, and none is
+# needed: a fork's pull request runs the same gates as a branch, which is the
+# point. The gates used to live only in a pre-commit hook on one laptop, so a
+# contributor had no way to know whether their change passed.
 permissions:
   contents: read
 

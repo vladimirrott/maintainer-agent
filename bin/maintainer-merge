@@ -43,6 +43,43 @@ POST="${MAINTAINER_POST:-on}"
 read -r -a PROD_GLOBS <<< "${PROD_GLOBS:-}"
 
 die() { printf 'maintainer-merge: %s\n' "$1" >&2; exit 1; }
+
+# A receipt is signed, and merge recomputes the signature.
+#
+# It used to be an unsigned JSON file whose only protection was a deny rule on
+# one CLI verb. The deny wall emits Bash() and Read() rules and nothing else, so
+# an agent holding an ordinary write tool could create
+# `$RECEIPTS/<pr>.json` by hand, with `"kind": "observed"`, and merge without
+# ever running a mutation. That is SECURITY.md's own first named threat.
+#
+# Now the payload is signed with a key minted by install.sh at mode 0600, which
+# the wall denies to every reader it knows how to spell. Forging a receipt takes
+# the key, not a text editor. This is not unbreakable: an agent that can read the
+# key can still sign one, which is why the key is 0600, outside the repository,
+# and never printed. It moves the bar from "write a file" to "defeat the wall
+# AND the file mode".
+RECEIPT_KEY="${MAINTAINER_RECEIPT_KEY:-$HOME/.local/share/maintainer/receipt.key}"
+
+receipt_sign() {  # stdin: the canonical payload -> hex signature
+    [ -f "$RECEIPT_KEY" ] || die "no receipt key at $RECEIPT_KEY; run ./install.sh"
+    python3 -c "
+import hmac, hashlib, sys, pathlib
+key = pathlib.Path(sys.argv[1]).read_text().strip().encode()
+print(hmac.new(key, sys.stdin.buffer.read(), hashlib.sha256).hexdigest())
+" "$RECEIPT_KEY"
+}
+
+# Both writers end here. The signature covers the payload exactly as it sits on
+# disk, so any later edit invalidates it, and `merge` recomputes this same form.
+receipt_seal() {  # $1 = receipt path
+    local sig; sig="$(receipt_sign < "$1")" || exit 1
+    python3 - "$1" "$sig" <<'PYEOF'
+import json, sys
+p, sig = sys.argv[1], sys.argv[2]
+d = json.load(open(p)); d["signature"] = sig
+json.dump(d, open(p, "w"), indent=2)
+PYEOF
+}
 say() { printf '  %s\n' "$1"; }
 
 identity() {
@@ -62,18 +99,32 @@ identity() {
 # fabricate the result.
 cmd_receipt() {
     local pr="${1:?pr}" sha="${2:?head sha}" proof="${3:?what was proved}"
+    # An unattended run may not assert. `verify` is the only receipt an agent can
+    # earn, because only `verify` watches the mutation fail. Three layers say so:
+    # this one, a deny rule on the command, and a refusal in `merge` for any
+    # receipt that is not `observed` while a run is in progress. The first two
+    # are evadable by an agent that unsets a variable or spells a path
+    # differently; the third is not, which is why it exists.
+    [ -z "${MAINTAINER_IN_RUN:-}" ] || die "an unattended run may not assert a receipt.
+  Only \`maintainer-merge verify\` earns one, because only it observes the
+  mutation. If this pull request cannot be mutation-proven, say so in the report
+  and leave the merge to a human."
     mkdir -p "$RECEIPTS"
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
-    cat > "$RECEIPTS/$pr.json" <<EOF
-{
-  "pr": $pr,
-  "head": "$sha",
-  "proof": "$proof",
-  "kind": "asserted",
-  "recorded_at": "$(date -Is)",
-  "recorded_by": "$(id -un)"
-}
-EOF
+    # Built by json.dump rather than a heredoc. The heredoc interpolated the
+    # proof string straight into JSON, so a proof containing a quote or a
+    # newline wrote a file the merge gate could not parse, and the refusal
+    # blamed the receipt rather than the quoting.
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$sha" "$proof" <<'PYEOF' || die "could not record the receipt (is '$pr' a pull request number?)"
+import json, sys, datetime, getpass
+out, pr, head, proof = sys.argv[1:5]
+json.dump({
+    "pr": int(pr), "head": head, "kind": "asserted", "proof": proof,
+    "recorded_at": datetime.datetime.now().astimezone().isoformat(),
+    "recorded_by": getpass.getuser(),
+}, open(out, "w"), indent=2)
+PYEOF
+    receipt_seal "$RECEIPTS/$pr.json"
     say "receipt recorded for #$pr at $sha (asserted, not observed)"
 }
 
@@ -113,6 +164,15 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
     if [ -n "$named" ]; then
         [ -f "$dir/$named.sh" ] || die "no suite '$named' in $dir"
+        # Naming a suite used to skip this entirely, and the name is reachable
+        # from an MCP client. A receipt from a suite that does not run the
+        # changed code proves nothing, whether the suite was inferred or asked
+        # for by name.
+        # shellcheck disable=SC1090
+        ( . "$dir/$named.sh"; for p in "$@"; do suite_covers "$p" || exit 1; done ) \
+            || die "the '$named' suite does not cover every changed path:
+$(printf '    %s\n' "$@")
+  A receipt from a suite that does not run the changed code proves nothing."
         printf '%s' "$named"; return 0
     fi
     local s name covered=""
@@ -140,11 +200,13 @@ container_runtime() {
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     local named="${5:-}"
+    [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
 
     local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
     [ -n "$paths" ] || die "could not read the changed files for #$pr"
-    local suite; suite="$(pick_suite "$named" $paths)" || exit 1
+    local -a path_list; mapfile -t path_list <<< "$paths"
+    local suite; suite="$(pick_suite "$named" "${path_list[@]}")" || exit 1
     local dir; dir="$(suite_dir)"
     # shellcheck disable=SC1090
     . "$dir/$suite.sh"
@@ -163,6 +225,23 @@ cmd_verify() {
         die "head is $real_head, not the $sha you named" ;; esac
     git -C "$REPO_PATH" archive "v-$pr" | tar -x -C "$work"
     git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
+
+    # A pull request may not ship a symlink into a tree this gate then edits.
+    #
+    # The mutation step below runs on the HOST, outside the container. A tracked
+    # symlink `harness.sh -> ~/.ssh/id_ed25519` survives `git archive | tar -x`,
+    # and `sed -i` follows it: the key's plaintext is written into the extracted
+    # tree, which is then bind-mounted into the container where the pull
+    # request's own test can print it, and 200 characters of it land in the
+    # receipt. Reproduced end to end. Every container flag is irrelevant to it,
+    # because the read happens before the container exists.
+    local links; links="$(find "$work" -type l -printf '%P -> %l\n' 2>/dev/null)"
+    if [ -n "$links" ]; then
+        die "#$pr ships symlink(s) into the tree this gate edits, and the mutation
+  step would follow them off the host:
+$(printf '%s\n' "$links" | sed 's/^/    /')
+  Refusing. Review this by reading."
+    fi
     mkdir -p "$work/.container-target"
 
     # Every control here is measured by tests/containment-probe.sh with a real
@@ -222,7 +301,10 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     say "applying the mutation and re-running"
     # The mutation is applied inside the extracted tree only. The real
     # repository is never touched.
-    ( cd "$work" && find . -name "$(suite_mutate_glob)" -not -path './.container-target/*' -print0 \
+    # -type f as well as the refusal above: `sed -i` on a symlink replaces it
+    # with the dereferenced content, so this must never see one.
+    ( cd "$work" && find . -type f -name "$(suite_mutate_glob)" \
+        -not -path './.container-target/*' -print0 \
         | xargs -0 sed -i "$mutation" ) || die "mutation failed to apply"
     run_in_container "$mut_log"; local mut_rc=$?
 
@@ -247,6 +329,7 @@ json.dump({
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
 PYEOF
+    receipt_seal "$RECEIPTS/$pr.json"
     say "receipt recorded for #$pr at ${real_head:0:8} (observed: clean pass, mutated fail)"
 }
 
@@ -268,7 +351,36 @@ cmd_merge() {
 
     local receipt="$RECEIPTS/$pr.json"
     [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
-    local verified_head; verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+    # Recompute the signature over the payload with the signature removed. An
+    # unsigned or hand-edited receipt is refused here, which is the whole point.
+    local payload sig want
+    payload="$(python3 - "$receipt" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("signature", None)
+json.dump(d, sys.stdout, indent=2)
+PYEOF
+)" || die "receipt for #$pr is not readable JSON"
+    sig="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('signature',''))" "$receipt")"
+    [ -n "$sig" ] || die "the receipt for #$pr carries no signature, so it was not written by
+  \`maintainer-merge verify\`. A receipt that anything can write proves nothing.
+  Run: maintainer-merge verify $pr <head> <test> <mutation>"
+    want="$(printf '%s' "$payload" | receipt_sign)"
+    [ "$sig" = "$want" ] || die "the receipt for #$pr does not match its signature: it was edited
+  after it was written, or written by something other than the gate."
+    local verified_head kind
+    verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+    kind="$(python3 -c "import json;print(json.load(open('$receipt')).get('kind',''))")"
+    # The layer that is not evadable. An asserted receipt is a human's claim
+    # that a guard bites; nothing checked it. A human may merge on one. An
+    # unattended run may not, whatever it managed to write.
+    if [ -n "${MAINTAINER_IN_RUN:-}" ] && [ "$kind" != observed ]; then
+        die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
+  only on a receipt \`maintainer-merge verify\` produced by watching the
+  mutation fail."
+    fi
+    [ "$kind" = observed ] || say "the receipt is ASSERTED, not observed: it records a claim a
+     human made, and nothing here checked it"
 
     local head state review
     head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
@@ -322,7 +434,11 @@ $(printf '%s' "$diff" | sed 's/^/    /')
         say "         re-run with posting on to land it"
         return 0
     fi
-    gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch || die "merge failed"
+    # Pinned to the head that was checked. Without --match-head-commit a push
+    # landing between the production diff above and this line is merged
+    # unchecked, because `gh pr merge` merges whatever is current when it runs.
+    gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch \
+        --match-head-commit "$head" || die "merge failed"
     say "merged #$pr"
     rm -f "$receipt"
 }

@@ -31,6 +31,12 @@ stub_dir="$(mktemp -d)"
 # trail. It did: 22 empty logs from --show-prompt calls landed in the live one.
 export MAINTAINER_STATE_DIR="$stub_dir/state-root"
 mkdir -p "$MAINTAINER_STATE_DIR/state"
+# And a scratch signing key. Without this the suite signs with the key
+# install.sh minted on the developer's laptop, so it passed here and failed in
+# CI, where no key exists at all. The forgery cases below override it again with
+# a key of their own.
+export MAINTAINER_RECEIPT_KEY="$stub_dir/receipt.key"
+head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MAINTAINER_RECEIPT_KEY"
 trap 'rm -rf "$stub_dir"' EXIT
 make_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$stub_dir/$1"; chmod +x "$stub_dir/$1"; }
 make_stub notify-send 'exit 0'
@@ -863,7 +869,11 @@ J
       *) exit 1 ;;
     esac"
 }
-screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
+# MAINTAINER_PROFILE is named rather than left to a default: `maintainer` used
+# to fall back to "sysknife" when nothing said otherwise, and now enumerates the
+# deployed profiles and refuses. That refusal has its own test; these cases are
+# about how the screen classifies files, so they pin the profile.
+screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_PROFILE=sysknife MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
 screen_case() {  # $1 label, $2 expected substring
     out="$(screen_run)"
     if printf '%s' "$out" | grep -qF "$2"; then ok "$1"
@@ -1157,9 +1167,16 @@ done
 # The workflow needs no write access and no secrets.
 grep -q 'contents: read' "$root/.github/workflows/ci.yml" \
     && ok "CI asks for read-only permissions" || bad "CI does not restrict its permissions"
-grep -q 'secrets\.' "$root/.github/workflows/ci.yml" \
-    && bad "CI reads a secret; a fork's pull request must not be able to" \
-    || ok "CI reads no secrets, so a fork's PR is safe to run"
+# Comments stripped first. This grep ran over the whole file, so writing the
+# words `secrets.GITHUB_TOKEN` in a comment that EXPLAINS the policy failed the
+# check that enforces it. GITHUB_TOKEN itself is allowed: it is the automatic
+# token, scoped by `permissions:` above, and GitHub hands a fork's pull request
+# a read-only copy. Any other secret is a repository secret, which a fork's
+# `pull_request` run must never see.
+othersecret=$(sed 's/#.*//' "$root/.github/workflows/ci.yml" \
+    | grep -oE 'secrets\.[A-Za-z_][A-Za-z0-9_]*' | grep -v '^secrets\.GITHUB_TOKEN$' || true)
+if [ -z "$othersecret" ]; then ok "CI reads no repository secret, so a fork's PR is safe to run"
+else bad "CI reads a secret a fork's pull request must not be able to: $othersecret"; fi
 
 echo "== the merge gate verifies more than one language =="
 # It assumed Rust in four places: the image, the command, the mutation glob and
@@ -1388,6 +1405,121 @@ pg_case() {  # $1 pr, $2 head, $3 expected substring, $4 label
 }
 pg_case 21 "$pg_docs" "receipt still applies" "a docs-only move keeps the receipt"
 pg_case 22 "$pg_prod" "production code changed" "a rewrite of bin/ kills the receipt"
+
+echo "== a receipt cannot be written by anything but the gate =="
+# It used to be an unsigned JSON file whose only protection was a deny rule on
+# one CLI verb, while the deny wall emits only Bash() and Read() rules. An agent
+# with an ordinary write tool could create the file by hand, with
+# "kind": "observed", and merge without ever running a mutation. That is
+# SECURITY.md's own first named threat.
+rk="$stub_dir/rkey"; printf 'deadbeefcafe\n' > "$rk"
+forge="$stub_dir/forged"; mkdir -p "$forge/receipts"
+make_stub gh 'case "$*" in *"api user"*) echo testuser;; esac; exit 0'
+printf '{"pr":1,"head":"abcdef1234567890","kind":"observed","proof":"written by hand"}\n' \
+    > "$forge/receipts/1.json"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+      bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'carries no signature'; then
+    ok "a hand-written receipt is refused"
+else
+    bad "a hand-written receipt merged or failed for another reason (rc=$rc)"
+fi
+# And one with a signature that does not match the payload.
+printf '{"pr":2,"head":"abcdef1234567890","kind":"observed","proof":"edited","signature":"00"}\n' \
+    > "$forge/receipts/2.json"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+      bash "$mg" merge 2 2>&1)
+printf '%s' "$out" | grep -q 'does not match its signature' \
+    && ok "a receipt edited after signing is refused" \
+    || bad "an edited receipt was accepted"
+
+echo "== an unattended run cannot assert; it can only observe =="
+# Signing alone does not separate an agent from a human: both run as this user,
+# so both can reach the key. What separates them is that `verify` records
+# something re-checkable and `receipt` records a sentence. So a run may not use
+# `receipt`, and may not merge on what `receipt` writes. Three layers, and only
+# the third is un-evadable by an agent that edits its own environment.
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      bash "$mg" receipt 3 abcdef1234567890 'I promise' 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'may not assert a receipt'; then
+    ok "a run is refused the receipt command"
+else
+    bad "a run wrote an asserted receipt (rc=$rc)"
+fi
+[ -f "$forge/receipts/3.json" ] && bad "the refusal still left a receipt on disk" \
+    || ok "the refusal wrote nothing"
+# Layer 2: the deny wall spells the command, in every profile.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    grep -q 'maintainer-merge receipt' "$pdj" \
+        && ok "$pn denies the receipt command to the agent" \
+        || bad "$pn lets an agent run maintainer-merge receipt"
+done
+# Layer 3, the one that holds when the other two are evaded: a properly signed
+# asserted receipt, written outside a run, is still refused inside one.
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    bash "$mg" receipt 4 abcdef1234567890 'proved by hand' >/dev/null 2>&1
+if [ -f "$forge/receipts/4.json" ]; then
+    ok "outside a run the receipt command still works"
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get('signature') and d['kind']=='asserted' else 1)" \
+        "$forge/receipts/4.json" && ok "and what it writes is signed and marked asserted" \
+        || bad "the asserted receipt is unsigned or mislabelled"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
+          MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
+          bash "$mg" merge 4 2>&1)
+    printf '%s' "$out" | grep -q "is 'asserted', not 'observed'" \
+        && ok "a run may not merge on an asserted receipt" \
+        || bad "a run merged on a claim nothing checked"
+else
+    bad "the receipt command wrote nothing outside a run"
+fi
+# A proof string is a human sentence, so it contains quotes. The heredoc that
+# used to write this file interpolated it raw and produced JSON merge could not
+# parse, and the refusal then blamed the receipt rather than the quoting.
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    bash "$mg" receipt 5 abcdef1234567890 'reverting `|| true` leaves it "green": 0 bytes' >/dev/null 2>&1
+python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$forge/receipts/5.json" 2>/dev/null \
+    && ok "a proof containing quotes and backticks still writes valid JSON" \
+    || bad "a quoted proof string produced an unparseable receipt"
+
+# The key must be denied to readers, in every profile.
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"
+    grep -q 'receipt.key' "$pdj" && ok "$pn denies the receipt key to readers" \
+        || bad "$pn leaves the receipt-signing key readable"
+done
+
+echo "== a pull request cannot ship a symlink into the tree the gate edits =="
+# The mutation step runs on the HOST, outside the container. A tracked symlink
+# harness.sh -> ~/.ssh/id_ed25519 survives git archive, and `sed -i` follows it:
+# the key's plaintext lands in the extracted tree, which is then bind-mounted
+# into the container where the pull request's own test can print it, and 200
+# characters of it land in the receipt. Every container flag is irrelevant,
+# because the read happens before the container exists.
+grep -q 'ships symlink' "$mg" && ok "verify refuses a tree containing a symlink" \
+    || bad "nothing stops a symlinked path being dereferenced on the host"
+grep -q 'find . -type f -name' "$mg" && ok "the mutation touches regular files only" \
+    || bad "the mutation step would still follow a symlink"
+# Demonstrated: sed -i through a symlink materialises the target.
+sl="$stub_dir/symlinkdemo"; mkdir -p "$sl"; secret="$stub_dir/fake-key"
+printf 'CANARY-KEY-MATERIAL\n' > "$secret"; ln -sf "$secret" "$sl/evil.sh"
+( cd "$sl" && find . -type f -name '*.sh' -print0 | xargs -0 -r sed -i 's/x/y/' )
+grep -q CANARY "$sl/evil.sh" && [ -L "$sl/evil.sh" ] \
+    && ok "with -type f the symlink is left alone" \
+    || bad "the symlink was dereferenced even with -type f"
+
+echo "== the merge is pinned to the head that was checked =="
+grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
+    || bad "a push landing mid-merge would be merged unchecked"
+echo "== naming a suite does not skip the coverage check =="
+grep -q 'does not cover every changed path' "$mg" \
+    && ok "an explicitly named suite must still cover the changed paths" \
+    || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

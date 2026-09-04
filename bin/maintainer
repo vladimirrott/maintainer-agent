@@ -33,7 +33,32 @@ from pathlib import Path
 # defaults, so a second profile printed its own header above the FIRST
 # profile's repository and run history. An adopter would have read another
 # project's runs and believed they were theirs.
-PROFILE = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+def _resolve_profile() -> str:
+    """Which profile, or refuse.
+
+    This was `os.environ.get("MAINTAINER_PROFILE", "sysknife")`: a hardcoded
+    default while lib/profile.sh and maintainer-doctor both enumerate and
+    refuse. With two profiles deployed and the variable unset, `maintainer
+    status` reported the wrong one and `maintainer run review` would have
+    started a real, posting run against the wrong repository. Guessing which
+    project to act on is the mistake this whole resolution exists to prevent.
+    """
+    named = os.environ.get("MAINTAINER_PROFILE")
+    if named:
+        return named
+    root = Path.home() / ".local/share/maintainer/profiles"
+    found = sorted(d.name for d in root.glob("*") if (d / "profile.env").exists()) \
+        if root.exists() else []
+    if len(found) == 1:
+        return found[0]
+    if not found:
+        return ""            # nothing deployed; the commands say so themselves
+    raise SystemExit(
+        f"maintainer: {len(found)} profiles are deployed ({', '.join(found)}).\n"
+        f"            Set MAINTAINER_PROFILE to say which one you mean.")
+
+
+PROFILE = _resolve_profile()
 # A profile name becomes a path AND, below, part of a shell command. Both need
 # it to be a plain name. Measured on 2026-09-03: MAINTAINER_PROFILE set to
 # `pwn"; touch /tmp/INJECTED; :"` with a matching directory ran the touch,
@@ -218,7 +243,10 @@ def refresh() -> tuple[str, str, list[str], list[str]]:
     if before != after:
         rng = f"{before}..{after}"
         log = run("git", "log", "--oneline", "--no-decorate", rng, check=False)
-        commits = [ln for ln in log.splitlines() if ln]
+        # Through the same filter as PR and issue titles. A squash-merge subject
+        # is usually the pull request title, so the same attacker-controlled text
+        # was filtered when read from the PR list and raw when read from the log.
+        commits = [safe_for_prompt(ln, 120) for ln in log.splitlines() if ln]
 
     prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
                   "--json", "number,headRefOid,updatedAt,title,author")
@@ -426,6 +454,13 @@ def cmd_screen(pr: str) -> None:
 
 
 def cmd_start(skill: str) -> None:
+    # A hyphen in a task name breaks two things quietly: run.sh builds
+    # MODEL_$task as a shell variable name, and cmd_finish recovers the task
+    # from the run id by taking the text after the last hyphen. Refuse at the
+    # boundary rather than let the baseline silently never promote.
+    if "-" in skill:
+        raise SystemExit(f"maintainer: task names cannot contain a hyphen ({skill!r}): "
+                         "run.sh builds MODEL_<task> as a shell variable name")
     if skill not in TASKS:
         raise SystemExit(f"maintainer: unknown task {skill!r}; this profile runs {', '.join(TASKS)}")
     for d in (RUNS, STATE, DRAFTS):
@@ -505,9 +540,21 @@ def cmd_finish(run_id: str) -> None:
         fh.write(line)
     skill = run_id.split("-")[-1].split(".")[0]
     pending = STATE / f"pending-{skill}.json"
-    if pending.exists() and json.loads(pending.read_text()).get("run_id") == run_id:
-        (STATE / f"last-{skill}.json").write_text(pending.read_text())
-        pending.unlink()
+    if pending.exists():
+        # A corrupt pending file used to raise here, AFTER the run was written
+        # into the index, so run.sh reported "produced no report; the run is not
+        # auditable" about a run whose report existed and was indexed. Name the
+        # actual fault instead.
+        try:
+            same = json.loads(pending.read_text()).get("run_id") == run_id
+        except json.JSONDecodeError:
+            print(f"maintainer: {pending} is corrupt, so the baseline was NOT promoted. "
+                  f"The report is written and indexed. Delete or repair that file; "
+                  f"the next run will re-review everything since the last good baseline.")
+            return
+        if same:
+            (STATE / f"last-{skill}.json").write_text(pending.read_text())
+            pending.unlink()
     print(f"maintainer: recorded {run_id} in {INDEX}")
 
 

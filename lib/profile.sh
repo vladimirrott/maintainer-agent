@@ -12,7 +12,16 @@
 maintainer_load_profile() {
     # run.sh exports these, and they win: a tool called from inside a run acts
     # on that run's repository and nothing else.
-    if [ -n "${MAINTAINER_SLUG:-}" ] && [ -n "${MAINTAINER_REPO:-}" ]; then
+    #
+    # Every variable a tool reads has to be here, not just the two that name the
+    # repository. This returned early on SLUG and REPO alone while
+    # maintainer-merge reads MAINTAINER_ACCOUNT under `set -u`, so the merge
+    # gate died with "MAINTAINER_ACCOUNT: unbound variable" on every call from
+    # inside a run, which is the only way an agent ever calls it. The audited
+    # merge path did not work when exercised. The tests missed it because they
+    # set up a MORE complete environment than production provides.
+    if [ -n "${MAINTAINER_SLUG:-}" ] && [ -n "${MAINTAINER_REPO:-}" ] \
+       && [ -n "${MAINTAINER_ACCOUNT:-}" ] && [ -n "${MAINTAINER_STATE:-}" ]; then
         return 0
     fi
 

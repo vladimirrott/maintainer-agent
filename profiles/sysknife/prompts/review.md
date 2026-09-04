@@ -25,9 +25,11 @@ working directory `$HOME/Desktop/lacs`, push account `vladimirrott`.
    public thread that the rest is handled privately. Never describe the exploit
    publicly.
 
-You may not merge. When a PR is genuinely ready, say so in the review, apply no
-merge, and put it at the top of the run report under a heading
-`## Ready to merge, awaiting Vladimir` with the exact command he should run.
+Merging goes through the gate and nowhere else. When a pull request is ready and
+the gate refuses, report the refusal rather than working around it: put the pull
+request at the top of the run report under a heading
+`## Ready to merge, awaiting Vladimir`, with the exact commands he should run and
+what the gate said.
 
 ## Reserved issues: do not offer #345, #327 or #356
 
