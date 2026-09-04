@@ -11,7 +11,12 @@
 # four of five pins as wrong, which is a flag rate that means the checker is
 # broken rather than the tree.
 set -uo pipefail
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# Takes an optional repository root, so the check can be pointed at any
+# checkout rather than only the one it lives in. sysknife has no pin verifier of
+# its own and carries the same stale actions/deploy-pages pin this repository
+# copied from it.
+root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+[ -d "$root/.github/workflows" ] || { echo "verify-action-pins: no .github/workflows under $root" >&2; exit 2; }
 fail=0
 
 deref() {  # $1 repo, $2 tag -> the commit that tag names
