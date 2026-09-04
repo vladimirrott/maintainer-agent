@@ -493,3 +493,34 @@ turns it red naming both.
 
 This is the third time a check in this repository has passed or failed for a
 reason unrelated to what it was checking. The other two are in §5.
+
+
+## 25. The receipt-invalidation check named one project's directories
+
+`maintainer-merge` decided whether production code had moved under a receipt by
+diffing against a fixed list: `crates/*/src/*`, `apps/*/src/*`, `packaging/*`,
+`.github/*`, `*/Cargo.toml`, `Cargo.lock`. Those are sysknife's directories.
+
+On **any other repository they match almost nothing**. Measured on this one: of
+the files in the last three commits, exactly one was on the list. A pull request
+could earn a receipt at one head, push a rewritten `bin/maintainer-merge` at the
+next, and the gate would report
+
+    head moved …, no production diff; receipt still applies
+
+That is a merge against a receipt describing a tree that is gone, which is the
+single failure the receipt exists to prevent. Same shape as the Rust-only
+`verify` in §22: a central guarantee that silently only worked for the project
+it was written against.
+
+`maintainer-repo release-check` had the same list and therefore reported "docs
+and tests only" for a release containing fourteen changed production files.
+
+**Guard:** `PROD_GLOBS` comes from the profile, there is no default, and a
+profile that declares none is refused a merge. Guessing which paths are
+production is how the original bug worked. Two tests drive a real repository:
+a docs-only move keeps the receipt, a rewrite of `bin/` kills it.
+
+Restoring the hardcoded list turns both red. It also turned twelve older tests
+red, because they had never declared production paths and the gate now refuses
+without them, which is the fail-closed behaviour finding under-specified tests.

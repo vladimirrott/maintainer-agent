@@ -26,7 +26,21 @@ POST="${MAINTAINER_POST:-on}"
 # Paths whose change invalidates a receipt. Tests, docs and the evidence
 # artifact may move between the verified head and the merged one; production
 # code and CI configuration may not.
-PROD_GLOBS=('crates/*/src/*' 'apps/*/src/*' 'packaging/*' '.github/*' '*/Cargo.toml' 'Cargo.lock')
+# Paths whose change invalidates a receipt. Tests, docs and evidence artifacts
+# may move between the verified head and the merged one; production code and CI
+# configuration may not.
+#
+# This was a hardcoded list of sysknife's directories, which meant that on every
+# other repository it named paths that do not exist. A pull request could earn a
+# receipt at one head, then push a rewritten bin/ or lib/ at the next, and the
+# gate would report "no production diff; receipt still applies" because bin/ was
+# not on sysknife's list. That is a merge against a receipt describing a tree
+# that is gone, which is the exact failure the receipt exists to prevent.
+#
+# It comes from the profile now, and a profile that does not declare it gets no
+# merge. There is no default: guessing which paths are production is how the
+# original bug worked.
+read -r -a PROD_GLOBS <<< "${PROD_GLOBS:-}"
 
 die() { printf 'maintainer-merge: %s\n' "$1" >&2; exit 1; }
 say() { printf '  %s\n' "$1"; }
@@ -247,6 +261,9 @@ cmd_show() {
 
 cmd_merge() {
     local pr="${1:?pr}"
+    [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
+  whether production code moved since the receipt. Set it in profile.env, for example:
+    PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
     identity
 
     local receipt="$RECEIPTS/$pr.json"

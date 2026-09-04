@@ -72,7 +72,7 @@ refuses unless **all** of these hold:
 | Condition | Why |
 |---|---|
 | a **verification receipt** exists for the PR | somebody mutated the guard and watched it go red |
-| **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved `crates/*/src`, `.github` or a manifest, the receipt describes a tree that is gone |
+| **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved anything the profile calls production, the receipt describes a tree that is gone. The paths come from `PROD_GLOBS` in the profile, and a profile that declares none gets no merge |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
 | zero failing **and zero pending** checks | pending is not green |
 | `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
@@ -444,7 +444,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-four entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the twenty-five entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -472,12 +472,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 340 offline tests
+./tests/run-tests.sh        # 347 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-340 offline tests: no network, no GitHub, no model call. Every case tests a
+347 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

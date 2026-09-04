@@ -175,6 +175,10 @@ grep -q 'report not yet written' "$root/bin/maintainer" \
 echo "== the merge gate refuses without a valid receipt =="
 mg="$root/bin/maintainer-merge"
 export MAINTAINER_STATE="$stub_dir/state" MAINTAINER_ACCOUNT="testuser" MAINTAINER_SLUG="o/r" MAINTAINER_REPO="$stub_dir/repo"
+# These cases are about the other conditions, so they need a profile that has
+# declared its production paths. A merge with none declared is refused, which is
+# asserted on its own just below.
+export PROD_GLOBS="crates/*/src/*"
 mkdir -p "$MAINTAINER_STATE" "$MAINTAINER_REPO"
 
 # Identity is checked before anything else.
@@ -1325,6 +1329,65 @@ grep -q '"prune", "--dry-run"' "$mcp" && ok "prune over MCP is always a dry run"
 grep -q 'maintainer-merge", "merge"' "$mcp" \
     && ok "merge shells out to the gate rather than reimplementing it" \
     || bad "MCP does not route merges through maintainer-merge"
+
+echo "== the receipt dies on the paths THIS repository calls production =="
+# The globs were sysknife's directory names, so on any other repository they
+# matched nothing: a pull request could earn a receipt at one head, push a
+# rewritten bin/ at the next, and the gate would say "no production diff,
+# receipt still applies". A merge against a receipt describing a tree that is
+# gone is the exact failure the receipt exists to prevent.
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    grep -q '^PROD_GLOBS=' "$pe" && ok "$pn declares which paths are production" \
+        || bad "$pn declares no PROD_GLOBS, so a receipt can survive a rewrite"
+done
+grep -q 'PROD_GLOBS:-' "$root/bin/maintainer-merge" \
+    && ok "the gate reads the globs from the profile" \
+    || bad "the gate still carries a hardcoded production path list"
+# Executed, not grepped: a merge with no production paths declared must refuse.
+out=$(env -u PROD_GLOBS PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/state" \
+      MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
+      bash "$mg" merge 1 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'declares no PROD_GLOBS'; then
+    ok "a profile with no globs is refused a merge, not given a default"
+else
+    bad "the gate merged, or failed for another reason, with no production paths declared (rc=$rc)"
+fi
+
+# Executed, against a real repository, on a path THIS profile calls production.
+pg="$stub_dir/prodglobs"; rm -rf "$pg"; mkdir -p "$pg/bin" "$pg/docs"
+git -C "$pg" init -q -b main; git -C "$pg" config user.email t@t; git -C "$pg" config user.name t
+echo "code" > "$pg/bin/tool"; echo "words" > "$pg/docs/x.md"
+git -C "$pg" add -A; git -C "$pg" commit -qm base
+pg_verified="$(git -C "$pg" rev-parse HEAD)"
+echo "changed" > "$pg/docs/x.md"; git -C "$pg" add -A; git -C "$pg" commit -qm docs
+pg_docs="$(git -C "$pg" rev-parse HEAD)"
+echo "rewritten" > "$pg/bin/tool"; git -C "$pg" add -A; git -C "$pg" commit -qm prod
+pg_prod="$(git -C "$pg" rev-parse HEAD)"
+git -C "$pg" remote add origin "$pg"
+git -C "$pg" update-ref refs/pull/21/head "$pg_docs"
+git -C "$pg" update-ref refs/pull/22/head "$pg_prod"
+pg_case() {  # $1 pr, $2 head, $3 expected substring, $4 label
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/pgstate" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$pg" PROD_GLOBS="bin/*" \
+        bash "$mg" receipt "$1" "$pg_verified" "proved" >/dev/null 2>&1
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $2;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) echo '[{\"name\":\"x\",\"bucket\":\"pass\"}]';;
+      *'pr merge'*) echo MERGED_STUB;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/pgstate" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$pg" PROD_GLOBS="bin/*" MAINTAINER_POST=off \
+          bash "$mg" merge "$1" 2>&1)
+    printf '%s' "$out" | grep -q "$3" && ok "$4" \
+        || bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"
+}
+pg_case 21 "$pg_docs" "receipt still applies" "a docs-only move keeps the receipt"
+pg_case 22 "$pg_prod" "production code changed" "a rewrite of bin/ kills the receipt"
 
 printf '\n  %d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

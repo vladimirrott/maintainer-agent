@@ -88,7 +88,17 @@ cmd_release_check() {
     # "security" and scored a genuine authorization fix as zero, because its
     # subject was "fix(daemon): gate mutating query actions".
     local prod unrel sec added breaking
-    prod="$(git diff --name-only "$tag"..origin/main -- 'crates/*/src/*' 'apps/*/src/*' | wc -l)"
+    # Same fix as the merge gate: these were sysknife's directories, so on any
+    # other repository the count was zero and every release looked like "docs
+    # and tests only".
+    local -a globs; read -r -a globs <<< "${PROD_GLOBS:-}"
+    if [ "${#globs[@]}" -eq 0 ]; then
+        say "WARNING: this profile declares no PROD_GLOBS, so the production-file"
+        say "         count below is meaningless. Set it in profile.env."
+        prod=0
+    else
+        prod="$(git diff --name-only "$tag"..origin/main -- "${globs[@]}" | wc -l)"
+    fi
     unrel="$(sed -n '/^## \[Unreleased\]/,/^## \[[0-9]/p' CHANGELOG.md 2>/dev/null)"
     sec="$(printf '%s' "$unrel" | grep -c '^### Security' || true)"
     added="$(printf '%s' "$unrel" | grep -c '^### Added' || true)"
@@ -122,7 +132,7 @@ cmd_release_check() {
     fi
     say ""
     say "Cutting one is a human decision: crates.io and npm versions can never be"
-    say "replaced. See docs/release.md for the fifteen version sites."
+    say "replaced."
 }
 
 case "${1:-}" in
