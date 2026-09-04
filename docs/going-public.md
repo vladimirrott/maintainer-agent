@@ -26,7 +26,7 @@ gh api -X PUT repos/vladimirrott/maintainer-agent/branches/main/protection --inp
 {
   "required_status_checks": {
     "strict": true,
-    "contexts": ["the four gates", "shellcheck", "the Windows installer parses"]
+    "contexts": ["the four gates", "shellcheck", "the Windows installer parses", "trufflehog"]
   },
   "enforce_admins": false,
   "required_pull_request_reviews": {"required_approving_review_count": 1},
@@ -45,11 +45,20 @@ that is not the one being merged.
 `enforce_admins` is false on purpose. An agent cannot merge here at all, and the
 person who can needs a way to land a fix when CI itself is broken.
 
-## 3. The social preview — still to do
+## 3. The social preview — STILL NOT DONE
 
-No API exists for this. Settings, General, Social preview, Upload an image, then
-pick `assets/social-preview.png`. It is already 1280x640 and 35KB, which is what
-GitHub asks for.
+Confirmed still missing on 2026-09-04:
+
+```sh
+$ gh api repos/vladimirrott/maintainer-agent --jq .open_graph_image_url
+null
+```
+
+There is no REST endpoint for it, so it cannot be scripted. Settings, General,
+Social preview, Upload an image, then pick `assets/social-preview.png`. It is
+1280x640 and 49KB, which is the size GitHub asks for. Until it is uploaded,
+every link to this repository on Slack, X or Hacker News renders GitHub's
+default grey card.
 
 ## 4. What the leak check does and does not cover
 

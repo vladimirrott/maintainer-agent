@@ -110,9 +110,11 @@ So merging is gated on a **verification receipt**, not on a green board:
    changed since the head the receipt names**.
 
 That last condition is the one carrying the weight. A rebase may move tests,
-docs and the evidence artifact; if it moved `crates/*/src`, `apps/*/src`,
-`packaging`, `.github` or a manifest, the receipt describes a tree that no
-longer exists and the merge is refused.
+docs and the evidence artifact; if it moved anything the profile lists in
+`PROD_GLOBS`, the receipt describes a tree that no longer exists and the merge
+is refused. Those paths are the profile's, not the tool's: they were hardcoded
+to one project's directories once, which meant that on every other repository
+the rule compared nothing and reported that the receipt still applied.
 
 An empty check list is treated as a failure, not as green. That distinction has
 a repository behind it: this project's recurring defect is a test that passes

@@ -3,7 +3,18 @@
 Written 2026-09-04. Everything here is either not obvious or has a way of going
 wrong that is worth naming before starting. The easy work is not in this file.
 
+**All six shipped in [v0.2.0](../CHANGELOG.md), the same day.** The file stays
+as the record of what was expected to be hard and what the difficulty turned out
+to be, which is not the same thing in four of the six. Each section carries what
+actually happened.
+
 ## 1. Forty maintainer situations, and what to do with them
+
+> **Shipped.** `docs/user-stories.md`, forty stories, fourteen gaps, tracked as
+> issue #13. The count came out where it was expected to: uncomfortable, and
+> clustered on declining work and closing things. `scripts/check_claims.sh` now
+> reads the gap list back out of the file, so the finding cannot drift from the
+> markers under it.
 
 **The trap:** turning forty situations into forty eval scenarios. Each scenario
 costs a fixture, a rule, a mapping entry and a place in every profile's
@@ -38,6 +49,11 @@ uncomfortable.
 
 ## 2. Showing which version is running
 
+> **Shipped.** `install.sh` stamps `$share/VERSION`, `maintainer version` prints
+> it, and `maintainer status` says in yellow when the checkout is ahead of what is
+> deployed. Working as designed on this host today: it caught a two-commit drift
+> while I was editing.
+
 **Why it is hard:** the agent is a set of prompts and shell scripts assembled at
 run time from a deployed tree that can be older than the repository. There are
 three versions in play and they disagree in normal use:
@@ -69,6 +85,8 @@ doctor's existing drift check is the place to catch edits, not the stamp.
 
 ## 3. Better UX generally
 
+> **Shipped**, and the trap held: every change was output-only.
+
 The commands are correct and the first minute is unfriendly. Concretely:
 
 - **`maintainer` with no arguments prints a docstring.** It should print what
@@ -87,6 +105,13 @@ The commands are correct and the first minute is unfriendly. Concretely:
 be output-only, or it needs the same mutation proof as anything else.
 
 ## 4. Opus with a high thinking budget
+
+> **Shipped.** `THINKING_<task>` per profile, exported by `lib/backends/claude.sh`
+> as `MAX_THINKING_TOKENS`. The unexpected part: `profiles/magent` was generated
+> from the template *before* the template grew those lines, so it ran on the
+> backend default and nothing said so. A missing budget is a default, not an
+> error. The suite now requires every profile to declare a model and a budget for
+> every task in its `TASKS`.
 
 **The ask:** run the sysknife profile on Claude Code with Opus and a high
 reasoning effort.
@@ -107,6 +132,11 @@ run is the measurement, the same way the `MAINTAINER_FORCE` leak was found.
 
 ## 5. The agent maintaining itself, on a timer
 
+> **Shipped**, and the order below was followed with one correction. `install.sh
+> --timers` enables every task of every profile, so it turned on `magent-issues`
+> too; that timer was disabled again by hand to match this section. There is no
+> way to enable one task from the installer, which is worth an issue.
+
 `profiles/magent` exists and has run twice by hand at `POST=off`. Turning its
 timers on is one command, and it is the last step rather than the first: an
 agent that reviews its own repository can change the rules it is reviewed under.
@@ -116,6 +146,11 @@ agent produced it. Then enable review only, leave `POST=off`, and read a week.
 `issues` stays off until the review reports are boring.
 
 ## 6. Cutting the release
+
+> **Shipped**, and writing the CHANGELOG found two defects in `release-check`
+> itself. Its "the Unreleased section is empty" warning had never printed once,
+> because sed prints both delimiters and an empty section came back as two heading
+> lines. See `docs/lessons.md` entry 28.
 
 `maintainer-repo release-check` reads the CHANGELOG's Unreleased section, and
 that section is currently empty while eight commits have landed since v0.1.0.

@@ -96,4 +96,37 @@ claim '[0-9]+ (offline )?tests'     "$tests_actual"    "tests"
 claim '[0-9]+ (adversarial )?eval'  "$evals_actual"    "eval scenarios"
 claim '[0-9]+ denied verbs'         "$deny_actual"     "denied verbs"
 
+# docs/user-stories.md states a gap count AND the list of story numbers behind
+# it. Nothing checked either, so an edit that resolved a story would have left
+# the finding claiming a number the file no longer supported. Both sides are
+# read from the same file, which is the point: the prose has to agree with the
+# markers under it.
+python3 - "$root/docs/user-stories.md" <<'PYEOF'
+import re, sys
+t = open(sys.argv[1]).read()
+parts = re.split(r'^\*\*(\d+)\.', t, flags=re.M)
+gaps = [int(parts[i]) for i in range(1, len(parts), 2) if '[GAP]' in parts[i + 1]]
+total = len(parts) // 2
+words = {14: 'Fourteen', 13: 'Thirteen', 12: 'Twelve', 11: 'Eleven', 10: 'Ten',
+         15: 'Fifteen', 16: 'Sixteen', 9: 'Nine', 8: 'Eight'}
+# The list wraps across lines in the file, so the class has to admit a
+# newline. Without it the check read only the first line's numbers and
+# reported "the listed numbers are not the marked ones" against itself.
+m = re.search(r'\*\*(\w+) of (\w+) have no governing rule\*\*:([0-9,\s]+)\.', t)
+if not m:
+    sys.exit('FAIL: user-stories.md no longer states its finding in the form the check reads')
+claimed = [int(x) for x in re.split(r'[,\s]+', m.group(3).strip()) if x]
+errs = []
+if m.group(1) != words.get(len(gaps), '?'):
+    errs.append(f"the finding says {m.group(1)}, the file marks {len(gaps)} gaps")
+if claimed != sorted(gaps):
+    errs.append(f"the listed numbers {claimed} are not the marked ones {sorted(gaps)}")
+if m.group(2) != 'forty' or total != 40:
+    errs.append(f"the finding says {m.group(2)} stories, the file has {total}")
+if errs:
+    sys.exit('FAIL: ' + '; '.join(errs))
+print(f"  ok: user stories = {total}, gaps = {len(gaps)}, and the listed numbers are the marked ones")
+PYEOF
+[ $? = 0 ] || fail=1
+
 exit "$fail"
