@@ -524,3 +524,41 @@ a docs-only move keeps the receipt, a rewrite of `bin/` kills it.
 Restoring the hardcoded list turns both red. It also turned twelve older tests
 red, because they had never declared production paths and the gate now refuses
 without them, which is the fail-closed behaviour finding under-specified tests.
+
+## 26. A guard that refuses the repository's own layout
+
+The gate refused every symlink in the extracted tree, on the grounds that
+`sed -i` follows one off the host. Run against a real pull request it refused
+`docs/images/social-preview.png -> ../../assets/social-preview.png`: a link that
+had been on `main` for months, that the pull request did not touch, and that
+resolves two directories away from where it sits. The message blamed the
+contributor for the repository's layout.
+
+The exploit is real and was reproduced end to end, but the property that matters
+is whether the link leaves the tree, and the mutation step had already been
+narrowed to `find -type f`, which never matches a symlink at all. Now the scan
+reports only links whose target resolves outside the extracted root, and the two
+tests that covered it were `grep -q 'ships symlink' bin/maintainer-merge`, which
+passes for any file containing that phrase. They drive the function.
+
+**Measure the property, not the shape.** A guard written against the shape of an
+attack refuses the shape wherever it appears, including in the tree it is
+supposed to protect.
+
+## 27. The container runtime wrote the evidence
+
+podman prints `time="..." level=warning msg="Error validating CNI config file
+..."` on every run on this machine, onto the same stderr the container uses. That
+one line did two things to the receipt for a live pull request. It was the first
+line matching the failure grep, so `observed_failure` recorded a CNI warning
+where the proof belongs. And it is bytes, so the shell suite's `suite_ran` check,
+whose whole job is to refuse a receipt for a run that executed nothing, counted
+it as evidence that something ran.
+
+A missing optional function did the same thing louder: `suite_podman_args:
+command not found`, ten times, inflating `units_run` from 2 to 10.
+
+**A log read as evidence must contain only the thing being measured.** The
+runtime now runs at `--log-level=error`, the extractor drops logfmt lines, and
+when nothing matches the failure pattern it falls back to the last line printed
+rather than recording an empty string.

@@ -92,6 +92,28 @@ worthless, and it cannot be generic: cargo prints `test result: ok. N passed`, a
 shell test prints whatever its author chose. **A profile with no suite covering
 the changed paths is refused rather than run under the wrong one.**
 
+The `sysknife` profile ships three: `rust` runs `cargo nextest` and mutates
+`*.rs`, `shell` runs a script under `bash:5` and mutates `*.sh`, `docs` runs the
+prose claim screen under `python:3.12-slim` and mutates `*.md`. Each of the last
+two was written because a real pull request could not be merged without it, and
+refusing to merge is the safe outcome, so both gaps were invisible until someone
+hit them.
+
+A receipt comes in two kinds, and only one of them merges unattended:
+
+| kind | written by | who may merge on it |
+|---|---|---|
+| `observed` | `maintainer-merge verify`, which runs the mutation and records what it saw | anyone, including a timer |
+| `asserted` | `maintainer-merge receipt`, which records a sentence a human typed | a human only |
+
+Signing stops a receipt being written with a text editor, and that is all it
+stops: the agent runs as the same user as its owner, so it can reach the same
+key. What separates them is that `verify` records something a reader can
+re-check. So `receipt` refuses to run inside a run, the deny wall spells the
+command, and `merge` refuses any receipt that is not `observed` while a run is in
+progress. Only the third of those survives an agent editing its own environment,
+which is why it exists.
+
 Every refusal path is tested, including both directions of the production-diff
 rule against a real git repository.
 
@@ -472,12 +494,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 366 offline tests
+./tests/run-tests.sh        # 375 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-366 offline tests: no network, no GitHub, no model call. Every case tests a
+375 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

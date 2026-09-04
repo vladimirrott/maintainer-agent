@@ -1494,15 +1494,35 @@ for pdj in "$root"/profiles/*/deny.json; do
         || bad "$pn leaves the receipt-signing key readable"
 done
 
-echo "== a pull request cannot ship a symlink into the tree the gate edits =="
+echo "== a symlink may not leave the tree the gate edits =="
 # The mutation step runs on the HOST, outside the container. A tracked symlink
 # harness.sh -> ~/.ssh/id_ed25519 survives git archive, and `sed -i` follows it:
 # the key's plaintext lands in the extracted tree, which is then bind-mounted
 # into the container where the pull request's own test can print it, and 200
 # characters of it land in the receipt. Every container flag is irrelevant,
 # because the read happens before the container exists.
-grep -q 'ships symlink' "$mg" && ok "verify refuses a tree containing a symlink" \
-    || bad "nothing stops a symlinked path being dereferenced on the host"
+# Driven through the real function rather than grepped out of the source. The
+# first two cases here were `grep -q 'ships symlink' "$mg"`, which passes for any
+# file that contains the words and says nothing about what the gate does.
+esc() { ( . "$mg" >/dev/null 2>&1; tree_escapes "$1" ) 2>/dev/null; }
+tr1="$stub_dir/tree1"; mkdir -p "$tr1/docs/images" "$tr1/assets"
+printf 'png\n' > "$tr1/assets/social.png"
+ln -sf ../../assets/social.png "$tr1/docs/images/social.png"
+[ -z "$(esc "$tr1")" ] && ok "an in-tree relative symlink is allowed" \
+    || bad "a repository's own docs symlink is refused: $(esc "$tr1")"
+outside="$stub_dir/outside-key"; printf 'CANARY\n' > "$outside"
+ln -sf "$outside" "$tr1/harness.sh"
+printf '%s' "$(esc "$tr1")" | grep -q 'harness.sh' \
+    && ok "a symlink to an absolute path outside the tree is reported" \
+    || bad "an escaping symlink was not reported"
+rm -f "$tr1/harness.sh"
+ln -sf ../../../../etc/passwd "$tr1/docs/images/trav.sh"
+printf '%s' "$(esc "$tr1")" | grep -q 'trav.sh' \
+    && ok "a ../ traversal out of the tree is reported" \
+    || bad "a traversing symlink was not reported"
+rm -f "$tr1/docs/images/trav.sh"
+[ -z "$(esc "$tr1")" ] && ok "and the tree reads clean once it is removed" \
+    || bad "the scan reports an escape that is no longer there"
 grep -q 'find . -type f -name' "$mg" && ok "the mutation touches regular files only" \
     || bad "the mutation step would still follow a symlink"
 # Demonstrated: sed -i through a symlink materialises the target.
@@ -1512,6 +1532,38 @@ printf 'CANARY-KEY-MATERIAL\n' > "$secret"; ln -sf "$secret" "$sl/evil.sh"
 grep -q CANARY "$sl/evil.sh" && [ -L "$sl/evil.sh" ] \
     && ok "with -type f the symlink is left alone" \
     || bad "the symlink was dereferenced even with -type f"
+
+echo "== the container runtime's own noise is not evidence =="
+# Measured on sysknife#365: podman writes
+#   time="..." level=warning msg="Error validating CNI config file ..."
+# to the same stderr the container uses, on every run. It became the receipt's
+# `observed_failure`, and it is enough bytes on its own to satisfy the shell
+# suite's proof that the test ran at all.
+noise="$stub_dir/noise.log"
+{ printf 'time="2026-09-04T06:43:41-06:00" level=warning msg="Error validating CNI config file"\n'
+  printf 'time="2026-09-04T06:43:41-06:00" level=error msg="failed to find plugin bridge"\n'
+  printf 'FAIL  story-7.sh header claims story 97\n'
+  printf 'some later error\n'; } > "$noise"
+ffl="$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )"
+[ "$ffl" = "FAIL  story-7.sh header claims story 97" ] \
+    && ok "the runtime's logfmt is skipped and the test's own line is taken" \
+    || bad "the receipt would record '$ffl'"
+printf 'time="x" level=warning msg="Error validating CNI config"\n' > "$noise"
+[ -z "$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )" ] \
+    && ok "a log that is only runtime noise yields no observed failure" \
+    || bad "runtime noise alone was recorded as the observed failure"
+# A failure that matches no Rust-shaped keyword still has to leave evidence.
+# sysknife's prose claim screen reports a mismatched figure in plain English, and
+# the receipt for #366 recorded an empty observed_failure the first time.
+{ printf 'Published figures match the evidence artifacts.\n'
+  printf 'README.md claims 9,999 Rust tests; the artifact records 1,837.\n'; } > "$noise"
+[ "$( . "$mg" >/dev/null 2>&1; first_failure_line "$noise" )" = \
+  "README.md claims 9,999 Rust tests; the artifact records 1,837." ] \
+    && ok "a plain-English failure falls back to the last line printed" \
+    || bad "a failure with no Rust keyword left the receipt with no evidence"
+grep -q '"\$rt" --log-level=error run' "$mg" \
+    && ok "the runtime is told to keep its warnings out of the log" \
+    || bad "runtime warnings still land in the log the byte count reads"
 
 echo "== the merge is pinned to the head that was checked =="
 grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
