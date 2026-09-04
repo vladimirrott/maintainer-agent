@@ -1790,6 +1790,129 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== the trail says what happened, including when nothing did =="
+tr1="$stub_dir/trail"; mkdir -p "$tr1/runs" "$tr1/logs" "$tr1/state" "$tr1/drafts"
+trrun() { MAINTAINER_STATE="$tr1" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=tr MAINTAINER_TASKS="review ci" \
+    python3 "$root/bin/maintainer" "$@" 2>&1; }
+
+# 1. A fixture is not a report. runs/2026-09-02T14-39-review.md in this
+# project's own trail is "baseline promotion test", indexed like a real run.
+printf '# 2026-01-01T00-00-review\n\nbaseline promotion test\n' \
+    > "$tr1/runs/2026-01-01T00-00-review.md"
+out="$(trrun finish 2026-01-01T00-00-review)"; rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'fixture rather than a report' \
+    && ok "a three-line fixture is refused rather than indexed" \
+    || bad "a fixture was indexed as a run (rc=$rc)"
+grep -q '2026-01-01T00-00-review' "$tr1/index.md" 2>/dev/null \
+    && bad "the refused fixture reached the index anyway" \
+    || ok "and it did not reach the index"
+# A real report still passes.
+printf '# 2026-01-02T00-00-review\n\nQueue empty. Checked five PRs.\n\nNothing posted.\n\nNothing merged.\n' \
+    > "$tr1/runs/2026-01-02T00-00-review.md"
+trrun finish 2026-01-02T00-00-review >/dev/null 2>&1
+grep -q '2026-01-02T00-00-review' "$tr1/index.md" 2>/dev/null \
+    && ok "a real report is still indexed" || bad "the fixture check refuses real reports"
+
+# 2. A run that died leaves an ABORTED line, not a gap. A gap reads as a run
+# that never started; 2026-09-03T07-52-review is the real case, and fifteen
+# comments went out under the same account in the hour after it.
+trrun abort 2026-01-03T00-00-review "the run wrote no usable report" >/dev/null 2>&1
+grep -q 'ABORTED' "$tr1/index.md" 2>/dev/null \
+    && ok "a run that produced nothing is recorded as ABORTED" \
+    || bad "a dead run leaves the index silent"
+
+# 3. The failure marker, the layer that cannot fail. notify-send guesses a
+# display and ends in `|| true`, so on a headless box a nightly failure reaches
+# nobody and says nothing about it.
+trrun failed review "backend claude unusable" /tmp/x.log >/dev/null 2>&1
+[ -f "$tr1/state/failed-review.json" ] && ok "a failure is written to disk" \
+    || bad "the only record of a failure is a desktop popup"
+trrun status 2>/dev/null | head -8 | grep -q 'FAILED' \
+    && ok "and maintainer status prints it without being asked" \
+    || bad "a recorded failure is invisible to the front door"
+# Driven through `finish`, not through `ok`. The first version of this called
+# `maintainer ok review`, which is a different code path, so deleting the
+# clear_failure call out of cmd_finish left the test green.
+printf '# 2026-01-04T00-00-review\n\nQueue empty.\n\nNothing posted.\n\nNothing merged.\n' \
+    > "$tr1/runs/2026-01-04T00-00-review.md"
+trrun finish 2026-01-04T00-00-review >/dev/null 2>&1
+[ -f "$tr1/state/failed-review.json" ] \
+    && bad "a run that finished properly left the previous failure marker standing" \
+    || ok "a run that finishes clears its own task's failure marker"
+# And only its own. A review succeeding says nothing about the ci sweep.
+trrun failed ci "postgres contract went red" >/dev/null 2>&1
+printf '# 2026-01-05T00-00-review\n\nQueue empty.\n\nNothing posted.\n\nNothing merged.\n' \
+    > "$tr1/runs/2026-01-05T00-00-review.md"
+trrun finish 2026-01-05T00-00-review >/dev/null 2>&1
+[ -f "$tr1/state/failed-ci.json" ] \
+    && ok "and leaves another task's failure alone" \
+    || bad "a review clearing the ci failure hides a red sweep"
+trrun ok ci >/dev/null 2>&1
+grep -q 'HELPER" failed' "$root/lib/run.sh" \
+    && ok "run.sh records the marker before it tries any channel" \
+    || bad "run.sh still bets everything on notify-send"
+grep -v '^[[:space:]]*#' "$root/lib/run.sh" | grep -q 'DISPLAY:-:1' \
+    && bad "run.sh still hardcodes DISPLAY=:1" \
+    || ok "the display is read from the session rather than assumed"
+grep -q 'MAINTAINER_ALERT_CMD' "$root/lib/run.sh" \
+    && ok "a profile can name its own escalation channel" \
+    || bad "there is no way to reach ntfy, mail or a webhook"
+
+echo "== a report is a claim; the transcript is the record =="
+# lessons.md 12: a report read `sysknife-maint screen 348 -> DO NOT EXECUTE` for
+# a command that had been renamed out of existence. Nothing compared the two.
+au="$stub_dir/audit"; mkdir -p "$au/runs" "$au/logs"
+aurun() { MAINTAINER_STATE="$au" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=au python3 "$root/bin/maintainer" audit "$@" 2>&1; }
+printf '# r\n\n```\n$ gh pr list --state open\n$ cargo nextest run --workspace\n```\n' \
+    > "$au/runs/2026-01-01T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-01T00-00-review.commands"
+out="$(aurun 2026-01-01T00-00-review)"
+printf '%s' "$out" | grep -q '1 of 2 quoted command' \
+    && ok "a command the report quotes and the record lacks is named" \
+    || bad "the audit did not notice a quoted command that never ran: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
+printf '%s' "$out" | grep -q 'cargo nextest run --workspace' \
+    && ok "and it prints which one" || bad "the audit says a count and not which command"
+# Commands the report RECOMMENDS are not claims. Only `$ ` inside a fence is.
+printf '# r\n\nRun `gh pr merge 7` yourself.\n\n```\n$ gh pr list --state open\n```\n' \
+    > "$au/runs/2026-01-02T00-00-review.md"
+printf '$ gh pr list --state open\n' > "$au/logs/2026-01-02T00-00-review.commands"
+aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
+    && ok "a command the report recommends is not counted as one it ran" \
+    || bad "the audit treats a recommendation as a claim, which fires on every report"
+# No record at all must read differently from a record that matched.
+rm -f "$au/logs/2026-01-02T00-00-review.commands"
+aurun 2026-01-02T00-00-review | grep -q 'no command record' \
+    && ok "a run with no transcript says so rather than passing" \
+    || bad "a missing transcript read as a clean audit"
+
+echo "== the state directory does not grow forever =="
+gcd="$stub_dir/gc"; mkdir -p "$gcd/logs" "$gcd/drafts/old" "$gcd/runs"
+printf 'x\n' > "$gcd/logs/ancient.log"; printf 'x\n' > "$gcd/logs/fresh.log"
+printf 'x\n' > "$gcd/drafts/old/d.md"; printf 'keep\n' > "$gcd/runs/report.md"
+touch -d '200 days ago' "$gcd/logs/ancient.log" "$gcd/drafts/old"
+gcrun() { MAINTAINER_STATE="$gcd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=gc python3 "$root/bin/maintainer" gc "$@" 2>&1; }
+gcrun --dry-run | grep -q 'would remove.*ancient.log' \
+    && ok "a dry run names what it would remove" || bad "gc --dry-run said nothing"
+[ -f "$gcd/logs/ancient.log" ] && ok "and removes nothing" || bad "the dry run deleted a file"
+gcrun >/dev/null 2>&1
+[ -f "$gcd/logs/ancient.log" ] && bad "gc kept a log past the window" \
+    || ok "a log past the window is removed"
+[ -f "$gcd/logs/fresh.log" ] && ok "a log inside the window is kept" \
+    || bad "gc deleted a recent log"
+[ -d "$gcd/drafts/old" ] && bad "gc kept a drafts directory past the window" \
+    || ok "a drafts directory past the window is removed"
+[ -f "$gcd/runs/report.md" ] \
+    && ok "runs/ is never pruned: it records what was published in your name" \
+    || bad "gc DELETED A RUN REPORT, which is the record of what was posted"
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    grep -q '^RETENTION_DAYS=' "$pe" && ok "$pn declares a retention window" \
+        || bad "$pn has no RETENTION_DAYS, so gc falls back to a default nobody chose"
+done
+
 echo "== a task that fans out declares the model its subagents get =="
 # A review fans out across files and dimensions. Running that on the main
 # loop's model pays opus prices for independent work sonnet does as well, and

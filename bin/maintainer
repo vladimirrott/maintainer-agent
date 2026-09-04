@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -399,6 +400,178 @@ def _sh(*args: str) -> tuple[int, str]:
     return p.returncode, p.stdout
 
 
+def cmd_abort(run_id: str, reason: str) -> None:
+    """Record that a run started and produced nothing.
+
+    A run that dies between its first log line and its report used to leave the
+    index with a gap in it, and a gap is indistinguishable from a run that never
+    started. `2026-09-03T07-52-review` is the case: a 22-line log holding the
+    task briefing and nothing else, no report, no index line, while fifteen
+    comments went out under the same account in the hour that followed. Reading
+    the index, that run did not happen.
+
+    The index is the document a reader trusts, so it is the one that has to say
+    so.
+    """
+    INDEX.parent.mkdir(parents=True, exist_ok=True)
+    if INDEX.exists() and f"`{run_id}`" in INDEX.read_text():
+        return
+    with INDEX.open("a") as fh:
+        fh.write(f"- `{run_id}`  {datetime.now().strftime('%Y-%m-%d %H:%M')}  "
+                 f"**ABORTED**, no report  ({safe_for_prompt(reason, 100)})\n")
+    print(f"maintainer: recorded {run_id} as ABORTED in {INDEX}")
+
+
+# A report is a claim. `<run>.commands` is the record. Nothing compared them.
+#
+# docs/lessons.md 12: a review report read `sysknife-maint screen 348 -> DO NOT
+# EXECUTE` for a command that had been renamed and no longer existed on PATH.
+# Either the agent ran the real one and copied a dead name out of the prompt, or
+# it ran nothing and wrote a plausible verdict. The trail could not tell those
+# apart. It can now, and until this nothing looked.
+#
+# Extraction is the part that needs care, and the reason this warns rather than
+# refuses. A report quotes four different kinds of command: ones the agent ran,
+# ones it recommends to a human, ones a contributor should run, and ones inside
+# a diff it is reviewing. Only the first is a claim. The convention that
+# separates them here is the `$ ` prefix inside a fenced block, which is what
+# these reports use for "I ran this" and what scripts/transcript.py writes for
+# a Bash tool call, so the two sides are comparable by construction.
+#
+# Refusing would lose a whole run over wording. A report that paraphrases a
+# command it did run is sloppy; one that quotes a command nothing executed is
+# the defect, and only a reader can tell which.
+def claimed_commands(report_text: str) -> list[str]:
+    out, fenced = [], False
+    for ln in report_text.splitlines():
+        if ln.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced:
+            continue
+        st = ln.strip()
+        if st.startswith("$ ") and len(st) > 2:
+            out.append(" ".join(st[2:].split()))
+    return out
+
+
+def _claim_in(claim: str, record: str) -> bool:
+    """Is this quoted command in the record, allowing for how reports quote.
+
+    Measured against a real report before this existed: 2 of 13 quoted commands
+    read as missing and both were artefacts of quoting, not of lying.
+
+      - `gh run list ... --json databaseId,status,... \\` : the report wrote an
+        ellipsis where the flags went. The command is in the record in full.
+      - `bash /tmp/fakerepo/tests/e2e/story-metadata.test.sh` : a line from
+        inside a harness script the agent wrote and ran. The record holds the
+        outer invocation, not each line the script then executed.
+
+    So: a claim carrying an explicit `...` is compared on the part before it,
+    because the author already said it was abridged, and a long claim matches on
+    a generous prefix. Both weaken the check, and the check is a warning whose
+    only job is to put a human's eye on the right line.
+    """
+    if claim in record:
+        return True
+    head = claim.split("...", 1)[0].strip() if "..." in claim else claim
+    if len(head) >= 12 and head in record:
+        return True
+    return len(claim) > 40 and claim[:40] in record
+
+
+def audit_run(run_id: str) -> tuple[str, list[str], int]:
+    """-> (verdict, unmatched claims, number of claims checked)."""
+    report = RUNS / f"{run_id}.md"
+    if not report.exists():
+        return "NO REPORT", [], 0
+    cmds = LOGS / f"{_log_stem(run_id)}.commands"
+    if not cmds.exists():
+        return "no command record: nothing to compare against", [], 0
+    record = cmds.read_text()
+    # Normalised on both sides. The record stores a Bash call as `$ <command>`
+    # with the agent's own whitespace, and a report re-wraps it.
+    flat = " ".join(record.split())
+    claims = claimed_commands(report.read_text())
+    if not claims:
+        return "the report quotes no executed command", [], 0
+    missing = [c for c in claims if not _claim_in(c, flat)]
+    if missing:
+        return f"{len(missing)} of {len(claims)} quoted command(s) are not in the record", missing, len(claims)
+    return f"all {len(claims)} quoted command(s) appear in the record", [], len(claims)
+
+
+def cmd_audit(which: str) -> None:
+    ids = ([p.stem for p in sorted(RUNS.glob("*.md"))] if which in ("--all", "")
+           else [which])
+    if not ids:
+        print("maintainer: no runs to audit")
+        return
+    worst = 0
+    for rid in ids:
+        verdict, missing, n = audit_run(rid)
+        flag = " "
+        if verdict.startswith("NO REPORT") or "are not in the record" in verdict:
+            flag, worst = "!", 1
+        elif "no command record" in verdict:
+            flag = "?"
+        print(f"{flag} {rid:26} {verdict}")
+        for m in missing:
+            print(f"      claimed, never run:  {safe_for_prompt(m, 100)}")
+    if worst:
+        print("\n! a report quotes a command the transcript does not contain. That is")
+        print("  sloppy wording or a claim nothing executed, and only reading it tells")
+        print("  you which.")
+    print("? no command record exists for that run, so nothing could be compared.")
+
+
+def cmd_gc(dry: bool) -> None:
+    """Prune logs and drafts past the retention window. Never runs/ or index.md.
+
+    A state directory that only grows is how a tool becomes something people
+    delete rather than something they keep. Four tasks over a year is on the
+    order of a thousand runs, each leaving a log, a command record, a usage
+    record and a drafts directory.
+
+    What is kept forever, deliberately: `runs/` and `index.md`. Those are the
+    record of what this agent published in somebody's name, and `install.sh
+    --uninstall` already refuses to delete them. A retention policy that can
+    erase the evidence of a post is not a retention policy.
+    """
+    days = _ENV.get("RETENTION_DAYS", "").strip()
+    days = int(days) if days.isdigit() else 90
+    cutoff = datetime.now().timestamp() - days * 86400
+    freed, kept, n = 0, 0, 0
+    for base in (LOGS, DRAFTS):
+        if not base.exists():
+            continue
+        for entry in sorted(base.iterdir()):
+            try:
+                mtime = entry.stat().st_mtime
+            except OSError:
+                continue
+            size = sum(f.stat().st_size for f in entry.rglob("*") if f.is_file()) \
+                if entry.is_dir() else entry.stat().st_size
+            if mtime >= cutoff:
+                kept += size
+                continue
+            n += 1
+            freed += size
+            if dry:
+                print(f"  would remove  {entry.relative_to(ROOT)}  ({size} bytes)")
+            else:
+                if entry.is_dir():
+                    shutil.rmtree(entry, ignore_errors=True)
+                else:
+                    entry.unlink(missing_ok=True)
+                print(f"  removed  {entry.relative_to(ROOT)}  ({size} bytes)")
+    verb = "would free" if dry else "freed"
+    print(f"maintainer: {verb} {freed} bytes across {n} item(s) older than {days} days; "
+          f"{kept} bytes kept")
+    print(f"            runs/ and index.md are never pruned: they record what was "
+          f"published in your name")
+
+
 def cmd_screen(pr: str) -> None:
     """Say whether a PR may be executed on the host, and why not when it may not.
 
@@ -483,6 +656,12 @@ def cmd_start(skill: str) -> None:
                          "run.sh builds MODEL_<task> as a shell variable name")
     if skill not in TASKS:
         raise SystemExit(f"maintainer: unknown task {skill!r}; this profile runs {', '.join(TASKS)}")
+    # An empty command record, created up front. Without this a run that died
+    # before the backend produced anything leaves no .commands file at all, and
+    # "the transcript recorded nothing" reads identically to "no transcript was
+    # ever kept". Seven of this project's first nine runs are the second kind
+    # and cannot now be told apart from the first.
+    LOGS.mkdir(parents=True, exist_ok=True)
     for d in (RUNS, STATE, DRAFTS):
         d.mkdir(parents=True, exist_ok=True)
 
@@ -494,6 +673,7 @@ def cmd_start(skill: str) -> None:
     while (RUNS / f"{run_id}.md").exists():
         suffix += 1
         run_id = f"{stamp}-{skill}.{suffix}"
+    (LOGS / f"{_log_stem(run_id)}.commands").touch(exist_ok=True)
     before, after, commits, notes = refresh()
 
     state_file = STATE / f"last-{skill}.json"
@@ -549,6 +729,22 @@ def cmd_finish(run_id: str) -> None:
         raise SystemExit(
             f"maintainer: {report} still opens with the placeholder line, so the run "
             f"wrote no report. Replace the whole file, then finish.")
+    # A fixture is not a report. `runs/2026-09-02T14-39-review.md` in this
+    # project's own trail reads, in full, "# <run id>" and "baseline promotion
+    # test": something typed by hand while testing baseline promotion, indexed
+    # in the same format as every genuine run, with a working link. The
+    # sentinel check above exists for exactly this and its list only covers the
+    # placeholder the tooling writes.
+    #
+    # The bar is deliberately low. A real report has a heading and some prose;
+    # anything under it was not written by a run that did work.
+    body = [ln for ln in report.read_text().splitlines()[1:] if ln.strip()]
+    if len(body) < 3:
+        raise SystemExit(
+            f"maintainer: {report} has {len(body)} non-empty line(s) below its heading, "
+            f"which is a fixture rather than a report. It is NOT being indexed.\n"
+            f"            If a run genuinely found nothing, say that in three lines: what "
+            f"you looked at, what you found, and what you decided not to do.")
     # Idempotent: both the agent and run.sh call this, and a run counted twice is
     # a wrong audit trail just as surely as a run counted zero times.
     if INDEX.exists() and f"`{run_id}`" in INDEX.read_text():
@@ -575,6 +771,10 @@ def cmd_finish(run_id: str) -> None:
         if same:
             (STATE / f"last-{skill}.json").write_text(pending.read_text())
             pending.unlink()
+    # The run got all the way here, so whatever this task failed with last time
+    # is resolved. Only this task's marker: a review succeeding says nothing
+    # about the ci sweep.
+    clear_failure(skill)
     print(f"maintainer: recorded {run_id} in {INDEX}")
 
 
@@ -623,6 +823,44 @@ def _duration(sec: float) -> str:
     return f"in {sec / 86400:.1f}d"
 
 
+# ---------------------------------------------------------------- failures
+#
+# The layer that cannot fail. A run that dies at 03:00 reaches its owner
+# through notify-send, which guesses a display, guesses a D-Bus address, and
+# ends in `|| true`. On a headless box, on Wayland without XWayland, on a
+# session that is not :1, or while nobody is logged in -- which is the case
+# `loginctl enable-linger` exists to create -- that alert goes nowhere and says
+# nothing about having gone nowhere. A timer could fail every night for a week
+# and leave only a log nobody opened.
+#
+# So the marker is written to disk first, and every other channel is a bonus.
+def failure_marker(task: str) -> Path:
+    return STATE / f"failed-{task}.json"
+
+
+def record_failure(task: str, reason: str, log: str = "") -> None:
+    STATE.mkdir(parents=True, exist_ok=True)
+    failure_marker(task).write_text(json.dumps({
+        "task": task, "reason": reason, "log": log,
+        "at": datetime.now().astimezone().isoformat(),
+    }, indent=2) + "\n")
+
+
+def clear_failure(task: str) -> None:
+    failure_marker(task).unlink(missing_ok=True)
+
+
+def open_failures() -> list[dict]:
+    out = []
+    for f in sorted(STATE.glob("failed-*.json")):
+        try:
+            out.append(json.loads(f.read_text()))
+        except (json.JSONDecodeError, OSError):
+            out.append({"task": f.stem.replace("failed-", ""),
+                        "reason": "unreadable failure marker", "at": "?", "log": str(f)})
+    return out
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -632,6 +870,17 @@ def cmd_status() -> None:
         print(f"  \033[33mthis is NOT the code you are editing:\033[0m {ver['drift']}")
         print("  run ./install.sh to deploy it")
     print()
+    # Before anything else. A failure is the one thing a person needs to see
+    # without having been told to look for it.
+    fails = open_failures()
+    for f in fails:
+        print(f"  \033[31mFAILED\033[0m  {f.get('task','?')} at {str(f.get('at',''))[:16]}: "
+              f"{f.get('reason','?')}")
+        if f.get("log"):
+            print(f"          log  {f['log']}")
+    if fails:
+        print(f"  {len(fails)} unresolved failure(s). The next successful run of a task clears its own.")
+        print()
     env = _ENV
     # _profile_env sources the file, so this is the evaluated value. A profile
     # that fails to source yields "", and the safe reading of an unknown state
@@ -880,6 +1129,16 @@ def main() -> None:
         cmd_finish(sys.argv[2])
     elif cmd == "screen" and len(sys.argv) == 3:
         cmd_screen(sys.argv[2])
+    elif cmd == "gc":
+        cmd_gc("--dry-run" in sys.argv[2:])
+    elif cmd == "audit":
+        cmd_audit(sys.argv[2] if len(sys.argv) > 2 else "--all")
+    elif cmd == "abort" and len(sys.argv) >= 4:
+        cmd_abort(sys.argv[2], sys.argv[3])
+    elif cmd == "failed" and len(sys.argv) >= 4:
+        record_failure(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "")
+    elif cmd == "ok" and len(sys.argv) == 3:
+        clear_failure(sys.argv[2])
     elif cmd == "digest" and len(sys.argv) >= 3:
         cmd_digest(sys.argv[2], "--compact" in sys.argv[3:])
     elif cmd == "log":

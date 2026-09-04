@@ -12,6 +12,18 @@ middle digit.
 
 ### Added
 
+- **`maintainer audit`**, which compares a run report against the transcript of
+  what actually ran (#2). A report is a claim; `<run>.commands` is the record,
+  and nothing compared them. It warns rather than refuses: run against this
+  project's own trail it flagged two commands in the newest report, and both
+  turned out to be quoting artefacts rather than fabrications, which is exactly
+  why it does not refuse.
+- **`maintainer gc`**, retention for logs and drafts past `RETENTION_DAYS`,
+  default 90 (#4). `runs/` and `index.md` are never pruned at any setting.
+- **A failure marker that cannot fail** (#3). Written to disk before any
+  notification is attempted, printed in red at the top of `maintainer status`,
+  and cleared by the next successful run of that same task. `MAINTAINER_ALERT_CMD`
+  lets a profile add ntfy, mail or a webhook.
 - **Sonnet subagents for the task that fans out.** `SUBAGENT_MODEL_<task>` in the
   profile becomes `CLAUDE_CODE_SUBAGENT_MODEL`, so `review` keeps opus and its
   whole thinking budget in the main loop and runs its fan-out on sonnet. A
@@ -34,6 +46,19 @@ middle digit.
 
 ### Fixed
 
+- **A run that died left a hole the index did not mention** (#17). It writes an
+  `ABORTED` line now. `2026-09-03T07-52-review` is the case that found this: a
+  22-line log holding the task briefing and nothing else, no report, no index
+  line, while fifteen comments went out under the same account in the hour that
+  followed. Reading the index, that run did not happen.
+- **A fixture could be indexed as a run.** `runs/2026-09-02T14-39-review.md` in
+  this project's own trail reads, in full, "baseline promotion test". `finish`
+  refuses a report with fewer than three non-empty lines below its heading.
+- **`.commands` is created when a run starts**, so "the transcript recorded
+  nothing" stops reading identically to "no transcript was ever kept".
+- **`DISPLAY=:1` was hardcoded** in two places. Right on one machine, wrong on a
+  session that is `:0`, on Wayland without XWayland, on a headless box, and while
+  nobody is logged in, which is the state `loginctl enable-linger` creates.
 - **A run recorded its input as `in=48`.** The usage line logged
   `input_tokens` alone, and in an agent run almost every input token is a cache
   read or a cache write, both of which are separate fields. The number was true

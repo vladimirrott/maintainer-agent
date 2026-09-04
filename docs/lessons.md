@@ -750,3 +750,37 @@ than "subagents are unreliable": the *finding* is where the work went, and the
 **Verify the consequence separately from the finding, and with a different
 command.** The write-up arrives in your own voice and reads like something you
 already did.
+
+## 35. The index was the one document that stayed quiet
+
+Nine runs, audited against the repository they acted on. Six of the reports were
+accurate on every checkable fact, and the two that also had a command record
+were accurate at command level. Nothing was fabricated anywhere.
+
+The problem was the runs with no report at all.
+
+`logs/2026-09-03T07-52-review.log` is twenty-two lines: the task briefing, then
+nothing. No report was written. In the hour after that log was opened, fifteen
+comments went out under the account the agent uses. The trail cannot say whether
+the agent posted them or a human did, because the account is shared and the
+transcript was empty. Reading `index.md`, that run does not exist.
+
+That is the shape. `logs/` knew, `runs/` knew, GitHub knew, and the one document
+a reader actually consults said nothing, because absence was represented by
+absence. A gap in an append-only index is indistinguishable from a quiet week.
+
+Two smaller versions of the same thing sat beside it. A report reading
+`baseline promotion test` was indexed like a genuine run, because the sentinel
+check that exists for exactly this only covered the placeholder the tooling
+writes, not one a developer types. And seven runs had no `.commands` file, so
+"the transcript recorded nothing" read identically to "no transcript was ever
+kept".
+
+One property saved the audit, and it was undocumented: `lib/run.sh` opens its
+log before it does anything else, so a run that existed left a log even if it
+died in its first second. That is what established a merge with no index entry
+had not come from any run, because the nearest log that day was forty-five
+minutes away. A load-bearing invariant nobody had written down.
+
+**An audit trail has to record absence explicitly.** Silence is not a value, and
+every reader will fill it in with the most comfortable story.

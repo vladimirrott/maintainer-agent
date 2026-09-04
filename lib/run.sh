@@ -154,7 +154,7 @@ export PATH="$HOME/.local/bin:$PATH"
 notify() {  # $1 = urgency, $2 = title, $3.. = body lines
     local urgency="$1" title="$2"; shift 2
     local body; body="$(printf '%s\n' "$@")"
-    DISPLAY="${DISPLAY:-:1}" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
+    DISPLAY="$(session_display)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \
         notify-send -u "$urgency" -a maintainer "$title" "$body" 2>/dev/null || true
 }
 
@@ -182,10 +182,41 @@ humanise() {  # $1 = raw message -> "sentence\nfix: command"
     esac
 }
 
+# The display, asked for rather than assumed.
+#
+# This hardcoded DISPLAY=:1, which is right on one machine and wrong on a
+# session that is :0, on Wayland with no XWayland, on a headless box, and while
+# nobody is logged in, which is exactly the state `loginctl enable-linger`
+# creates. Combined with the trailing `|| true` on notify-send, a nightly
+# failure could reach nobody and say nothing about it.
+session_display() {
+    local d
+    d="$(loginctl show-session "$(loginctl show-user "$USER" -p Display --value 2>/dev/null)" \
+         -p Display --value 2>/dev/null)"
+    printf '%s' "${d:-${DISPLAY:-:0}}"
+}
+
 alert() {
     printf '%s\n' "$1" | tee -a "$log" >&2
+    # 1. Disk first. No display, no bus, no network, no way for this to be
+    #    swallowed. `maintainer status` prints it in red at the top until a
+    #    successful run of the same task clears it.
+    "$HELPER" failed "$task" "$1" "$log" >/dev/null 2>&1 || \
+        printf 'run.sh: could not even record the failure marker\n' >&2
+    # 2. Desktop, best effort.
     notify critical "maintainer · $profile $task · FAILED" \
         "$(humanise "$1")" "log  $log"
+    # 3. Whatever the site uses. ntfy, mail, a webhook: the profile names it,
+    #    because a notification channel is site-specific and this file is not.
+    #    Failure here is reported and never fatal; an alert path that can abort
+    #    a run is worse than no alert path.
+    if [ -n "${MAINTAINER_ALERT_CMD:-}" ]; then
+        if ! MAINTAINER_ALERT_TASK="$profile/$task" MAINTAINER_ALERT_LOG="$log" \
+             sh -c "$MAINTAINER_ALERT_CMD" "$0" "$1" >>"$log" 2>&1; then
+            printf 'run.sh: MAINTAINER_ALERT_CMD failed; the marker and the log still stand\n' \
+                >>"$log"
+        fi
+    fi
 }
 
 # Rehearsal: the agent does the whole run and reaches nobody.
@@ -367,6 +398,11 @@ fi
 
 # 4. Close the run. `finish` refuses an empty report, which is the point.
 if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
+    # Write the absence into the index BEFORE alerting, so the record exists
+    # whatever happens to the alert. A gap in the index is indistinguishable
+    # from a run that never started, and this run demonstrably started: it has
+    # a log, and it may already have posted.
+    "$HELPER" abort "$run_id" "the run wrote no usable report" >>"$log" 2>&1 || true
     alert "$run_id produced no report; the run is not auditable. See $log"
     exit 1
 fi

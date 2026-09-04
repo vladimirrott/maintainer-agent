@@ -245,6 +245,27 @@ and the backend exports it: `review` reads diffs and thinks hard, the sweeps sta
 cheap, and a test measures what the process actually received rather than what
 the file says.
 
+**The trail says what happened, including when nothing did.** A run that dies
+between its first log line and its report used to leave the index with a gap in
+it, and a gap reads as a run that never started. It writes an `ABORTED` line
+now. A failure is recorded to disk before any notification is attempted, because
+`notify-send` guesses a display and ends in `|| true`, so on a headless box a
+nightly failure reached nobody and said nothing about it; `maintainer status`
+prints unresolved failures in red at the top, and the next successful run of
+that task clears its own. A profile can name an escalation command for ntfy,
+mail or a webhook.
+
+**`maintainer audit`** compares a report against the transcript of what actually
+ran. The defect behind it is in `docs/lessons.md` 12: a report quoted
+`sysknife-maint screen 348` for a command that had been renamed out of
+existence, and nothing could say whether the agent ran the real one or ran
+nothing. It warns rather than refuses, because a report that paraphrases a
+command it did run is sloppy and refusing would lose the whole run over wording.
+
+**`maintainer gc`** prunes logs and drafts past `RETENTION_DAYS`. It never
+touches `runs/` or `index.md` at any setting: those record what the agent
+published in your name.
+
 **Subagent model.** A review fans out, across files and across review
 dimensions, and that fan-out is independent work. `SUBAGENT_MODEL_<task>` in the
 profile becomes `CLAUDE_CODE_SUBAGENT_MODEL`, so `review` runs its main loop on
@@ -511,12 +532,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 428 offline tests
+./tests/run-tests.sh        # 452 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-428 offline tests: no network, no GitHub, no model call. Every case tests a
+452 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
