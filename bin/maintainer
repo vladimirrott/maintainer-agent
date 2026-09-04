@@ -658,6 +658,72 @@ def cmd_claims() -> None:
         print("  gh issue edit N --repo <slug> --add-assignee <user>")
 
 
+def cmd_offers() -> None:
+    """Who can actually be offered an issue, computed rather than remembered.
+
+    The rule is one open offer per person, and it exists because it was
+    measured: in a batch of thirteen offers, five people received two each and
+    every one of them answered exactly one. The second bought nothing and left
+    an unanswered mention on a public thread.
+
+    It was prose in a skill file, so nothing enforced it. On 2026-09-03 a single
+    run made three offers to one person. This is the arithmetic that would have
+    stopped it.
+
+    An offer is a comment mentioning the person on an open issue. It is
+    ANSWERED if they have posted on that issue since. Answered means they are
+    working; unanswered means their queue is full or they are gone, and a
+    second mention distinguishes neither.
+    """
+    label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
+    issues = gh_json("issue", "list", "--state", "open", "--limit", "100",
+                     "--json", "number,labels")
+    if issues is None:
+        raise SystemExit("maintainer: could not read the tracker")
+    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    held: dict = {}
+    free = reserved = 0
+    for i in issues:
+        names = {l["name"] for l in i.get("labels") or []}
+        if "twir-listed" in names or "maintainer-only" in names:
+            reserved += 1
+            continue
+        comments = gh_json("api", f"repos/{SLUG}/issues/{i['number']}/comments",
+                           "--jq", "[.[]|{u:.user.login,b:.body}]") or []
+        mentioned = {m for c in comments if c["u"] == owner
+                     for m in re.findall(r"@([A-Za-z0-9-]+)", c["b"] or "")}
+        posted = {c["u"] for c in comments}
+        if not mentioned:
+            if label not in names:
+                free += 1
+            continue
+        for who in mentioned:
+            state = "answered" if who in posted else "UNANSWERED"
+            held.setdefault(who, []).append((i["number"], state))
+
+    print(f"{free} issue(s) free to offer, {reserved} reserved or maintainer-only\n")
+    print("Nobody listed below can take another. Somebody who holds nothing does not")
+    print("appear here at all, which is what an eligible person looks like.\n")
+    print(f"{'person':22} {'open':>4} {'unans':>6}  eligible?")
+    over = 0
+    for who, rows in sorted(held.items(), key=lambda kv: -len(kv[1])):
+        unans = [n for n, st in rows if st == "UNANSWERED"]
+        if len(unans) > 1:
+            over += 1
+            verdict = f"OVER-OFFERED: {len(unans)} unanswered ({', '.join('#%d' % n for n in unans)})"
+        elif unans:
+            verdict = f"no: #{unans[0]} offered and never answered"
+        else:
+            # Answered and still open means they are WORKING on it, which is a
+            # full queue too. The first version called this "YES", which would
+            # have handed a third issue to somebody already carrying two.
+            verdict = f"no: working on {', '.join('#%d' % n for n, _ in rows)}"
+        print(f"{who:22} {len(rows):>4} {len(unans):>6}  {verdict}")
+    if over:
+        print(f"\n{over} person/people hold more than one unanswered offer. The rule is one,")
+        print("and the measurement behind it is that a second is answered at zero.")
+
+
 def cmd_screen(pr: str) -> None:
     """Say whether a PR may be executed on the host, and why not when it may not.
 
@@ -1217,6 +1283,8 @@ def main() -> None:
         cmd_screen(sys.argv[2])
     elif cmd == "gc":
         cmd_gc("--dry-run" in sys.argv[2:])
+    elif cmd == "offers":
+        cmd_offers()
     elif cmd == "claims":
         cmd_claims()
     elif cmd == "audit":

@@ -20,7 +20,14 @@ Invoke the `sysknife-issues` skill and follow it. Read
    check-in that offers an exit, in the shape used on #219 and #248. Release a
    claim that has already had one unanswered check-in, warmly, and say the issue
    is theirs again on request.
-4. Make at most **two** offers per run, and only under the skill's rules: one open
+4. **Run `maintainer offers` before offering anything.** It lists, per person,
+   how many open issues they hold and how many they have never answered, and
+   names anyone already over the one-offer rule. That rule was prose until
+   2026-09-04 and a single run had already made three offers to one person.
+   Somebody who holds nothing does not appear in that table at all; that is what
+   an eligible person looks like.
+
+5. Make at most **two** offers per run, and only under the skill's rules: one open
    offer per person, never to somebody with an unanswered one (check with
    `gh api "search/issues?q=repo:lacs-project/sysknife+mentions:USER+is:issue+is:open"`),
    prefer people active in the last 72 hours, and match on the shape they

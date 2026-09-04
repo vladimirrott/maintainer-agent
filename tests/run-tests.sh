@@ -1790,6 +1790,43 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== the one-offer rule is arithmetic, not a sentence in a skill file =="
+# The rule exists because it was measured: of thirteen offers, five people got
+# two each and every one answered exactly one. It lived as prose, so nothing
+# enforced it, and on 2026-09-03 a single run made three offers to one person.
+ofd="$stub_dir/offers"; mkdir -p "$ofd"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) cat <<'J'
+[{"number":10,"labels":[]},{"number":11,"labels":[]},{"number":12,"labels":[]},
+ {"number":13,"labels":[{"name":"twir-listed"}]},{"number":14,"labels":[]}]
+J
+    ;;
+  *issues/10/comments*) echo '[{"u":"owner","b":"@greedy this one is yours"}]';;
+  *issues/11/comments*) echo '[{"u":"owner","b":"@greedy and this one"}]';;
+  *issues/12/comments*) echo '[{"u":"owner","b":"@busy yours"},{"u":"busy","b":"on it"}]';;
+  *issues/13/comments*) echo '[]';;
+  *issues/14/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -q 'OVER-OFFERED: 2 unanswered' \
+    && ok "two unanswered offers to one person is reported as a violation" \
+    || bad "the one-offer rule is still unenforced: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+printf '%s' "$out" | grep -qE 'busy .*working on #12' \
+    && ok "an ANSWERED open issue counts as a full queue, not as availability" \
+    || bad "somebody mid-task reads as eligible for another"
+printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+    && ok "a reserved issue is not counted as free" \
+    || bad "twir-listed or maintainer-only issues were offered as free"
+printf '%s' "$out" | grep -q 'holds nothing does not' \
+    && ok "and it says what an eligible person looks like" \
+    || bad "an empty list of blocked people reads as nobody being available"
+
 echo "== a profile variable the tool reads must be in the allowlist =="
 # _profile_env sources profile.env and reads back a literal tuple of key names.
 # A key the code reads but the tuple omits comes back empty, which is
