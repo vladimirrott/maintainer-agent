@@ -1,0 +1,72 @@
+name: docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "book.toml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: build the book
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Install mdBook
+        env:
+          MDBOOK_VERSION: "0.4.40"
+          # sha256 of the x86_64-unknown-linux-gnu release tarball, checked on
+          # download so a swapped or compromised release asset fails the build
+          # instead of being piped into tar. Verified locally against the same
+          # digest before this workflow was written.
+          MDBOOK_SHA256: "9ef07fd288ba58ff3b99d1c94e6d414d431c9a61fdb20348e5beb74b823d546b"
+        run: |
+          set -euo pipefail
+          curl -sSfL -o mdbook.tar.gz \
+            "https://github.com/rust-lang/mdBook/releases/download/v${MDBOOK_VERSION}/mdbook-v${MDBOOK_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${MDBOOK_SHA256}  mdbook.tar.gz" | sha256sum --check --strict -
+          tar -xzf mdbook.tar.gz --directory /usr/local/bin
+
+      - name: Build
+        run: mdbook build
+
+      - name: Every page in SUMMARY.md rendered
+        # A file listed in SUMMARY.md but missing from docs/ builds a page that
+        # is a stub rather than failing, so the count is checked instead.
+        run: |
+          set -euo pipefail
+          want=$(grep -cE '^\s*[-\[].*\]\(.*\.md\)' docs/SUMMARY.md)
+          got=$(find book -name '*.html' -not -name '404.html' -not -name 'print.html' | wc -l)
+          printf 'SUMMARY lists %s page(s); the build produced %s\n' "$want" "$got"
+          [ "$got" -ge "$want" ] || { echo "::error::the book is missing pages" >&2; exit 1; }
+
+      - name: Upload
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5
+        with:
+          path: book
+
+  deploy:
+    name: deploy to Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5

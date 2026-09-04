@@ -16,3 +16,6 @@ runs/
 drafts/
 receipts/
 *.commands
+
+# mdBook output. The site is built in CI from docs/, never committed.
+book/

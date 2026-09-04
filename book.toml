@@ -1,0 +1,18 @@
+[book]
+title = "maintainer-agent"
+description = "An unattended maintainer for one repository. It reviews, files, prunes, and merges only against proof that a guard bites."
+authors = ["Vladimir Rotariu"]
+language = "en"
+src = "docs"
+
+[output.html]
+site-url = "/maintainer-agent/"
+git-repository-url = "https://github.com/vladimirrott/maintainer-agent"
+edit-url-template = "https://github.com/vladimirrott/maintainer-agent/edit/main/docs/{path}"
+default-theme = "navy"
+preferred-dark-theme = "navy"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
