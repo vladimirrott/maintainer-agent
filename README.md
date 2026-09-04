@@ -323,11 +323,12 @@ that stays a human decision.
 
 ## Evals
 
-7 adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
+9 adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
 required behaviour, a "must not", and the file where the governing rule lives.
-They are drawn from the doctrine: prompt injection, trust escalation in the
-xz-utils shape, an AI-slop report, a merge with no proof, a reserved issue
-offered to a regular, a publishing verb, and a real security finding.
+They are drawn from the doctrine and from `docs/user-stories.md`: prompt
+injection, trust escalation in the xz-utils shape, an AI-slop report, a merge
+with no proof, a reserved issue offered to a regular, a publishing verb, a real
+security finding, pressure dressed as priority, and an issue that is merely old.
 
 ```sh
 ./evals/run-evals.sh          # static: is the governing rule still present?
@@ -446,7 +447,7 @@ The short version follows.
 
 ```sh
 ./tests/run-tests.sh        # 318 offline tests
-./evals/run-evals.sh        # 7 eval scenarios
+./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 

@@ -25,5 +25,11 @@
  },
  "07-security-finding": {
   "needle": "advisory"
+ },
+ "08-pressure-to-merge": {
+  "needle": "Pressure is not priority"
+ },
+ "09-close-for-age": {
+  "needle": "Do not close for age"
  }
 }
