@@ -33,6 +33,24 @@ backend_run() {
     local think_var="THINKING_$MAINTAINER_TASK"
     local think="${!think_var:-${MAINTAINER_THINKING:-}}"
     [ -n "$think" ] && export MAX_THINKING_TOKENS="$think"
+    # And the model its subagents get, by the same per-task mechanism.
+    #
+    # A review fans out: several files, several dimensions, each independent.
+    # Running that fan-out on the same model as the main loop pays opus prices
+    # for work sonnet does as well, and the main loop is where the thinking
+    # budget is spent. Declared per task because only `review` fans out; a
+    # cadence sweep that spawns nothing should not carry a setting that reads
+    # as though it does.
+    #
+    # CLAUDE_CODE_SUBAGENT_MODEL is a DEFAULT: a per-invocation model, or a
+    # `model:` field in an agent definition, still wins. That is the reason it
+    # is used here rather than CLAUDE_CODE_SUBAGENT_MODEL_FORCE, which would
+    # override an agent someone deliberately wrote to need a stronger model.
+    # A cost control that silently downgrades a security reviewer is not a cost
+    # control. Requires Claude Code 2.1.238 or later.
+    local sub_var="SUBAGENT_MODEL_$MAINTAINER_TASK"
+    local sub="${!sub_var:-}"
+    [ -n "$sub" ] && export CLAUDE_CODE_SUBAGENT_MODEL="$sub"
     # MAINTAINER_SETTINGS is how run.sh swaps in the rehearsal wall. Defaulting
     # here rather than requiring it keeps a direct call working.
     local settings="${MAINTAINER_SETTINGS:-$PROFILE_DIR/settings.json}"

@@ -245,6 +245,23 @@ and the backend exports it: `review` reads diffs and thinks hard, the sweeps sta
 cheap, and a test measures what the process actually received rather than what
 the file says.
 
+**Subagent model.** A review fans out, across files and across review
+dimensions, and that fan-out is independent work. `SUBAGENT_MODEL_<task>` in the
+profile becomes `CLAUDE_CODE_SUBAGENT_MODEL`, so `review` runs its main loop on
+opus with the whole thinking budget and its subagents on sonnet. It is a
+default, not `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`: an agent definition that
+declares its own model keeps it, because a cost control that silently downgrades
+a security reviewer is not a cost control.
+
+That is only half of it. The other half is doctrine: **a subagent's finding is a
+lead, not a result.** It arrives already written up, in the agent's own voice,
+sounding like work the agent did, which makes it the easiest input in the system
+to mistake for evidence. `lib/preamble-core.md` requires the main loop to re-run
+the command and read the output itself before anything reaches a report or a
+comment, and never to delegate the decision to approve, merge, close or post.
+Two subagent reviews on this project have now produced a real finding attached
+to a wrong consequence; both would have been published without that rule.
+
 Claude remains the default because it is the most capable at the work. Codex
 expresses a sandbox *mode* rather than a rule set. Cursor is weakest: its own
 documentation states the print-mode agent has full write access, so it never
@@ -494,12 +511,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 418 offline tests
+./tests/run-tests.sh        # 428 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-418 offline tests: no network, no GitHub, no model call. Every case tests a
+428 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

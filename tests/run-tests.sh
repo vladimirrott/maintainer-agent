@@ -1790,6 +1790,74 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== a task that fans out declares the model its subagents get =="
+# A review fans out across files and dimensions. Running that on the main
+# loop's model pays opus prices for independent work sonnet does as well, and
+# the thinking budget is spent in the main loop, not in the fan-out.
+# Comments stripped first, for the fourth time today. The paragraph explaining
+# why _FORCE is NOT used contains the word _FORCE, and a bare grep failed the
+# check that enforces the decision. docs/lessons.md 31 is this exact shape.
+code() { grep -v '^[[:space:]]*#' "$1"; }
+code "$root/lib/backends/claude.sh" | grep -q 'export CLAUDE_CODE_SUBAGENT_MODEL=' \
+    && ok "the claude backend exports a subagent model" \
+    || bad "SUBAGENT_MODEL_<task> is declared and never reaches the process"
+code "$root/lib/backends/claude.sh" | grep -q 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE' \
+    && bad "the backend FORCES every subagent onto one model, overriding definitions that chose their own" \
+    || ok "it sets a default, so an agent definition's own model still wins"
+for pe in "$root"/profiles/*/profile.env; do
+    pn="$(basename "$(dirname "$pe")")"
+    tasks="$(sed -n 's/^TASKS="\(.*\)"/\1/p' "$pe")"
+    # Declared only where it means something. A sweep that spawns nothing must
+    # not carry a setting that reads as though it does.
+    bogus=""
+    while read -r line; do
+        tk="${line#SUBAGENT_MODEL_}"; tk="${tk%%=*}"
+        case " $tasks " in *" $tk "*) ;; *) bogus="$bogus $tk" ;; esac
+    done < <(grep '^SUBAGENT_MODEL_' "$pe" || true)
+    [ -z "$bogus" ] && ok "$pn declares a subagent model only for tasks it runs" \
+        || bad "$pn sets SUBAGENT_MODEL for$bogus, which is not in its TASKS"
+done
+# Driven, not grepped: the backend must actually put it in the environment.
+sm="$stub_dir/submodel"; mkdir -p "$sm"
+cat > "$sm/probe.sh" <<'PROBE'
+PROFILE_DIR=/dev/null
+MAINTAINER_TASK=review
+THINKING_review=31999
+SUBAGENT_MODEL_review=sonnet
+MAINTAINER_SETTINGS=/dev/null
+backend_run() { :; }
+PROBE
+out=$(bash -c '
+    . "'"$sm"'/probe.sh"
+    . "'"$root"'/lib/backends/claude.sh"
+    # Re-run just the exporting prologue by calling backend_run with a stub claude.
+    export PATH="'"$stub_dir"':$PATH"
+    backend_run /dev/null opus /dev/null /tmp >/dev/null 2>&1
+    echo "MAX_THINKING_TOKENS=$MAX_THINKING_TOKENS"
+    echo "CLAUDE_CODE_SUBAGENT_MODEL=$CLAUDE_CODE_SUBAGENT_MODEL"' 2>&1)
+printf '%s' "$out" | grep -q 'CLAUDE_CODE_SUBAGENT_MODEL=sonnet' \
+    && ok "SUBAGENT_MODEL_review reaches the process as sonnet" \
+    || bad "the subagent model never reached the environment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+printf '%s' "$out" | grep -q 'MAX_THINKING_TOKENS=31999' \
+    && ok "and the main loop keeps its own budget" \
+    || bad "the thinking budget was lost"
+
+echo "== a subagent finding is a lead, and the doctrine says so =="
+# The env var alone would make the agent WORSE: fan-out produces findings that
+# arrive already written up, in the agent's own voice, and one taken at face
+# value would have published a retraction of a correct result.
+pc="$root/lib/preamble-core.md"
+grep -q 'lead, not a result' "$pc" \
+    && ok "the core preamble carries the subagent rule" \
+    || bad "subagents are configured and the doctrine never mentions them"
+grep -q 'Never delegate the decision' "$pc" \
+    && ok "and says the decision is never delegated" \
+    || bad "nothing stops a subagent's conclusion becoming a merge"
+# Every profile gets it, because the preamble is shared and run.sh concatenates it.
+grep -q 'preamble-core.md' "$root/lib/run.sh" \
+    && ok "run.sh assembles that preamble into every prompt" \
+    || bad "the doctrine is a file nothing reads"
+
 echo "== the doctor reports on the profile it was asked about =="
 # It globbed `maintainer@*` in systemctl, so with MAINTAINER_PROFILE=magent it
 # counted sysknife's four timers and printed "4 systemd timer(s) registered, ok"

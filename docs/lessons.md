@@ -714,3 +714,39 @@ summary's authority.
 
 **A notification is a user interface.** It gets the same scrutiny as any other,
 and the first question is what the reader does next.
+
+## 34. Two real findings, two wrong consequences
+
+Two sonnet subagents reviewed this project's work on the same afternoon. Both
+found something real. Both attached it to a conclusion that was wrong, and both
+conclusions were the part that would have been published.
+
+The first reported a false pass in a release gate: strip the `version` field
+from an internal path dependency and the check reports "14 internal dependency
+pins checked" instead of 15, exit 0, no complaint. Reproduced exactly. Its
+stated consequence was that this is "the bug the check's own comment says it
+exists to catch", which would publish a crate depending on the wrong version.
+Running `cargo publish --dry-run` settles it:
+
+    error: all dependencies must have a version requirement specified when
+    publishing. dependency `sysknife-core` does not specify a version
+
+Cargo refuses. The finding survives, the severity does not, and the real defect
+is a different one: the gate cannot tell "15 pins, all correct" from "14 pins,
+all correct, and one that vanished from view".
+
+The second reported a merge with no entry anywhere in the audit trail, and asked
+whether an unlogged agent instance had done it. `lib/run.sh` opens its log file
+before it does anything else, so a run that existed left a log even if it died
+in the first second. There is no log within forty-five minutes of that merge.
+The supporting evidence it cited, "hard config failures at 15:57 and 15:58",
+turned out to be from the following day.
+
+Neither agent was careless. Both were thorough enough to produce evidence I
+could check, which is what made checking cheap. The failure mode is narrower
+than "subagents are unreliable": the *finding* is where the work went, and the
+*consequence* is written last, quickly, in the confident register of a summary.
+
+**Verify the consequence separately from the finding, and with a different
+command.** The write-up arrives in your own voice and reads like something you
+already did.

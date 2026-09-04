@@ -12,6 +12,17 @@ middle digit.
 
 ### Added
 
+- **Sonnet subagents for the task that fans out.** `SUBAGENT_MODEL_<task>` in the
+  profile becomes `CLAUDE_CODE_SUBAGENT_MODEL`, so `review` keeps opus and its
+  whole thinking budget in the main loop and runs its fan-out on sonnet. A
+  default rather than `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`, so an agent definition
+  that declares its own model keeps it.
+- **The rule that makes that safe.** `lib/preamble-core.md` now says a subagent's
+  finding is a lead, not a result: the main loop re-runs the command and reads
+  the output itself before anything is posted, and never delegates the decision
+  to approve, merge, close or post. Configuring fan-out without this would have
+  made the agent worse, not cheaper. Two subagent reviews on this project have
+  since produced a real finding attached to a wrong consequence.
 - **What a run cost, on every surface that mentions the run.** `maintainer
   digest <run-id>` prints it, `maintainer status` carries a `spend` column and a
   profile total, and a finished run now sends a desktop notification saying what
