@@ -66,12 +66,25 @@ if [ "$uninstall" = 1 ]; then
     exit 0
 fi
 
+# Stamp the deployed tree with what it came from. Three versions are in play and
+# they disagree in normal use: the checkout, the deployed tree, and the profile.
+# The deployed tree is the one that actually runs, so it carries the stamp, and
+# everything reads this file rather than asking git. Printing the checkout's
+# version would be the wrong one and the most flattering.
+stamp_version() {
+    printf 'version=%s\ncommit=%s\ninstalled_at=%s\ninstalled_from=%s\n' \
+        "$(git -C "$root" describe --tags --always --dirty 2>/dev/null || echo unknown)" \
+        "$(git -C "$root" rev-parse --short HEAD 2>/dev/null || echo unknown)" \
+        "$(date -Is)" "$root"
+}
+
 say "deploying from $root"
 run mkdir -p "$share" "$bin" "$units"
 run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
 run cp "$root/lib/profile.sh" "$share/profile.sh"
+if [ "$dry" = 1 ]; then say "would stamp $share/VERSION"; else stamp_version > "$share/VERSION"; fi
 run mkdir -p "$share/scripts"
 # Every script, not a list. render-settings.py was deployed and transcript.py
 # was not, and the backend's fallback made the missing one invisible: runs kept

@@ -166,9 +166,14 @@ if [ "$show" = 0 ] && [ "$POST" = off ] && ! declare -F backend_rehearsal >/dev/
     exit 78
 fi
 
+# The deployed tree stamps itself at install time. A run report that does not
+# say which build produced it is a report you cannot act on six weeks later.
+MAINTAINER_VERSION="$(sed -n 's/^version=//p' "$local_root/VERSION" 2>/dev/null || true)"
+MAINTAINER_VERSION="${MAINTAINER_VERSION:-unstamped}"
+export MAINTAINER_VERSION
 {
     echo "=== run.sh $profile/$task $(date -Is) ==="
-    echo "backend=$(backend_name) model=$model log=$log"
+    echo "maintainer=$MAINTAINER_VERSION backend=$(backend_name) model=$model log=$log"
 } >>"$log"
 
 if [ "$show" = 0 ] && ! msg="$(backend_check)"; then

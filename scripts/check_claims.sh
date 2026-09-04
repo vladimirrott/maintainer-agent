@@ -61,17 +61,28 @@ note "those verbs generate $rules_here rules on this machine"
 
 note "measured: $tests_actual tests, $evals_actual eval scenarios, $backends_actual backends, $deny_actual denied verbs"
 
+# Every occurrence, not the first one, and the number may not be the tail of a
+# longer token. The first-match version read "388 tests" out of the commit SHA
+# in `maintainer-merge verify 365 7c6ed388 tests/e2e/...` and failed a commit
+# over a number nobody had written. Taking only the first match also means a
+# second, stale copy of a figure lower down is never checked at all.
 claim() {  # $1 = regex capturing a number in README, $2 = actual, $3 = label
-    local claimed
-    claimed=$(grep -oE "$1" "$root/README.md" | grep -oE '[0-9]+' | head -1)
-    if [ -z "$claimed" ]; then
+    local found seen uniq
+    found=$(grep -oE "(^|[^0-9A-Za-z])$1" "$root/README.md" | grep -oE '[0-9]+' | sort -u)
+    seen=$(printf '%s' "$found" | grep -c . || true)
+    if [ "$seen" = 0 ]; then
         bad "README no longer states $3; the claim check now inspects nothing"
         return
     fi
-    if [ "$claimed" != "$2" ]; then
-        bad "README says $claimed $3, the tree has $2"
+    if [ "$seen" -gt 1 ]; then
+        bad "README states $3 more than one way ($(printf '%s' "$found" | tr '\n' ' ')); they cannot all be right"
+        return
+    fi
+    uniq="$found"
+    if [ "$uniq" != "$2" ]; then
+        bad "README says $uniq $3, the tree has $2"
     else
-        note "ok: $3 = $2"
+        note "ok: $3 = $2 (every mention agrees)"
     fi
 }
 claim '[0-9]+ (offline )?tests'     "$tests_actual"    "tests"
