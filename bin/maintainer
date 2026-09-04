@@ -110,8 +110,15 @@ def _profile_env(profile: str = PROFILE) -> dict:
     out = {"_profile": profile, "_path": str(path)}
     if not path.exists():
         return out
+    # An allowlist, so a new profile variable is invisible here until it is
+    # added. `maintainer claims` shipped reading CLAIM_LABEL and reported "this
+    # profile declares no CLAIM_LABEL" against a profile that declares it on
+    # line 74. A missing key reads exactly like an unset value, which is the
+    # worst way for a list to fail. tests/run-tests.sh now cross-checks every
+    # key this file reads out of _ENV against this tuple.
     keys = ("REPO_PATH", "REPO_SLUG", "STATE_DIR", "TASKS", "POST", "GH_ACCOUNT",
-            "MAINTAINER_NAME", "REQUIRED_COMMANDS")
+            "MAINTAINER_NAME", "REQUIRED_COMMANDS", "CLAIM_LABEL",
+            "CLAIM_STALE_DAYS", "RETENTION_DAYS")
     # The path goes in as an ARGUMENT, never interpolated into the script. The
     # key names are a literal tuple in this file, so they are the only thing
     # that reaches the command text.
@@ -574,6 +581,81 @@ def cmd_gc(dry: bool) -> None:
           f"{kept} bytes kept")
     print(f"            runs/ and index.md are never pruned: they record what was "
           f"published in your name")
+
+
+def _claimant_idle_days(number: int, assignees: list) -> int:
+    """Days since the person who claimed this issue last said anything on it."""
+    who = {a["login"] for a in assignees}
+    comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
+                       "--jq", "[.[]|{u:.user.login,at:.created_at}]")
+    if not comments:
+        return -1
+    theirs = [c["at"] for c in comments if not who or c["u"] in who]
+    if not theirs:
+        # Nobody named has posted. Fall back to the newest comment from anyone
+        # other than the maintainer, which is the claim itself in every case
+        # this has seen.
+        owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+        theirs = [c["at"] for c in comments if c["u"] != owner] or [c["at"] for c in comments]
+    try:
+        last = max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in theirs)
+    except ValueError:
+        return -1
+    return int((datetime.now(timezone.utc) - last).days)
+
+
+def cmd_claims() -> None:
+    """Who claimed what, how long ago, and whether GitHub knows.
+
+    The `claimed` label is a public promise: other contributors read it and stay
+    off the issue. Nothing surfaced it, so the promise was only as good as
+    whoever last read the tracker by hand. On 2026-09-04 a claimed issue was
+    closed by somebody else's pull request ten hours after the claim, and the
+    claimant lost a day.
+
+    Assignment is the stronger record and it is available for outside
+    contributors: GitHub's `/assignees/{user}` check returns 404 for a
+    non-collaborator, but POSTing the assignment succeeds for anyone who has
+    commented on the issue. The check endpoint answers a different question than
+    the operation does, which is why this reports what IS assigned rather than
+    what could be.
+    """
+    # _setting, not _ENV: run.sh exports CLAIM_LABEL, so a tool called from
+    # inside a run honours the run's value the same way it honours the slug.
+    label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
+    if not label:
+        print("maintainer: this profile declares no CLAIM_LABEL, so it tracks no claims")
+        return
+    issues = gh_json("issue", "list", "--state", "open", "--label", label,
+                     "--limit", "100", "--json",
+                     "number,title,assignees,updatedAt,labels")
+    if issues is None:
+        raise SystemExit("maintainer: could not read the tracker")
+    if not issues:
+        print(f"no open issue carries '{label}'")
+        return
+    stale_days = int(_setting("CLAIM_STALE_DAYS", "CLAIM_STALE_DAYS", "7") or 7)
+    print(f"{'issue':7} {'assigned to':22} {'idle':>6}  state")
+    unassigned = 0
+    for i in issues:
+        who = ", ".join(a["login"] for a in i.get("assignees") or []) or "-"
+        if who == "-":
+            unassigned += 1
+        # Idle is measured from the CLAIMANT's last comment, never from the
+        # issue's updatedAt. Assigning these five reset updatedAt on every one
+        # of them, so a claim eleven days old reported "0d, active": the act of
+        # recording the claim blinded the check that watches it. Anything the
+        # maintainer does to an issue moves updatedAt, which makes it useless
+        # for measuring whether the contributor has gone quiet.
+        idle = _claimant_idle_days(i["number"], i.get("assignees") or [])
+        flag = "stale, a check-in is due" if idle >= stale_days else "active"
+        if who == "-":
+            flag += "; NOT assigned, so it is invisible to their dashboard"
+        print(f"#{i['number']:<6} {who:22} {idle:>4}d  {flag}")
+    if unassigned:
+        print(f"\n{unassigned} claim(s) carry the label and no assignee. The label is a")
+        print("promise; an assignment is the same promise where GitHub can see it:")
+        print("  gh issue edit N --repo <slug> --add-assignee <user>")
 
 
 def cmd_screen(pr: str) -> None:
@@ -1135,6 +1217,8 @@ def main() -> None:
         cmd_screen(sys.argv[2])
     elif cmd == "gc":
         cmd_gc("--dry-run" in sys.argv[2:])
+    elif cmd == "claims":
+        cmd_claims()
     elif cmd == "audit":
         cmd_audit(sys.argv[2] if len(sys.argv) > 2 else "--all")
     elif cmd == "abort" and len(sys.argv) >= 4:

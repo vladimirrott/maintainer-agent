@@ -1790,6 +1790,60 @@ grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
 
+echo "== a profile variable the tool reads must be in the allowlist =="
+# _profile_env sources profile.env and reads back a literal tuple of key names.
+# A key the code reads but the tuple omits comes back empty, which is
+# indistinguishable from the profile not declaring it: `maintainer claims`
+# shipped reporting "this profile declares no CLAIM_LABEL" against a profile
+# that declares it on line 74.
+python3 - "$root/bin/maintainer" <<'PYEOF'
+import re, sys
+src = open(sys.argv[1]).read()
+m = re.search(r'keys = \((.*?)\)', src, re.S)
+allow = set(re.findall(r'"([A-Z_]+)"', m.group(1))) if m else set()
+read = set(re.findall(r'_ENV\.get\(\s*"([A-Z_]+)"', src))
+read |= set(re.findall(r'_setting\(\s*"[A-Z_]*"\s*,\s*"([A-Z_]+)"', src))
+missing = sorted(read - allow)
+sys.exit(f"keys read from _ENV but absent from the allowlist: {missing}" if missing else 0)
+PYEOF
+[ $? = 0 ] && ok "every profile key the tool reads is in the allowlist" \
+    || bad "a profile variable is read and can never be seen"
+
+echo "== claims are visible, and staleness survives the maintainer touching them =="
+cm="$stub_dir/claimsview"; mkdir -p "$cm"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) cat <<'J'
+[{"number":272,"title":"t","assignees":[{"login":"atanishka308"}],"updatedAt":"2026-09-04T19:00:00Z","labels":[]},
+ {"number":229,"title":"u","assignees":[],"updatedAt":"2026-09-04T19:00:00Z","labels":[]}]
+J
+    ;;
+  *issues/272/comments*) echo '[{"u":"atanishka308","at":"2026-08-24T10:00:00Z"}]';;
+  *issues/229/comments*) echo '[{"u":"someone","at":"2026-09-03T10:00:00Z"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=cv CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+# updatedAt on BOTH rows is today, because assigning them moved it. Idle must
+# come from the claimant's own last comment or the check is blind to exactly
+# the claims it exists to find.
+printf '%s' "$out" | grep -qE '#272 +atanishka308 +1[0-9]d' \
+    && ok "idle is measured from the claimant, not from updatedAt" \
+    || bad "the maintainer touching an issue resets its staleness: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+printf '%s' "$out" | grep -q 'stale, a check-in is due' \
+    && ok "and an old claim is called stale" || bad "a stale claim is reported as active"
+printf '%s' "$out" | grep -q 'NOT assigned' \
+    && ok "a claim with no assignee is named as invisible to their dashboard" \
+    || bad "a label-only claim looks the same as an assigned one"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=cv CLAIM_LABEL="" \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -q 'declares no CLAIM_LABEL' \
+    && ok "a profile that tracks no claims says so" || bad "claims assumes every project uses a label"
+
 echo "== a claimed issue is a promise the gate has to keep =="
 # Measured on lacs-project/sysknife, 2026-09-04. A contributor said "I am taking
 # this" on #355; the maintainer replied "it is yours", applied `claimed`, and

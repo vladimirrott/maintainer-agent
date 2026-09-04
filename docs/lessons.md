@@ -857,3 +857,48 @@ whose author has never posted on it, is refused with both names in the message.
 **Anything a project publishes as a commitment has to be enforced where the
 commitment can be broken.** Not where it is convenient to check, and not by
 asking a reviewer to remember.
+
+## 38. The check said no and the operation said yes
+
+Five contributors held `claimed` issues with no GitHub assignee. Before
+assigning them I asked GitHub whether I could:
+
+```
+$ gh api repos/lacs-project/sysknife/assignees/Osheun
+(404)
+```
+
+Five for five, the same answer. The conclusion was sitting there and it was
+wrong: that GitHub structurally forbids assigning outside contributors, that the
+label is the only mechanism available, and that the whole request was
+impossible. I was one sentence from reporting it.
+
+Then I tried the operation instead of the question:
+
+```
+$ gh api -X POST repos/lacs-project/sysknife/issues/336/assignees \
+    -f 'assignees[]=Osheun'
+{"assignees":["Osheun"]}
+```
+
+It works for anyone who has commented on the issue. `/assignees/{user}` answers
+"is this a collaborator", which is a different question from "can this person be
+assigned here", and the endpoint name does not say so.
+
+Two more things fell out of doing it.
+
+`maintainer claims` first measured staleness from the issue's `updatedAt`, so
+assigning five claims reset all five to `0d, active` — including one eleven days
+old. **The act of recording the claim blinded the check that watches it.** Idle
+now comes from the claimant's own last comment, because anything the maintainer
+touches moves `updatedAt`.
+
+And `cmd_claims` shipped reporting "this profile declares no CLAIM_LABEL"
+against a profile declaring it on line 74: `_profile_env` sources the file and
+reads back a literal tuple of key names, and the new key was not in it. A key
+the code reads and the tuple omits comes back empty, which is indistinguishable
+from unset. There is a test now that cross-checks every key read against the
+tuple.
+
+**A capability check is a claim about the world; the operation is the world.**
+When they are cheap and reversible, run the operation.
