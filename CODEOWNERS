@@ -1,4 +1,5 @@
-# Everything is reviewed by a human before it lands, even when an agent wrote it.
+# Two maintainers, both admins. Everything is reviewed by a human before it
+# lands, even when an agent wrote it.
 * @vladimirrott @V3RNE42
 
 # The refusals. A change here changes what an unattended agent is able to do on

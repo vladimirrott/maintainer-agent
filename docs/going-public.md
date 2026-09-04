@@ -70,7 +70,21 @@ Neither covers everything a public repository exposes. Before flipping, read:
 - `~/.local/state/*/runs/`, which is **not** in the repository and should stay
   that way. The audit trail names pull requests, contributors and reviews.
 
-## 5. Afterwards
+## 5. Maintainers
+
+`@V3RNE42` (Julio Cabanillas) holds **admin**, matching his standing on
+sysknife. A personal repository has only pull, push and admin: `maintain`, the
+role that is literally named for this, exists on organization repositories only,
+which is why sysknife can grant it and this cannot.
+
+Upgrading a **pending** invitation does not work through the collaborators
+endpoint, which returns the existing invitation unchanged. Patch the invitation:
+
+```sh
+gh api -X PATCH repos/vladimirrott/maintainer-agent/invitations/<id> -f permissions=admin
+```
+
+## 6. Afterwards
 
 - Watch the first outside issue. `.github/ISSUE_TEMPLATE/config.yml` turns off
   blank issues, so anything that arrives has gone through a template.
