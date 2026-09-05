@@ -10,6 +10,46 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-05
+
+Three defects, all found by auditing the first unattended runs of 0.4.0 rather
+than by reading the code. Two of them had been shipping since the audit trail
+existed.
+
+### Fixed
+
+- **The prompt never carried the version the doctrine told it to print.**
+  `preamble-core.md` has always said to open the run report with "the version
+  named in the first line of this prompt". No version was ever in the prompt:
+  `run.sh` read `VERSION`, exported `MAINTAINER_VERSION` and wrote it to the
+  logfile, and prompt assembly began at the profile preamble. The instruction
+  did not fail; the run satisfied it from the previous report, which the skill
+  tells it to read. `2026-09-04T21-17-review` stamped itself `v0.3.0 (commit
+  10a7e79)` while running v0.4.0 at `111592c`. Every prompt now opens with
+  version, commit, profile, task, backend and start time, and one sentence
+  saying where the stamp must not come from.
+- **The sysknife task prompt prescribed an assignment call that refuses outside
+  contributors.** `gh issue edit --add-assignee` resolves the login through
+  GraphQL against the repository's assignable users and answers `'USER' not
+  found` for anyone who is not a collaborator. On #272 it refused a contributor
+  who had commented on that issue eleven minutes earlier; the REST POST assigned
+  them on the next line. The doctrine has carried the working call since 0.3.0,
+  and the task prompt is assembled last, so the losing instruction was the one
+  closest to the work. The label went on while the assignment failed, so the two
+  calls are now ordered with the reversible one second.
+- **`maintainer audit --all` could not see a run that died.** It iterated
+  `runs/*.md`, so a run that never wrote a report was invisible to the command
+  whose job is to say what happened. The real trail held thirteen, one of them
+  the alert of 2026-09-04T08:14, and `index.md` showed an ordinary cadence
+  across the gap. It now walks `logs/` as well and names every log with no
+  report. Auditing one run by name still reports only that run.
+
+### Changed
+
+- 506 offline tests, up from 497. Nine of the new ones cover the three fixes
+  above; each was mutation-proved to fail on exactly the defect it names.
+
+
 ## [0.4.0] - 2026-09-04
 
 The middle digit moves because the merge gate refuses something it used to
@@ -401,7 +441,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.1
 [0.4.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.3.0
 [0.2.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.2.0
