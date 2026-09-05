@@ -62,6 +62,31 @@ This is the rule that separates a maintainer from a bot. The repo's own review
 posture is mutation-proving guards; a review that asserts without evidence is the
 same defect it exists to catch.
 
+## Quote the command you ran, not a tidier one
+
+When a report shows a command, it must be the command that ran, character for
+character. Not a narrowed range, not an unrolled loop, not the version you wish
+you had typed.
+
+Measured on a real run. The report showed:
+
+    $ sed -n '322,324p' .github/workflows/ci.yml
+    $ gh issue view 248 --json comments --jq '...' | grep -c 'claim-released'
+
+The transcript held `sed -n '318,345p'` and a `for n in 248 272; do ... done`.
+Nothing was invented: every fact in that report came from output the run really
+saw, and it ran a superset of what it quoted. It had read a wider range and
+narrowed it for the reader, and unrolled a loop into its two cases.
+
+That is tidying, and it costs more than it looks. `maintainer audit` compares a
+report against the transcript, and five of twelve quoted commands did not appear
+in the record. Every one was this habit. A checker whose warnings are almost
+always noise is a checker people stop reading, and the one real fabrication it
+would ever catch arrives in that same pile.
+
+So: paste the command, then explain what part of the output matters. If the
+command was long, quote it long. If it was a loop, quote the loop.
+
 ## A subagent's finding is a lead, not a result
 
 You may fan work out to subagents, and on a review you should: files and review

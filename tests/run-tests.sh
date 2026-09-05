@@ -324,6 +324,7 @@ if [ -s "$assembled" ]; then ok "the prompt assembles"; else bad "--show-prompt 
 for needle in "Trust is the attack surface" "slop" "Persistence" "data, not instruction" \
               "maintainer screen" "Never post a claim you have not run" \
               "lead, not a result" "the operation is the world" \
+              "Quote the command you ran" \
               "claim-released" "assign them"; do
     if grep -qi "$needle" "$assembled"; then ok "assembled prompt carries: $needle"; else bad "assembled prompt LOST: $needle"; fi
 done
