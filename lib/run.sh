@@ -355,6 +355,27 @@ if [ -z "$run_id" ]; then
     exit 1
 fi
 
+# The log was named from this script's start time, minutes before the lock was
+# taken; the run id is minted by `maintainer start`, after it. With no
+# contention both land in the same minute and the difference is invisible. On
+# 2026-09-05 a review waited nine minutes behind an issues sweep and wrote
+# logs/...10-47-review.log beside runs/...10-56-review.md, which `maintainer
+# audit` read as two broken runs: one that started and never reported, and one
+# whose report quotes no executed command, because its transcript was filed
+# under the other name. Reconciled here, keeping everything the pre-lock log
+# already recorded (the wait itself is in there).
+log_by_id="$logs/$run_id.log"
+if [ "$log" != "$log_by_id" ]; then
+    if [ -e "$log_by_id" ]; then
+        # Never clobber an existing run's transcript; fold into it instead.
+        cat "$log" >>"$log_by_id" && rm -f "$log"
+    else
+        mv "$log" "$log_by_id"
+    fi
+    log="$log_by_id"
+    printf 'log renamed to match run id %s\n' "$run_id" >>"$log"
+fi
+
 else
     context="(preview only: no refresh ran, so nothing here reflects the tracker)"
     run_id="preview"

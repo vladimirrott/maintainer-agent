@@ -12,6 +12,17 @@ middle digit.
 
 ### Fixed
 
+- **A lock wait filed one run under two names.** `run.sh` stamps its log from
+  its own start time, before it takes the lock; `maintainer start` mints the run
+  id after acquiring it. With no contention both land in the same minute and the
+  difference never shows. On 2026-09-05 a review waited nine minutes behind an
+  issues sweep and wrote `logs/2026-09-05T10-47-review.log` beside
+  `runs/2026-09-05T10-56-review.md`, which `maintainer audit` read as two broken
+  runs: one that started and never reported, and one whose report quotes no
+  executed command, because its transcript was filed under the other name. The
+  log is renamed to the run id once that id exists, keeping everything the
+  pre-lock log recorded, the wait included.
+
 - **The identity gate's test never reached the identity gate.** The gate sits
   behind `backend_check`, and `profiles/*/settings.json` is generated at install
   time rather than committed, so the test ran with no wall on disk, died at

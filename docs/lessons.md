@@ -1164,3 +1164,35 @@ you failed to read, check first whether you read anything at all.
 The cost was one review cycle. PR #370 arrived at 08:30 and the 09:15 pass that
 would have reviewed it never started, so a contributor waited for a maintainer
 who had already been scheduled to show up.
+
+## 47. Two clocks, one run, and an audit that saw two failures
+
+`maintainer audit --all`, an hour after the orphan check shipped:
+
+```
+  2026-09-05T10-56-review    the report quotes no executed command
+! 2026-09-05T10-47-review    started and never reported: Recount matches the published prose...
+```
+
+One run. `run.sh` names its log from `date +%Y-%m-%dT%H-%M` at line 130, before
+it takes the lock. `maintainer start` mints the run id after the lock is
+acquired, at line 345. That review waited nine minutes behind an issues sweep,
+so the two clocks disagreed by nine minutes and the run's transcript and its
+report ended up under different names.
+
+Both audit findings were false, and they failed in opposite directions. The
+report looked unverifiable because its `.commands` file was empty. The log
+looked like a dead run because no report carried its name. Neither was true, and
+a reader would have chased both.
+
+What makes this worth writing down is that nothing was wrong until something was
+slow. Every run for weeks took the lock immediately, both names agreed, and the
+mismatch was invisible. Contention is what made the two clocks readable, and
+contention is rare, which is exactly why the bug survived.
+
+**A name minted before a wait is a different name from one minted after it.**
+The log is renamed to the run id as soon as that id exists, keeping what the
+pre-lock log recorded, including the wait.
+
+And the tool found it. `maintainer audit --all` gained the orphan check at
+10:28 and reported this at 11:00, against its own sibling.

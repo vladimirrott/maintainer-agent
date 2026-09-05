@@ -136,6 +136,40 @@ PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
     && ok "and a wrong account is refused at once, never retried into" \
     || bad "the gate retried a wrong account $(wc -l < "$wrong") times"
 
+echo "== the log and the run it belongs to carry the same name =="
+# run.sh stamps the log from its own start time, before it takes the lock.
+# `maintainer start` mints the run id after the lock is acquired. With no
+# contention both land in the same minute and nothing shows. On 2026-09-05 a
+# review waited nine minutes behind an issues sweep and wrote
+# logs/2026-09-05T10-47-review.log beside runs/2026-09-05T10-56-review.md, and
+# the audit read that as two broken runs: one that started and never reported,
+# and one whose report quotes no executed command, because its transcript was
+# filed under the other name. Driven end to end, not grepped for a `mv`.
+lh="$stub_dir/loghome"; rm -rf "$lh"; mkdir -p "$lh/.local/bin"
+cat > "$lh/.local/bin/maintainer" <<'HELPERSTUB'
+#!/bin/sh
+case "$1" in
+  start)
+      echo "=== stub 2031-02-03T04-05-review ==="
+      echo "write the run report to $MAINTAINER_STATE/runs/2031-02-03T04-05-review.md"
+      ;;
+  finish|abort|failed|clear) exit 0 ;;
+esac
+HELPERSTUB
+chmod +x "$lh/.local/bin/maintainer"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub claude "exit 0"
+PATH="$stub_dir:$PATH" HOME="$lh" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+# The suite redirects STATE_DIR away from HOME, so the logs land there.
+lgs="$(find "$MAINTAINER_STATE_DIR/logs" -name '*review.log' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
+if [ "$lgs" = "2031-02-03T04-05-review.log " ]; then
+    ok "the log is filed under the run id the helper minted"
+else
+    bad "a lock wait splits one run across two names; logs present: ${lgs:-none}"
+fi
+
 echo "== every profile's deny wall names the verbs that matter =="
 # Generated, then asserted. The tests read the artifact the agent is handed, not
 # the spec it came from: a generator bug that drops every absolute spelling is
