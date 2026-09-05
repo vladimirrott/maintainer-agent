@@ -997,3 +997,92 @@ output matters.
 
 **Prefer the strict checker and the stricter habit.** A tool taught to accept
 approximations cannot tell you when one is wrong.
+
+## 42. The doctrine pointed at a line nobody wrote
+
+`preamble-core.md` has said this since the audit trail existed:
+
+> Open the report with the version named in the first line of this prompt, so a
+> reader six weeks from now knows which build wrote it.
+
+No version was ever in the prompt. `run.sh` read `VERSION`, exported
+`MAINTAINER_VERSION`, wrote it into the log, and assembled the prompt out of the
+profile preamble, the doctrine, the prose rules and the task. The stamp reached
+the logfile and never reached the model.
+
+An instruction pointing at absent data does not fail; it gets satisfied from
+somewhere else. The run at `2026-09-04T21-17-review` opened its report with
+
+    `maintainer v0.3.0` (commit `10a7e79`).
+
+while running v0.4.0 at `111592c`. The skill tells a run to read the last few
+reports before starting, so the only version in reach was the previous run's,
+and it carried it forward. Three consecutive reports now name a build that did
+not write them.
+
+A wrong stamp is worse than a missing one. A missing stamp makes you go and
+look; a wrong stamp sends an audit to code that never ran, and it looks like
+provenance while it does it.
+
+The prompt now opens with a provenance line and one sentence naming where the
+version must **not** come from, because the failure was not ignorance of the
+rule. The run followed the rule. It filled the gap the rule left.
+
+**Whenever doctrine says "the X named in Y", grep Y for X.** The assembled
+prompt is the only Y that counts, and `--show-prompt` prints it.
+
+## 43. The check that lied and the check that repeated it
+
+`gh issue edit --add-assignee atanishka308` on #272:
+
+```
+failed to update https://github.com/lacs-project/sysknife/issues/272: 'atanishka308' not found
+```
+
+The account exists, has 236217646 for an id, and had commented on that issue
+eleven minutes earlier. `gh issue edit` resolves a login through GraphQL against
+the repository's assignable users first, and an outside contributor is not one.
+The REST call assigned them on the next line:
+
+```
+$ gh api -X POST repos/lacs-project/sysknife/issues/272/assignees -f 'assignees[]=atanishka308'
+["atanishka308"]
+```
+
+Lesson 33 recorded the same shape for `GET /assignees/{user}`, which 404s for
+every outside contributor while the POST succeeds, and the doctrine carried the
+working call from that day on. The sysknife task prompt kept prescribing
+`gh issue edit --add-assignee` anyway. Two files disagreed, and the task prompt
+is assembled last, so the losing instruction was the one closest to the work.
+
+Worse than the failure: the label went on and the assignment did not, and the
+comment posted alongside them said both had. A partial write with a confident
+sentence over it is how a promise gets broken in public.
+
+**Fixing the doctrine is half the fix.** Grep every prompt for the verb you just
+retired, and order the calls so the reversible one goes second.
+
+## 44. Thirteen runs that left no trace, and the audit walked past all of them
+
+`maintainer audit --all` iterated `runs/*.md`. A run that dies before writing a
+report leaves a log and no report, so the audit could not see it: the command
+whose entire job is to say what happened enumerated only the runs that had
+already said what happened.
+
+The real trail held thirteen. Most were development invocations, and one was
+not. On 2026-09-04 at 08:14 the alert fired:
+
+```
+ALERT sysknife-review: the run unit failed before it could report; systemd killed or refused it
+```
+
+Nothing downstream of that alert ever mentioned it again. `index.md` showed a
+review at 08-04 and the next at 12-56, which is a normal-looking cadence.
+
+This is lessons 22's shape at a different scale. Absence is not self-reporting.
+A gap in an audit trail reads as a quiet period, and a quiet period is exactly
+what a suppressed failure looks like.
+
+`audit --all` now walks `logs/` as well and names every log with no report.
+Auditing one run by name still audits that one run, because a sweep's findings
+leaking into a single-run check is how a tool becomes noise.

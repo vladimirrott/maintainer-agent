@@ -262,7 +262,9 @@ fi
 # say which build produced it is a report you cannot act on six weeks later.
 MAINTAINER_VERSION="$(sed -n 's/^version=//p' "$local_root/VERSION" 2>/dev/null || true)"
 MAINTAINER_VERSION="${MAINTAINER_VERSION:-unstamped}"
-export MAINTAINER_VERSION
+MAINTAINER_COMMIT="$(sed -n 's/^commit=//p' "$local_root/VERSION" 2>/dev/null || true)"
+MAINTAINER_COMMIT="${MAINTAINER_COMMIT:-unknown}"
+export MAINTAINER_VERSION MAINTAINER_COMMIT
 {
     echo "=== run.sh $profile/$task $(date -Is) ==="
     echo "maintainer=$MAINTAINER_VERSION backend=$(backend_name) model=$model log=$log"
@@ -352,6 +354,16 @@ core="$(libfile preamble-core.md)" || {
 prose="$(libfile prose-style.md || true)"
 
 {
+    # 0. Provenance, first, because the doctrine tells the agent to open its
+    #    report with the build that wrote it and this is the only place that
+    #    build appears. Without these lines the instruction pointed at nothing,
+    #    and 2026-09-04T21-17-review stamped itself v0.3.0/10a7e79 while running
+    #    v0.4.0/111592c: the only version anywhere in reach was the one in the
+    #    previous report, so it copied that. A wrong stamp sends an audit to
+    #    code that never ran, which is worse than no stamp at all.
+    printf 'Provenance for this run: maintainer %s (commit %s), profile %s, task %s, backend %s, started %s.\n' \
+        "$MAINTAINER_VERSION" "$MAINTAINER_COMMIT" "$profile" "$task" "$(backend_name)" "$(date -Is)"
+    printf 'Open your run report with that version and that commit, copied from this line. Do not copy them from an earlier report; an earlier report was written by an earlier build.\n\n'
     # 1. Who this profile is, and what it is authorised to do.
     cat "$PROFILE_DIR/prompts/common-preamble.md"
     printf '\n\n'

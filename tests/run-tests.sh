@@ -331,6 +331,58 @@ done
 # The profile's own name must be substituted into the shared doctrine, or the
 # agent is told to protect a repository that is not the one it is reviewing.
 grep -q '__SLUG__\|__MAINTAINER__' "$assembled" && bad "a placeholder reached the agent" || ok "placeholders substituted"
+echo "== the run stamps its own build into the prompt =="
+# A report is only auditable if it names the build that wrote it, and the
+# doctrine tells the agent to take that from the first line of the prompt.
+# It was not there. Measured on 2026-09-04T21-17-review: the run executed
+# v0.4.0 and stamped its report `v0.3.0 (commit 10a7e79)`, because the only
+# version visible anywhere was the one in the previous report, so it copied
+# that. A wrong stamp is worse than none; it points an audit at code that did
+# not run.
+if grep -q 'unstamped' "$assembled"; then
+    ok "the prompt names the build (unstamped, since the repo tree carries no VERSION)"
+else
+    bad "the assembled prompt names no build, so the report's version can only be copied"
+fi
+# And it must be the deployed stamp, not a constant. Render a VERSION beside a
+# copy of the tree and check the prompt follows it.
+vlay="$stub_dir/versioned"
+rm -rf "$vlay"; mkdir -p "$vlay"
+cp -r "$root/lib" "$root/profiles" "$vlay/"
+cp "$root/lib/run.sh" "$vlay/run.sh"
+printf 'version=v9.9.9\ncommit=deadbee\ninstalled_at=2026-01-01T00:00:00Z\ninstalled_from=/nowhere\n' >"$vlay/VERSION"
+vout=$(PATH="$stub_dir:$PATH" bash "$vlay/run.sh" --show-prompt sysknife review 2>/dev/null)
+printf '%s' "$vout" | grep -q 'v9.9.9' \
+    && ok "the prompt carries the deployed version" \
+    || bad "the prompt ignores VERSION, so every run is stamped the same"
+printf '%s' "$vout" | grep -q 'deadbee' \
+    && ok "the prompt carries the deployed commit" \
+    || bad "the prompt names a version with no commit, which cannot be checked out"
+printf '%s' "$vout" | grep -qi 'not copy\|do not copy' \
+    && ok "the prompt forbids copying the stamp from an earlier report" \
+    || bad "nothing tells the agent where NOT to get the version from"
+
+echo "== the prompt prescribes an assignment verb that works =="
+# `gh issue edit --add-assignee` resolves the login through GraphQL first and
+# answers "'USER' not found" for an outside contributor, leaving the label
+# applied and the assignment missing. Measured 2026-09-05 on #272: the edit
+# refused atanishka308 and the REST POST assigned them on the next line. The
+# doctrine had the working call; the sysknife task prompt still named the
+# broken one, and the task prompt is the later, more proximate instruction.
+# Scope: a prompt that PRESCRIBES the broken verb, not one that names it to
+# forbid it. The first version of this check failed on the sentence that fixed
+# the defect, which is the shape docs/lessons.md records four times over: a
+# grep that matches its own documentation. A line carrying "not" is telling the
+# agent what to avoid, so it is out of scope.
+if grep -rn -- '--add-assignee' "$root"/profiles/*/prompts/*.md | grep -v '\bnot\b' | grep -q .; then
+    bad "a task prompt still prescribes 'gh issue edit --add-assignee', which 404s for outside contributors"
+else
+    ok "no task prompt prescribes the assignment verb that refuses outside contributors"
+fi
+grep -q 'issues/336/assignees' "$assembled" \
+    && ok "the assembled prompt carries the assignment call that works" \
+    || bad "the assembled prompt lost the REST assignment call"
+
 grep -q 'lacs-project/sysknife' "$assembled" && ok "the doctrine names this profile's repository" || bad "slug substitution did not happen"
 if grep -q 'maintainer-merge' "$root/profiles/sysknife/prompts/review.md"; then
     ok "review prompt routes merges through the gate"
@@ -2200,6 +2252,24 @@ aurun 2026-01-02T00-00-review | grep -q 'no command record' \
 aurun 2026-01-01T00-00-review | grep -q '^?' \
     && bad "a legend printed for a symbol no run produced" \
     || ok "only the legends that apply are printed"
+
+# A run that died leaves a log and no report, and `audit --all` walked runs/
+# only, so the dead run was invisible to the one tool whose job is to say what
+# happened. lessons.md calls this shape absence recorded as absence: a gap in
+# the index reads as a quiet week. Measured on the real trail: 13 logs with no
+# report, one of them the 2026-09-04T08:14 alert, and no command ever said so.
+printf '=== run.sh au/review 2026-01-03T00:00:00Z ===\n' > "$au/logs/2026-01-03T00-00-review.log"
+out="$(aurun --all)"
+printf '%s' "$out" | grep -q '2026-01-03T00-00-review' \
+    && ok "a run that started and never reported is named by the audit" \
+    || bad "a dead run is invisible to --all, so a gap reads as a quiet week"
+printf '%s' "$out" | grep -qi 'never reported\|no report' \
+    && ok "and the audit says what happened to it" \
+    || bad "the dead run is listed with no verdict"
+# Auditing one named run must not drag in every orphan.
+aurun 2026-01-01T00-00-review | grep -q '2026-01-03T00-00-review' \
+    && bad "auditing one run reported an unrelated orphan" \
+    || ok "one named run audits only that run"
 
 echo "== the state directory does not grow forever =="
 gcd="$stub_dir/gc"; mkdir -p "$gcd/logs" "$gcd/drafts/old" "$gcd/runs"

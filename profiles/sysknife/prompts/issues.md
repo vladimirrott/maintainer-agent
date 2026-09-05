@@ -7,14 +7,22 @@ Invoke the `sysknife-issues` skill and follow it. Read
    correct any body that has gone stale. Contributors work from those bodies, and
    a wrong figure costs them a wasted evening.
 2. **Assign, do not only label.** When somebody says they are taking an issue,
-   apply `claimed` AND assign them:
-   `gh issue edit N --repo lacs-project/sysknife --add-assignee <user>`.
-   GitHub's `/assignees/{user}` endpoint returns 404 for a non-collaborator and
-   the assignment still succeeds for anyone who has commented on the issue, so
-   the check is not the answer; try the assignment. A label is invisible to
-   their dashboard and to `assignee:@me`; an assignment is the same promise
-   where GitHub can see it. `maintainer claims` lists every claim, who holds it,
-   how long they have been quiet, and which ones carry a label and no assignee.
+   apply `claimed` AND assign them. Two calls, and the label is the one that
+   goes second, so a refused assignment cannot leave a label standing alone:
+
+       gh api -X POST repos/lacs-project/sysknife/issues/N/assignees \
+           -f 'assignees[]=<user>'
+       gh issue edit N --repo lacs-project/sysknife --add-label claimed
+
+   Use the REST call, not `gh issue edit --add-assignee`. The edit resolves the
+   login through GraphQL first and answers `'<user>' not found` for an outside
+   contributor; on #272 it refused atanishka308 and the REST POST assigned them
+   on the next line. GitHub's `/assignees/{user}` check is equally useless: it
+   returns 404 for every non-collaborator while the POST succeeds for anyone who
+   has commented on the issue. A label is invisible to their dashboard and to
+   `assignee:@me`; an assignment is the same promise where GitHub can see it.
+   `maintainer claims` lists every claim, who holds it, how long they have been
+   quiet, and which ones carry a label and no assignee.
 
 3. Check `claimed` labels. Anything claimed roughly a week with no branch gets a
    check-in that offers an exit, in the shape used on #219 and #248. Release a

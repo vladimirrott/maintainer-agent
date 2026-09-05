@@ -523,6 +523,18 @@ def cmd_audit(which: str) -> None:
     if not ids:
         print("maintainer: no runs to audit")
         return
+    # A run that died leaves a log and no report. Walking runs/ alone made that
+    # run invisible to the one command whose job is to say what happened, and a
+    # gap in the trail reads as a quiet week rather than as a failure. Only on a
+    # sweep: auditing one named run must stay about that run.
+    orphans = []
+    if which in ("--all", ""):
+        for log in sorted(LOGS.glob("*.log")):
+            stem = log.stem
+            if stem == "alerts" or (RUNS / f"{stem}.md").exists():
+                continue
+            orphans.append(stem)
+
     worst = unknown = 0
     for rid in ids:
         verdict, missing, n = audit_run(rid)
@@ -541,8 +553,14 @@ def cmd_audit(which: str) -> None:
     # Only the legends that apply. The first version printed the `?` line
     # unconditionally, so a single clean audit ended on a sentence about a
     # symbol that had not appeared, which reads as a finding.
+    for stem in orphans:
+        print(f"! {stem:26} started and never reported")
     if unknown:
         print("\n? no command record exists for that run, so nothing could be compared.")
+    if orphans:
+        print(f"\n! {len(orphans)} run(s) wrote a log and no report. Each is a gap in the")
+        print("  trail that reads as a quiet period. Check logs/alerts.log and the")
+        print("  unit's journal for why the run stopped.")
 
 
 def cmd_gc(dry: bool) -> None:
