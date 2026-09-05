@@ -1245,3 +1245,101 @@ that one is a redesign that gives each suite its own mutation.
 The test that guarded the old message was `grep -q 'no suite in .* covers every
 changed path' bin/maintainer-merge`. Rewording the refusal to be more useful
 turned it red while the behaviour was identical. It drives `pick_suite` now.
+
+## 49. The agent found four blocking defects and three were still open a day later
+
+The magent review of 2026-09-04 cost $13.83 and returned four findings rated
+BLOCKING, all in the merge gate and the screen:
+
+```
+### 3.1 A signed receipt is not bound to the pull request it names — BLOCKING
+### 3.2 Under the opencode backend the receipt key is readable — BLOCKING
+### 3.3 `maintainer screen` calls a hostile package.json INERT — BLOCKING
+### 3.4 The `verify` mutation string executes on the host — BLOCKING
+```
+
+Checked a day later, after a full day of work in the same repository: 3.1, 3.2
+and 3.3 were untouched, and 3.4 had its symlink vector closed while the mutation
+string still runs on the host.
+
+3.1 is the sharp one. `cmd_merge` selects `receipts/$pr.json` by filename,
+verifies the signature over the payload, and reads back `head` and `kind`. It
+never reads `pr`. The signature covers the bytes; the filename is not part of
+them. So:
+
+```
+$ maintainer-merge receipt 7 abcdef1234 "guard mutated, went red"
+$ cp state/receipts/7.json state/receipts/8.json
+$ maintainer-merge merge 8
+  the receipt is ASSERTED, not observed: ...
+```
+
+It got past the signature and the kind check on a receipt earned for a different
+pull request. The head check does not catch it either: two documentation pull
+requests touch no `PROD_GLOBS`, so the "head moved, no production diff" branch
+accepts the copy.
+
+The lesson is not about receipts.
+
+**A finding that nobody schedules is a finding that did not happen.** The agent
+is cheap and it is good: $13.83 for four blocking defects in its own gate is the
+best value anything here produces. What it cannot do is act on them, and the
+review's own output is a report nobody is required to read. Sixteen issues were
+filed on the sysknife tracker in three days and every one of them is a row on a
+board somebody sweeps; these four were prose in a file under `~/.local/state`.
+
+Findings from the `magent` profile belong on the magent tracker, the same way
+findings about sysknife belong on sysknife's. Until then, the closing step of
+reading a review is to file what it found.
+
+## 50. The security boundary interpolated its own argument into an interpreter
+
+`maintainer-merge` is the one file that decides whether an unattended agent may
+merge. It read three fields out of a receipt like this:
+
+```
+verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
+```
+
+`$receipt` is `"$RECEIPTS/$pr.json"`, and `$pr` was checked only for being
+non-empty (`${1:?pr}`). So the first argument became part of a path and, through
+the path, part of a Python string literal running in the gate. A first argument
+that is a legal filename and closes the quote runs code. It was reproduced: a
+crafted argument put a marker on disk.
+
+`maintainer-doctor` had already been hardened against this exact shape, with a
+comment saying so:
+
+> Validated before it reaches a `python3 -c` string below. bin/maintainer
+> hardens the same variable against the same class of bug; this file did not.
+
+The merge gate, the more dangerous of the two, had not. A hardening that lands
+in one file and not its sibling is half a fix, and the unfixed half is chosen by
+which file somebody happened to be editing that day.
+
+Two rules, and the second is the general one.
+
+**A PR number is an integer. Say so at the boundary.** GitHub never issues
+anything else, so validating it rejects nothing real and removes the surface
+entirely.
+
+**Read structured data with `argv`, never by interpolating a path into the
+program text.** `json.load(open(sys.argv[1]))` cannot be escaped by the
+filename; `open('$x')` can. The file had one line already doing it the safe way,
+three lines below three that did not.
+
+## 51. Repeated stuff is not always duplication
+
+`maintainer-merge` and `maintainer-repo` each define their own two-line `die()`
+and `say()`. The tempting move is a shared `lib/say.sh` both source. It would be
+worse: `maintainer-merge` is invoked standalone by the agent and sourced whole
+by the test suite, and adding a runtime source dependency to the security
+boundary for four lines of `printf` trades a real property (the gate is one
+self-contained file) for a cosmetic one. Left as is, on purpose.
+
+The duplication worth removing is the kind that drifts and takes a guarantee
+with it: two hand-copied validators that must agree (sysknife's `validate.rs`
+and its Python screen), a figure typed into four files, a rule that lives as
+prose in one place and as code in another. Four `printf`s that will never
+diverge because nothing depends on them agreeing are not that. Deduplicate what
+costs correctness when it drifts, not what merely looks the same.

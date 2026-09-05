@@ -392,6 +392,8 @@ EXECUTES_ON_BUILD = (
     ("Makefile", "arbitrary recipes"),
     ("justfile", "arbitrary recipes"),
     ("xtask/", "a build-system crate that runs as part of normal commands"),
+    ("package.json", "npm install runs its preinstall/postinstall/prepare scripts"),
+    ("package-lock.json", "pins dependency resolution; a crafted lock fetches a chosen tarball"),
 )
 # Anything the repo's own gates EXECUTE. The first version of this screen only
 # looked for build-time vectors, so a PR adding one integration test came back
@@ -408,6 +410,10 @@ EXECUTED_BY_GATES = (
 )
 DEP_SECTIONS = ("[dependencies]", "[build-dependencies]", "[dev-dependencies]")
 # Only these are inert: read as text by a gate, never executed.
+# .json is inert AS A SUFFIX. The two npm manifests above are matched by exact
+# name in EXECUTES_ON_BUILD, which fires first, so package.json and
+# package-lock.json are blocked despite ending in .json. A general *.json (a
+# fixture, a config the gates only read) stays inert.
 INERT_SUFFIXES = (".md", ".json", ".yml", ".yaml", ".txt", ".lock.example", ".svg", ".png")
 
 

@@ -10,6 +10,41 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **The PR number was interpolated into a `python3 -c` string unvalidated.**
+  `maintainer-merge` builds `"$RECEIPTS/$pr.json"` from its first argument and
+  read three fields back with `python3 -c "import json;...open('$receipt')..."`.
+  `$pr` was only checked non-empty, so the receipt path, and through it a Python
+  string literal in the security boundary, carried whatever was passed. A PR
+  argument that is a valid filename and closes the string runs code. GitHub only
+  issues integer PR numbers, so the fix rejects nothing real: `cmd_receipt`,
+  `cmd_verify` and `cmd_merge` validate `$pr` as a positive integer at the
+  boundary, the way `maintainer-doctor` already hardens `MAINTAINER_PROFILE`,
+  and the three field reads use `argv` instead of interpolation. The injection
+  was reproduced end to end and the same payload is now refused before it
+  becomes a path.
+
+- **`maintainer screen` called `package.json` and `package-lock.json` INERT.**
+  Both end in `.json`, which the screen classed as read-as-text. `npm install`
+  runs a manifest's `preinstall`/`postinstall`/`prepare` scripts, and a crafted
+  lock redirects dependency resolution to a chosen tarball, so a PR touching
+  `packages/setup/package.json` came back safe to build while the JS suite would
+  then execute it. Both names are matched in the build-time list now, which
+  fires before the suffix check; an ordinary `.json` fixture stays inert. Found
+  by the magent review of 2026-09-04, rated BLOCKING.
+
+- **A signed receipt was not bound to the pull request it named.**
+  `maintainer-merge merge` selected the receipt by filename and read back only
+  `head` and `kind`. The signature covers the receipt's bytes and the bytes are
+  unchanged by a copy, so `cp receipts/1.json receipts/2.json` produced a
+  receipt that verifies perfectly and proves a guard bites on a different pull
+  request. The head check does not save you: two documentation pull requests
+  touch no `PROD_GLOBS`, so the "head moved, no production diff" branch waves
+  the copy through. The gate compares the receipt's own `pr` to the one being
+  merged now. Found by the magent review of 2026-09-04, which rated it BLOCKING;
+  it stayed open for a day.
+
 ### Changed
 
 - **A coverage refusal now says what would fix it.** `maintainer-merge verify`

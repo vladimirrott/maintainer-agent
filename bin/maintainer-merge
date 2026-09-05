@@ -88,6 +88,35 @@ PYEOF
 }
 say() { printf '  %s\n' "$1"; }
 
+# A pull request is a positive integer. cmd_receipt, cmd_verify and cmd_merge
+# all build "$RECEIPTS/$pr.json" from it and interpolate that path into a
+# `python3 -c` string, so an unvalidated $pr is both a path-traversal and a
+# code-injection surface in the one file that is the security boundary. The
+# doctor already hardens MAINTAINER_PROFILE the same way against the same class
+# of bug; this file did not. GitHub only ever hands out integer PR numbers, so
+# this rejects nothing real.
+pr_or_die() {  # $1 = the pr argument -> echoes it back, or dies
+    case "$1" in
+        ''|*[!0-9]*) die "pull request must be a positive integer, not '$1'" ;;
+    esac
+    printf '%s' "$1"
+}
+
+# One field out of a receipt, read with argv rather than string interpolation.
+# json.load(open(sys.argv[1])) cannot be escaped by the filename the way
+# open('$receipt') can, and reading a field in one process this way beats
+# interpolating the path into `python3 -c`.
+receipt_field() {  # $1 = receipt path, $2 = field, $3 = default
+    python3 - "$1" "$2" "$3" <<'PYEOF'
+import json, sys
+path, field, default = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    print(json.load(open(path)).get(field, default))
+except (OSError, ValueError):
+    print(default)
+PYEOF
+}
+
 identity() {
     gh auth switch --hostname github.com --user "$ACCOUNT" >/dev/null 2>&1
     local who; who="$(gh api user --jq .login 2>/dev/null)"
@@ -105,6 +134,7 @@ identity() {
 # fabricate the result.
 cmd_receipt() {
     local pr="${1:?pr}" sha="${2:?head sha}" proof="${3:?what was proved}"
+    pr="$(pr_or_die "$pr")" || exit 1
     # An unattended run may not assert. `verify` is the only receipt an agent can
     # earn, because only `verify` watches the mutation fail. Three layers say so:
     # this one, a deny rule on the command, and a refusal in `merge` for any
@@ -301,6 +331,7 @@ first_failure_line() {  # $1 = log -> one line, at most 200 characters
 
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
+    pr="$(pr_or_die "$pr")" || exit 1
     local named="${5:-}"
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
@@ -446,6 +477,7 @@ cmd_show() {
 
 cmd_merge() {
     local pr="${1:?pr}"
+    pr="$(pr_or_die "$pr")" || exit 1
     [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
   whether production code moved since the receipt. Set it in profile.env, for example:
     PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
@@ -470,9 +502,26 @@ PYEOF
     want="$(printf '%s' "$payload" | receipt_sign)"
     [ "$sig" = "$want" ] || die "the receipt for #$pr does not match its signature: it was edited
   after it was written, or written by something other than the gate."
-    local verified_head kind
-    verified_head="$(python3 -c "import json;print(json.load(open('$receipt'))['head'])")"
-    kind="$(python3 -c "import json;print(json.load(open('$receipt')).get('kind',''))")"
+    local verified_head kind receipt_pr
+    verified_head="$(receipt_field "$receipt" head '')"
+    kind="$(receipt_field "$receipt" kind '')"
+    receipt_pr="$(receipt_field "$receipt" pr '')"
+    # The signature covers the receipt's bytes, and the bytes name the pull
+    # request it was earned for. Nothing covers the FILENAME. Selecting the
+    # receipt by name and never reading its `pr` back meant `cp 1.json 2.json`
+    # produced a receipt that verifies perfectly and proves a guard bites on a
+    # different pull request. The head check does not save you: two docs pull
+    # requests touch no PROD_GLOBS, so the "head moved, no production diff"
+    # branch waves the copy through.
+    #
+    # Found by the magent review of 2026-09-04 and rated BLOCKING.
+    if [ "$receipt_pr" != "$pr" ]; then
+        die "the receipt at $receipt was earned for #${receipt_pr:-<none>}, not #$pr.
+  It carries a valid signature because the signature covers the receipt's
+  bytes and those bytes are unchanged; the filename is not signed. Run
+  \`maintainer-merge verify $pr <head> <test> <mutation>\` and earn one for
+  this pull request."
+    fi
     # The layer that is not evadable. An asserted receipt is a human's claim
     # that a guard bites; nothing checked it. A human may merge on one. An
     # unattended run may not, whatever it managed to write.

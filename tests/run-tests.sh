@@ -370,6 +370,55 @@ esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
 if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no checks at all'; then ok "merge refuses when no checks reported (empty is not green)"; else bad "merge treated an empty board as green (rc=$rc)"; fi
 
+# A receipt is signed over its bytes, and the bytes name the PR it was earned
+# for. cmd_merge selected it by filename and read back only `head` and `kind`,
+# so copying 1.json to 2.json produced a receipt that verifies perfectly and
+# proves something about a different pull request. The agent found this on
+# 2026-09-04 and rated it BLOCKING; nothing fixed it.
+PATH="$stub_dir:$PATH" bash "$mg" receipt 7 abcdef1234 "guard mutated, went red" >/dev/null 2>&1
+cp "$MAINTAINER_STATE/receipts/7.json" "$MAINTAINER_STATE/receipts/8.json"
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *headRefOid*) echo abcdef1234;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]';;
+esac"
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 8 2>&1); rc=$?
+if [ "$rc" != 0 ] && printf '%s' "$out" | grep -qi 'earned for #7\|names #7\|different pull request'; then
+    ok "a receipt copied onto another PR number is refused"
+else
+    bad "a receipt earned for #7 was accepted for #8 (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-110)"
+fi
+# And the signature check must not be what catches it: the bytes are untouched,
+# so a signature failure here would mean the test is proving the wrong thing.
+printf '%s' "$out" | grep -q 'does not match its signature' \
+    && bad "the copied receipt was caught by the signature, which does not cover the filename" \
+    || ok "and it is refused on the PR it names, not by a signature that still verifies"
+rm -f "$MAINTAINER_STATE/receipts/7.json" "$MAINTAINER_STATE/receipts/8.json"
+
+echo "== the merge gate validates the PR number before it becomes a path =="
+# $pr builds "$RECEIPTS/$pr.json" and that path was interpolated raw into a
+# python3 -c string, so a non-integer $pr was a path-traversal and code-injection
+# surface in the security boundary. GitHub only issues integer PR numbers.
+for bad in "1;rm -rf x" "../../etc/passwd" "1'\''))__import__('\''os'\'')" "1 2" "x"; do
+    out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "$bad" 2>&1); rc=$?
+    if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'must be a positive integer'; then
+        ok "merge rejects a non-integer PR ('$bad')"
+    else
+        bad "merge accepted a non-integer PR ('$bad') rc=$rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
+    fi
+done
+# Empty is rejected by ${1:?} before pr_or_die is reached; still a refusal.
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "" 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "merge rejects an empty PR argument" || bad "merge ran with no PR"
+# And a real integer still reaches the receipt check rather than being rejected.
+out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 12345 2>&1); rc=$?
+printf '%s' "$out" | grep -q 'no verification receipt' \
+    && ok "a real integer PR passes validation and reaches the receipt check" \
+    || bad "a valid PR number was rejected or mis-routed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
+
 echo "== a receipt dies when production code moves under it =="
 # The condition the whole gate rests on. Built against a real git repo, because
 # the check is a real `git diff` and a stub would prove nothing.
@@ -1214,6 +1263,21 @@ screen_stub '[{"path":"Cargo.toml"}]' 1 'diff --git a/Cargo.toml b/Cargo.toml
 +[dependencies]
 +evil = "1.0"'
 screen_case "a dependency change is DO NOT EXECUTE" "dependency lines changed"
+
+# A package.json edit is DO NOT EXECUTE: npm install runs its lifecycle scripts.
+# The magent review of 2026-09-04 found the screen calling a hostile
+# package.json INERT because it ends in .json.
+screen_stub '[{"path":"packages/setup/package.json"}]' 1 ''
+screen_case "a package.json is DO NOT EXECUTE (npm runs its lifecycle scripts)" "VERDICT: DO NOT EXECUTE"
+
+# A package-lock.json too: a crafted lock redirects dependency resolution.
+screen_stub '[{"path":"packages/setup/package-lock.json"}]' 1 ''
+screen_case "a package-lock.json is DO NOT EXECUTE (it steers what npm fetches)" "VERDICT: DO NOT EXECUTE"
+
+# But a plain .json the gates only read as data stays inert, so the fix did not
+# turn every config file into a block.
+screen_stub '[{"path":"tests/fixtures/sample.json"}]' 1 ''
+screen_case "an ordinary .json fixture is still INERT" "VERDICT: INERT"
 
 # gh returns fewer files than it says exist: the rest were never screened.
 screen_stub '[{"path":"README.md"}]' 300 ''
