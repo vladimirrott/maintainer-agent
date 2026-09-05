@@ -136,6 +136,35 @@ PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
     && ok "and a wrong account is refused at once, never retried into" \
     || bad "the gate retried a wrong account $(wc -l < "$wrong") times"
 
+echo "== a coverage refusal names the suites that would have covered it =="
+# The gate refused sysknife#370 because no single suite covers *.md + *.py +
+# *.sh, which is correct: a receipt from a suite that does not run the changed
+# code proves nothing. The message listed only the changed paths, so the
+# reviewer had to grep every verify.d/*.sh by hand to learn that docs.sh covers
+# the .md files, shell.sh the .sh file, and nothing at all covers .py. A refusal
+# that does not say what would fix it is a refusal people work around.
+covp="$stub_dir/covprof"; rm -rf "$covp"; mkdir -p "$covp/verify.d"
+cat > "$covp/verify.d/docs.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.md) return 0 ;; esac; return 1; }
+SUITE
+cat > "$covp/verify.d/shell.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.sh) return 0 ;; esac; return 1; }
+SUITE
+msg="$(PROFILE_DIR="$covp" MAINTAINER_PROFILE=cov MAINTAINER_SLUG=o/r \
+    MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_MERGE_SOURCE_ONLY=1 \
+    bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" a.md b.sh c.py' 2>&1 || true)"
+printf '%s' "$msg" | grep -q 'a\.md.*docs' \
+    && ok "the refusal says which suite covers each path it can place" \
+    || bad "the refusal lists paths without naming the suites that cover them: $(printf '%s' "$msg" | tr '\n' ' ' | cut -c1-110)"
+printf '%s' "$msg" | grep -qE 'c\.py.*(no suite|NONE|nothing)' \
+    && ok "and singles out the path no suite covers at all" \
+    || bad "the uncovered path is not distinguished from the covered ones"
+printf '%s' "$msg" | grep -q 'docs.*shell\|shell.*docs' \
+    && ok "and names the union that would cover the rest" \
+    || bad "the message does not say that two suites together would cover the others"
+
 echo "== the log and the run it belongs to carry the same name =="
 # run.sh stamps the log from its own start time, before it takes the lock.
 # `maintainer start` mints the run id after the lock is acquired. With no
@@ -1509,9 +1538,19 @@ done
 ( . "$vs/shell.sh"; suite_covers "scripts/x.sh" )        && ok "shell claims a .sh path" || bad "shell does not claim .sh"
 ( . "$vs/shell.sh"; suite_covers "crates/x/src/lib.rs" ) && bad "shell claims a .rs path" || ok "shell disclaims .rs"
 # A path no suite covers must be refused rather than silently run under Rust.
-grep -q 'no suite in .* covers every changed path' "$root/bin/maintainer-merge" \
+# This was a grep for the refusal's exact wording, which is the weak shape this
+# project keeps recording: rewording the message to be more useful broke the
+# test while the behaviour was unchanged. Driven through the function now.
+uncov="$(PROFILE_DIR="$(dirname "$vs")" MAINTAINER_PROFILE=vs MAINTAINER_SLUG=o/r \
+    MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t \
+    bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" crates/x/src/lib.rs weird.xyz' 2>&1)"
+urc=$?
+[ "$urc" != 0 ] \
     && ok "an uncovered path is refused, not guessed at" \
-    || bad "verify would fall back to a suite that does not run the changed code"
+    || bad "verify fell back to a suite that does not run the changed code (returned '$uncov')"
+printf '%s' "$uncov" | grep -q 'weird\.xyz' \
+    && ok "and the refusal names the path it could not place" \
+    || bad "the refusal does not say which path had no suite"
 # The receipt has to say which suite proved it.
 grep -q '"suite": suite' "$root/bin/maintainer-merge" \
     && ok "the receipt records which suite produced it" \

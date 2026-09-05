@@ -1196,3 +1196,52 @@ pre-lock log recorded, including the wait.
 
 And the tool found it. `maintainer audit --all` gained the orphan check at
 10:28 and reported this at 11:00, against its own sibling.
+
+## 48. The gate refused correctly, and nobody could act on the refusal
+
+`lacs-project/sysknife#370` changed four files across three languages. The
+unattended review approved it, then hit this:
+
+```
+maintainer-merge: the 'docs' suite does not cover every changed path:
+    CONTRIBUTING.md
+    docs/introduction.md
+    scripts/check_evidence_claims.py
+    tests/release/public-claims.test.sh
+  A receipt from a suite that does not run the changed code proves nothing.
+```
+
+Correct, and the run did the right thing with it: it refused to hand-write a
+receipt, said the refusal was a gap in the gate rather than in the PR, and
+handed back two options.
+
+Getting to those options cost it a `grep -l "\*\.py" verify.d/*.sh` and a read
+of all three suite files, because the message named the changed paths and not
+the suites. The reviewer had to reconstruct the coverage table the gate had
+just computed and thrown away.
+
+That gap is where `--admin` comes from. A refusal that says *no* and a refusal
+that says *no, and here is the shape of yes* have very different outcomes when
+the person reading it is tired and a contributor is waiting.
+
+```
+    CONTRIBUTING.md                     docs
+    docs/introduction.md                docs
+    scripts/check_evidence_claims.py    no suite covers this
+    tests/release/public-claims.test.sh shell
+
+  Suites that would cover the rest between them: docs shell.
+  Paths no suite covers at all: 1.
+```
+
+**Print the analysis you already did.** The gate evaluated `suite_covers` for
+every path against every suite to reach its verdict, and reported one bit of it.
+
+The underlying rule, that one suite must cover every path rather than a
+covering set of them, is issue #19. It is a capability the gate lacks, not a
+guard that failed, and the two want different fixes: this one is a message, and
+that one is a redesign that gives each suite its own mutation.
+
+The test that guarded the old message was `grep -q 'no suite in .* covers every
+changed path' bin/maintainer-merge`. Rewording the refusal to be more useful
+turned it red while the behaviour was identical. It drives `pick_suite` now.

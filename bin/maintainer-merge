@@ -164,6 +164,30 @@ suite_dir() {
     return 1
 }
 
+# Which suite would cover each path, for a refusal that says what to do next.
+#
+# The gate refused sysknife#370 for the right reason: the PR spans *.md, *.py
+# and *.sh, and no single suite runs all three, so no receipt is earnable. The
+# message listed the four changed paths and stopped there, and the reviewer had
+# to read every verify.d/*.sh by hand to learn that docs.sh covers the .md
+# files, shell.sh the .sh file, and nothing at all covers .py. That is the
+# difference between a refusal somebody fixes and a refusal somebody routes
+# around with --admin.
+coverage_map() {  # $1 = suite dir, $2... = paths -> "path<TAB>suite-or-none" lines
+    local dir="$1"; shift
+    local p s name hit
+    for p in "$@"; do
+        hit=""
+        for s in "$dir"/*.sh; do
+            [ -e "$s" ] || continue
+            name="$(basename "$s" .sh)"
+            # shellcheck disable=SC1090
+            if ( . "$s"; suite_covers "$p" ); then hit="$name"; break; fi
+        done
+        printf '    %s\t%s\n' "$p" "${hit:-no suite covers this}"
+    done
+}
+
 # Which suite covers these paths? Named explicitly, or inferred, or refused.
 pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local named="$1"; shift
@@ -177,7 +201,7 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
         # shellcheck disable=SC1090
         ( . "$dir/$named.sh"; for p in "$@"; do suite_covers "$p" || exit 1; done ) \
             || die "the '$named' suite does not cover every changed path:
-$(printf '    %s\n' "$@")
+$(coverage_map "$dir" "$@")
   A receipt from a suite that does not run the changed code proves nothing."
         printf '%s' "$named"; return 0
     fi
@@ -188,10 +212,20 @@ $(printf '    %s\n' "$@")
         # shellcheck disable=SC1090
         ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
     done
-    [ -n "$covered" ] || die "no suite in $dir covers every changed path:
-$(printf '    %s\n' "$@")
-  Add one, or name a suite explicitly. A receipt written by a suite that does
-  not run the changed code proves nothing."
+    if [ -z "$covered" ]; then
+        local map; map="$(coverage_map "$dir" "$@")"
+        local orphans; orphans="$(printf '%s\n' "$map" | grep -c 'no suite covers this' || true)"
+        local suites; suites="$(printf '%s\n' "$map" | awk -F'\t' '$2 != "no suite covers this" {print $2}' | sort -u | paste -sd' ' -)"
+        die "no single suite in $dir covers every changed path:
+$map
+
+  Suites that would cover the rest between them: ${suites:-none}.
+  Paths no suite covers at all: $orphans.
+
+  A receipt written by a suite that does not run the changed code proves
+  nothing, so this refuses rather than picking the closest suite. Add a suite
+  for the uncovered paths, or split the pull request along suite lines."
+    fi
     printf '%s' "$covered"
 }
 

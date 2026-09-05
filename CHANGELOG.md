@@ -10,6 +10,20 @@ middle digit.
 
 ## [Unreleased]
 
+### Changed
+
+- **A coverage refusal now says what would fix it.** `maintainer-merge verify`
+  refuses when no suite runs every changed path, which is right: a receipt from
+  a suite that does not run the changed code proves nothing. The message listed
+  the changed paths and stopped, so on `lacs-project/sysknife#370` the reviewer
+  had to read every `verify.d/*.sh` by hand to learn that `docs.sh` covered the
+  two `.md` files, `shell.sh` the `.sh` file, and nothing at all covered the
+  `.py` one. It prints that table itself now, names the suites that would cover
+  the rest between them, and counts the paths no suite covers at all. A refusal
+  nobody can act on is a refusal people route around with `--admin`, which is
+  what happened. The rule itself is unchanged and is [issue
+  #19](https://github.com/vladimirrott/maintainer-agent/issues/19).
+
 ### Fixed
 
 - **A lock wait filed one run under two names.** `run.sh` stamps its log from
