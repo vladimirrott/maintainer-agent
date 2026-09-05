@@ -306,9 +306,37 @@ fi
 # that is worse than a 403: a merge would fail loudly, but reviews and issue
 # comments would post successfully under the wrong identity.
 gh auth switch --hostname github.com --user "$GH_ACCOUNT" >>"$log" 2>&1 || true
-gh_login="$(gh api user --jq .login 2>>"$log" || true)"
+# Two different emergencies, and this used to report both as the second one.
+# On 2026-09-05 the 09:15 sysknife review and the 09:20 magent review both died
+# on `error connecting to api.github.com`, and the alert that woke the human
+# read "gh is authenticated as 'unknown', not vladimirrott", which sends you
+# hunting for a revoked token in the middle of a network outage.
+#
+# An outage is transient, so it is retried. A wrong account is not, so it is
+# refused on the first answer and never retried into: retrying that would be
+# waiting for a different identity to show up, which is the one thing this gate
+# exists to prevent.
+gh_tries="${MAINTAINER_GH_TRIES:-3}"
+gh_backoff="${MAINTAINER_GH_BACKOFF:-20}"
+gh_login=""
+attempt=1
+while :; do
+    gh_login="$(gh api user --jq .login 2>>"$log" || true)"
+    [ -n "$gh_login" ] && break
+    [ "$attempt" -ge "$gh_tries" ] && break
+    printf 'gh api user gave no answer (try %s of %s); retrying\n' "$attempt" "$gh_tries" >>"$log"
+    [ "$gh_backoff" -gt 0 ] && sleep "$((attempt * gh_backoff))"
+    attempt=$((attempt + 1))
+done
+if [ -z "$gh_login" ]; then
+    # 75 is EX_TEMPFAIL: nothing is wrong with the credentials, the run could
+    # not ask. The next timer tick is the fix, so this must not read as a
+    # refusal in the journal.
+    alert "gh could not reach GitHub in $gh_tries tries, so the identity was never verified and nothing ran. Check the network, not the token. See $log"
+    exit 75
+fi
 if [ "$gh_login" != "$GH_ACCOUNT" ]; then
-    alert "gh is authenticated as '${gh_login:-unknown}', not $GH_ACCOUNT; refusing to run. See $log"
+    alert "gh is authenticated as '$gh_login', not $GH_ACCOUNT; refusing to run. See $log"
     exit 1
 fi
 printf 'gh identity: %s\n' "$gh_login" >>"$log"

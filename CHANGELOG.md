@@ -12,6 +12,25 @@ middle digit.
 
 ### Fixed
 
+- **The identity gate's test never reached the identity gate.** The gate sits
+  behind `backend_check`, and `profiles/*/settings.json` is generated at install
+  time rather than committed, so the test ran with no wall on disk, died at
+  `backend claude unusable: missing .../settings.json`, and collected the `rc=1`
+  that `backend_check` returns. Both of its cases asserted `rc=1`, so both passed
+  without the gate executing. The tell was in the code the whole time: a
+  conditional `grep -q 'refusing to run' && printf` that printed nothing for the
+  life of the test. It renders a wall now and asserts the gate's own message,
+  because an exit code alone can come from anywhere upstream. This guarded what
+  its own comment calls "the single most important refusal".
+- **A network outage was reported as a wrong account.** On 2026-09-05 the 09:15
+  sysknife review and the 09:20 magent review both died on `error connecting to
+  api.github.com`, and the alert read `gh is authenticated as 'unknown', not
+  vladimirrott`, which sends you hunting for a revoked token during an outage.
+  An unreachable API now retries (three tries, linear backoff, both settable
+  with `MAINTAINER_GH_TRIES` and `MAINTAINER_GH_BACKOFF`) and then exits 75,
+  `EX_TEMPFAIL`, naming the network. A wrong account is still refused on the
+  first answer and never retried into.
+
 - **`maintainer audit --all` now prints each dead run's recorded failure.**
   It used to print the same "started and never reported" line for every log
   with no report, even when the log ended with a usable backend error. The

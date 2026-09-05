@@ -1086,3 +1086,81 @@ what a suppressed failure looks like.
 `audit --all` now walks `logs/` as well and names every log with no report.
 Auditing one run by name still audits that one run, because a sweep's findings
 leaking into a single-run check is how a tool becomes noise.
+
+## 45. The most important refusal had a test that never reached it
+
+`tests/run-tests.sh` opened this block with a comment naming the stakes:
+
+> The gate is the single most important refusal: a write under the wrong
+> account stamps an employer-linked identity onto personal open-source work.
+
+It then ran `lib/run.sh` under a stubbed `gh` and asserted `rc=1`. The gate sits
+behind `backend_check`, and `profiles/*/settings.json` is generated at install
+time rather than committed, so every invocation died here instead:
+
+```
+$ PATH="$sd:$PATH" HOME="$sd" bash lib/run.sh sysknife review
+backend claude unusable: missing .../profiles/sysknife/settings.json
+$ echo $?
+1
+```
+
+`backend_check` returns 1. The identity gate returns 1. Both cases asserted 1,
+so the test was green on an exit code produced eleven steps before the code it
+was written to guard.
+
+The tell had been sitting in the assertion the whole time:
+
+```sh
+printf '%s' "$out" | grep -q 'refusing to run' && printf '        (refusal message present)\n'
+```
+
+A conditional print, with no `else`. It printed nothing for the life of the
+test, and nothing is what a passing test looks like.
+
+Two rules come out of this, and the second is the one that generalises.
+
+**Assert the message, not only the code.** An exit code is a number that any
+layer can produce. The gate's own sentence can only come from the gate.
+
+**A guard behind a precondition needs that precondition satisfied in the
+test.** The wall is a build artifact, so the test has to render one. Anything
+the installer creates is absent in a fresh checkout, which is the environment
+CI and every new contributor start from.
+
+## 46. One sentence for two emergencies
+
+Both timers died on 2026-09-05, twelve hours apart in the schedule and five
+minutes apart in reality:
+
+```
+09:15:28  sysknife-review   error connecting to api.github.com
+09:20:28  magent-review     error connecting to api.github.com
+```
+
+What reached the desktop was neither of those lines:
+
+```
+ALERT: gh is authenticated as 'unknown', not vladimirrott; refusing to run
+```
+
+`gh api user --jq .login` returned nothing, `${gh_login:-unknown}` filled the
+hole, and the sentence that came out described a revoked token. During a network
+outage that sends you to the credential store, which is the one place the
+problem was not.
+
+The gate was right to refuse. It described the refusal wrongly, and an alert
+nobody can act on correctly is most of an alert wasted.
+
+The two cases also want different responses. An outage is transient, so the gate
+retries it and exits 75, `EX_TEMPFAIL`, which reads as "ask again" in the
+journal rather than as a refusal. A wrong account is not transient, so it is
+refused on the first answer and never retried into: retrying that is waiting for
+a different identity to appear, which is the thing this gate exists to prevent.
+
+**An empty answer is not a wrong answer.** Where a default fills in for a value
+you failed to read, check first whether you read anything at all.
+
+The cost was one review cycle. PR #370 arrived at 08:30 and the 09:15 pass that
+would have reviewed it never started, so a contributor waited for a maintainer
+who had already been scheduled to show up.

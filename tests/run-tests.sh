@@ -58,14 +58,83 @@ check "unknown task is rejected" "$rc" "64"
 echo "== the GitHub identity gate =="
 # The gate is the single most important refusal: a write under the wrong
 # account stamps an employer-linked identity onto personal open-source work.
-gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc
+# The gate sits BEHIND backend_check, and profiles/*/settings.json is generated
+# at install time rather than committed. So this block used to run with no wall
+# on disk, die at "backend claude unusable: missing .../settings.json", and
+# collect the rc=1 that backend_check returns. Both cases asserted rc=1, so both
+# passed without the identity gate ever executing. The tell was already in the
+# code: a conditional `grep -q 'refusing to run' && printf` that printed
+# nothing for the life of the test. A wall is rendered here, and the message is
+# asserted, because an exit code alone can come from anywhere upstream.
+gate_settings="$stub_dir/gate-settings.json"
+printf '{"permissions":{"deny":[]}}\n' > "$gate_settings"
+gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc, $3 = message
     make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) [ -n \"$1\" ] && echo \"$1\"; exit 0;; esac"
-    out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+    out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+        MAINTAINER_GH_TRIES=2 MAINTAINER_GH_BACKOFF=0 \
+        bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
     if [ "$rc" = "$2" ]; then ok "gh='${1:-<empty>}' -> rc=$2"; else bad "gh='${1:-<empty>}' expected rc=$2, got $rc"; fi
-    printf '%s' "$out" | grep -q 'refusing to run' && printf '        (refusal message present)\n'
+    if printf '%s' "$out" | grep -qi "$3"; then
+        ok "gh='${1:-<empty>}' -> the gate's own message, not an upstream failure"
+    else
+        bad "gh='${1:-<empty>}' exited $rc without saying '$3': $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+    fi
 }
-gate_test "someone-else" 1
-gate_test ""             1
+gate_test "someone-else" 1  "refusing to run"
+gate_test ""             75 "could not reach"
+# A network outage and a wrong account are different emergencies with different
+# fixes, and the gate said the same sentence for both. Measured 2026-09-05: the
+# 09:15 sysknife review and the 09:20 magent review both died on
+# "error connecting to api.github.com", and the alert that reached the human
+# read "gh is authenticated as 'unknown', not vladimirrott", which sends you
+# hunting for a token problem during a network outage.
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo 'error connecting to api.github.com' >&2; exit 1;; esac"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_GH_TRIES=2 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unreachable API exits 75 (try again), not 1 (refused)" \
+    || bad "an unreachable API exits $rc, indistinguishable from a wrong account"
+printf '%s' "$out" | grep -qi 'could not reach\|unreachable' \
+    && ok "and the alert names the network rather than the identity" \
+    || bad "the alert blames the identity for a network failure: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+printf '%s' "$out" | grep -q "authenticated as" \
+    && bad "the unreachable path still reports an account it never read" \
+    || ok "and it does not name an identity it never got an answer about"
+# A transient outage is transient, so the gate retries before giving up. A wrong
+# account is not transient and must never be retried into.
+tries="$stub_dir/tries"; rm -f "$tries"
+cat > "$stub_dir/gh" <<GHSTUB
+#!/bin/sh
+case "\$*" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*)
+      echo x >> "$tries"
+      if [ "\$(wc -l < "$tries")" -ge 2 ]; then echo vladimirrott; exit 0; fi
+      exit 1 ;;
+esac
+GHSTUB
+chmod +x "$stub_dir/gh"
+PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_GH_TRIES=3 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+[ -f "$tries" ] && [ "$(wc -l < "$tries")" -ge 2 ] \
+    && ok "a first failure is retried rather than ending the run" \
+    || bad "the gate gave up on the first network error"
+wrong="$stub_dir/wrong"; rm -f "$wrong"
+cat > "$stub_dir/gh" <<GHSTUB
+#!/bin/sh
+case "\$*" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*) echo x >> "$wrong"; echo someone-else; exit 0 ;;
+esac
+GHSTUB
+chmod +x "$stub_dir/gh"
+PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_GH_TRIES=3 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+[ "$(wc -l < "$wrong")" = 1 ] \
+    && ok "and a wrong account is refused at once, never retried into" \
+    || bad "the gate retried a wrong account $(wc -l < "$wrong") times"
 
 echo "== every profile's deny wall names the verbs that matter =="
 # Generated, then asserted. The tests read the artifact the agent is handed, not
