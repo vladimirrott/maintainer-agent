@@ -517,6 +517,30 @@ def audit_run(run_id: str) -> tuple[str, list[str], int]:
     return f"all {len(claims)} quoted command(s) appear in the record", [], len(claims)
 
 
+def _why_it_died(log: Path) -> str:
+    """The last thing a dead run's log said, or a mark that it said nothing.
+
+    Thirteen identical "started and never reported" lines is a warning people
+    stop reading, and lessons.md 41 is about exactly that: a checker whose
+    output is mostly noise loses the one finding that mattered. The reason is
+    already in the log. Printing it makes the orphan with NO reason, the one
+    systemd killed mid-run, the line that stands out.
+
+    Header lines are skipped: `=== run.sh ... ===` and the `maintainer=` stamp
+    are written before anything can fail, so they explain nothing.
+    """
+    try:
+        lines = log.read_text(errors="replace").splitlines()
+    except OSError as exc:
+        return f"its log is unreadable ({exc.__class__.__name__})"
+    for line in reversed(lines):
+        line = line.strip()
+        if not line or line.startswith("=== run.sh ") or line.startswith("maintainer="):
+            continue
+        return safe_for_prompt(line, 90)
+    return "no reason recorded, so the run was killed before it could say"
+
+
 def cmd_audit(which: str) -> None:
     ids = ([p.stem for p in sorted(RUNS.glob("*.md"))] if which in ("--all", "")
            else [which])
@@ -533,7 +557,7 @@ def cmd_audit(which: str) -> None:
             stem = log.stem
             if stem == "alerts" or (RUNS / f"{stem}.md").exists():
                 continue
-            orphans.append(stem)
+            orphans.append((stem, _why_it_died(log)))
 
     worst = unknown = 0
     for rid in ids:
@@ -553,8 +577,8 @@ def cmd_audit(which: str) -> None:
     # Only the legends that apply. The first version printed the `?` line
     # unconditionally, so a single clean audit ended on a sentence about a
     # symbol that had not appeared, which reads as a finding.
-    for stem in orphans:
-        print(f"! {stem:26} started and never reported")
+    for stem, why in orphans:
+        print(f"! {stem:26} started and never reported: {why}")
     if unknown:
         print("\n? no command record exists for that run, so nothing could be compared.")
     if orphans:

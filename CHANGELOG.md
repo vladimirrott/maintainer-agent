@@ -10,6 +10,15 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`maintainer audit --all` now prints each dead run's recorded failure.**
+  It used to print the same "started and never reported" line for every log
+  with no report, even when the log ended with a usable backend error. The
+  audit now skips its startup header, prints the final meaningful line, and
+  marks a header-only log as having no recorded reason. Two tests cover both
+  cases.
+
 ## [0.4.1] - 2026-09-05
 
 Three defects, all found by auditing the first unattended runs of 0.4.0 rather

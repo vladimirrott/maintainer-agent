@@ -2270,6 +2270,19 @@ printf '%s' "$out" | grep -qi 'never reported\|no report' \
 aurun 2026-01-01T00-00-review | grep -q '2026-01-03T00-00-review' \
     && bad "auditing one run reported an unrelated orphan" \
     || ok "one named run audits only that run"
+# Thirteen identical "started and never reported" lines is a warning people
+# stop reading, which is lesson 41's failure at a different address. The logs
+# already hold the reason; the audit prints it, so an orphan with NO reason is
+# the one that stands out.
+printf '=== run.sh au/review 2026-01-04T00:00:00Z ===\nmaintainer=v1 backend=claude model=opus log=x\nbackend claude unusable: missing settings.json\n' \
+    > "$au/logs/2026-01-04T00-00-review.log"
+out="$(aurun --all)"
+printf '%s' "$out" | grep -q 'backend claude unusable' \
+    && ok "an orphan carries the reason its log recorded" \
+    || bad "the audit names a dead run and drops the reason sitting in its log"
+printf '%s' "$out" | grep -q '2026-01-03T00-00-review.*no reason' \
+    && ok "and an orphan whose log says nothing is marked as unexplained" \
+    || bad "a log with a reason and a log with none read the same"
 
 echo "== the state directory does not grow forever =="
 gcd="$stub_dir/gc"; mkdir -p "$gcd/logs" "$gcd/drafts/old" "$gcd/runs"
