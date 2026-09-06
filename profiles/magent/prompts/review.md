@@ -124,6 +124,10 @@ maintainer file-issue \
   titles still collide.
 - **One issue per distinct defect.** Add `--label security` for anything on the
   trust boundary, and file those first.
+- **Look before you file.** `file-issue` deduplicates its own filings by a
+  marker, but it cannot know about issues opened before it existed or by hand.
+  Skim the open tracker (`gh issue list`) for the same defect first; if one is
+  already there, say so in the report and file nothing.
 - **Severity in the body, evidence in the body.** The command it fails under,
   the mutation that proves the guard is absent, the file and line.
 - At `POST=off` this rehearses: it prints `would file` and posts nothing, so a
