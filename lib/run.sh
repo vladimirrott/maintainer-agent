@@ -366,6 +366,30 @@ if [ -n "$pinned_login" ] && [ "$pinned_login" != "$GH_ACCOUNT" ]; then
 fi
 printf 'gh identity pinned by token for the whole run: %s\n' "$GH_ACCOUNT" >>"$log"
 
+# 0b. Provision a dedicated review checkout, isolated from any dev tree.
+#
+# A review bot must own the tree it reviews. When REPO_PATH was a working copy a
+# human also edits, two things broke: a run fired while the tree was dirty and
+# `refresh` aborted, leaving a silent gap; and a run reviewed whatever branch the
+# tree happened to be on rather than main. With POST=on and issue-filing, a run
+# against a half-edited tree could file issues about uncommitted experiments.
+#
+# So REPO_PATH points at a checkout this profile owns, and if it is missing this
+# clones it from REPO_ORIGIN. The clone tracks origin/main and nothing else
+# touches it, so `refresh` always finds a clean tree on main.
+if [ ! -d "$REPO_PATH/.git" ]; then
+    if [ -n "${REPO_ORIGIN:-}" ]; then
+        printf 'provisioning review checkout: %s -> %s\n' "$REPO_ORIGIN" "$REPO_PATH" >>"$log"
+        if ! git clone --quiet "$REPO_ORIGIN" "$REPO_PATH" >>"$log" 2>&1; then
+            alert "could not clone $REPO_ORIGIN into $REPO_PATH; no review checkout, nothing ran. See $log"
+            exit 1
+        fi
+    else
+        alert "$REPO_PATH is not a git checkout and the profile sets no REPO_ORIGIN to clone from; refusing to run. See $log"
+        exit 1
+    fi
+fi
+
 # 1. Refresh the checkout and compute what moved since the last run of this task.
 if ! context="$("$HELPER" start "$task" 2>&1)"; then
     printf '%s\n' "$context" >>"$log"

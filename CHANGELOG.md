@@ -10,6 +10,19 @@ middle digit.
 
 ## [Unreleased]
 
+### Changed
+
+- **Each profile reviews a checkout it owns, not a dev tree a human edits.**
+  `REPO_PATH` pointed at `~/Desktop/maintainer-agent` and `~/Desktop/lacs`, the
+  working copies actively developed in. A run that fired while the tree was dirty
+  aborted its refresh and left a silent gap; a run against a feature branch
+  reviewed the wrong commit; and with `POST=on` a run could file issues about
+  uncommitted experiments. Each profile now points at a dedicated checkout under
+  its own state directory, and `run.sh` clones it from a new `REPO_ORIGIN` if it
+  is missing and keeps it on `origin/main`. The checkout tracks what is pushed,
+  which is what a review should see, and never collides with local work. A run
+  whose checkout is absent and has no origin to clone refuses.
+
 ### Security
 
 - **A run now pins its GitHub identity by token, so it cannot post as another

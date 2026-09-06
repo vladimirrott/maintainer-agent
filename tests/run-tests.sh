@@ -261,6 +261,39 @@ else
     bad "a lock wait splits one run across two names; logs present: ${lgs:-none}"
 fi
 
+echo "== a run provisions its own checkout, isolated from any dev tree =="
+# A review bot must not operate in a working copy a human edits. REPO_PATH now
+# points at a checkout the profile owns; if it is missing, run.sh clones it from
+# REPO_ORIGIN. Driven against a real local origin, so the clone is real.
+prov_origin="$stub_dir/origin.git"; rm -rf "$prov_origin"
+git init -q --bare "$prov_origin"
+prov_seed="$stub_dir/seed"; rm -rf "$prov_seed"; mkdir -p "$prov_seed"
+( cd "$prov_seed" && git init -q && git config user.email t@t && git config user.name t \
+  && echo hi > f && git add f && git commit -qm init \
+  && git branch -M main && git remote add origin "$prov_origin" && git push -q origin main ) >/dev/null 2>&1
+prov_checkout="$stub_dir/owned-checkout"; rm -rf "$prov_checkout"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub claude "exit 0"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$stub_dir/prov-state" \
+    MAINTAINER_REPO_PATH="$prov_checkout" MAINTAINER_REPO_ORIGIN="$prov_origin" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1)
+[ -d "$prov_checkout/.git" ] \
+    && ok "a missing checkout is cloned from REPO_ORIGIN before the run reviews" \
+    || bad "run.sh did not provision the checkout: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
+# The profiles that ship must not point their review at a Desktop dev tree.
+for pe in "$root"/profiles/sysknife/profile.env "$root"/profiles/magent/profile.env; do
+    if grep -qE '^REPO_PATH=.*Desktop' "$pe"; then
+        bad "$(basename "$(dirname "$pe")") reviews a Desktop dev tree"
+    else
+        ok "$(basename "$(dirname "$pe")") reviews an owned checkout, not a Desktop dev tree"
+    fi
+    grep -q '^REPO_ORIGIN=' "$pe" \
+        && ok "$(basename "$(dirname "$pe")") declares an origin to provision from" \
+        || bad "$(basename "$(dirname "$pe")") has no REPO_ORIGIN, so a missing checkout cannot self-heal"
+done
+
 echo "== every profile's deny wall names the verbs that matter =="
 # Generated, then asserted. The tests read the artifact the agent is handed, not
 # the spec it came from: a generator bug that drops every absolute spelling is
@@ -1429,6 +1462,9 @@ esac
 HELPER
 chmod +x "$envh/bin/maintainer"
 mkdir -p "$envh/state/state" "$envh/state/runs" "$envh/repo"
+# run.sh now provisions a missing checkout; this test's repo is a plain dir, so
+# make it a real checkout to skip provisioning (there is no origin to clone).
+git init -q "$envh/repo"
 make_stub gh "case \"\$*\" in *'auth token'*) echo TOKEN;; *'api user'*) echo testuser;; esac; exit 0"
 printf '# r\n' > "$envh/state/runs/testrun-review.md"
 ENVDUMP_OUT="$stub_dir/backend.env" PATH="$stub_dir:$envh/bin:$PATH" HOME="$envh" \

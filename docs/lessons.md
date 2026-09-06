@@ -1410,3 +1410,30 @@ Two properties made this the right shape:
 A run that cannot get its token refuses. An identity you cannot pin is one you
 cannot promise, and a maintainer that might post as the wrong person should post
 as no one.
+
+## 54. A review bot in your working copy is a collision waiting for a dirty tree
+
+Both profiles pointed `REPO_PATH` at the working copy the maintainer develops in:
+`~/Desktop/maintainer-agent` and `~/Desktop/lacs`. It worked until it didn't, in
+three ways, all on the same day.
+
+`run.sh`'s refresh refuses a dirty tree, on purpose, so it does not trample
+uncommitted work. So a review that fires while the maintainer has edits in flight
+aborts and leaves no report: a gap in the trail that reads as a quiet period,
+which is lesson 22 again. A review that fires while the tree is on a feature
+branch reviews that branch, not main. And on 2026-09-05 a fork PR was left
+checked out in the shared tree, so the next unattended run found itself on a
+stranger's branch, one `cargo build` away from running `build.rs` from an
+unreviewed PR as the maintainer.
+
+With `POST=on` and issue-filing, the stakes went up: a run against a half-edited
+tree could file issues about experiments that were never committed.
+
+A review bot owns the tree it reviews. `REPO_PATH` now points at a checkout under
+the profile's own state directory, cloned from `REPO_ORIGIN` on first use and
+kept on `origin/main`. It tracks what is pushed, which is exactly what a review
+should judge, and nothing else touches it.
+
+The tell was there in the design all along: a refresh that refuses a dirty tree
+is a refresh that assumes the tree is not shared. The assumption was never
+written down, so nobody noticed it was false.
