@@ -10,6 +10,19 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **A run now pins its GitHub identity by token, so it cannot post as another
+  account.** The identity gate switched to the configured account and checked it
+  once, at the start. This machine's keyring holds more than one account, and the
+  active one flipped mid-run and posted to a personal open-source repository under
+  the wrong identity. The gate exports `GH_TOKEN` for the whole run now, so every
+  `gh` call, the agent's included, authenticates with the configured account's
+  token and no `gh auth switch` can select another (measured: a switch is ignored
+  while `GH_TOKEN` is set). The token stays in the process environment and is
+  never written to disk. A run that cannot obtain its token refuses rather than
+  risk the flip.
+
 ### Added
 
 - **`maintainer file-issue`, and the loop it closes.** The magent profile

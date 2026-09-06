@@ -82,6 +82,64 @@ gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc, $3 = message
 }
 gate_test "someone-else" 1  "refusing to run"
 gate_test ""             75 "could not reach"
+
+# The run pins its identity by TOKEN, not just by the active-account switch. The
+# keyring holds more than one account, one of them a work account, and the active
+# one flipped mid-run and posted to a personal repo under the wrong name. With
+# GH_TOKEN exported for the whole run, no gh call can select another account.
+# Proven on the host: `gh auth switch` to another user is ignored while GH_TOKEN
+# is set. These cases drive the guard.
+#
+# Happy path: a token is available and resolves to the account, so the run pins
+# and proceeds past the gate.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) echo PINNEDTOKEN;;
+  *'api user'*) echo vladimirrott;;
+esac"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$stub_dir/pin-state-1" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1)
+# The pin message lands in the run log; the observable on stdout is that the run
+# got PAST the identity gate (a token was pinned and verified) and on to refresh,
+# rather than refusing at the pin.
+if ! printf '%s' "$out" | grep -q 'could not pin\|resolves to' \
+   && printf '%s' "$out" | grep -q 'refresh failed'; then
+    ok "the run pins its gh identity by token and proceeds past the gate"
+else
+    bad "the run refused at the identity pin: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
+fi
+
+# No token available: the run cannot guarantee its identity, so it refuses
+# rather than risk posting as whoever the active account flips to.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) exit 1;;
+  *'api user'*) echo vladimirrott;;
+esac"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$stub_dir/pin-state-2" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'could not pin a token' \
+    && ok "with no token to pin, the run refuses rather than trust the active account" \
+    || bad "the run proceeded without a pinned token (rc=$rc)"
+
+# A token that resolves to a DIFFERENT account than expected is refused: this is
+# the wrong-identity-mid-config case the whole guard exists for.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) echo SOMEONESTOKEN;;
+  *'api user'*) if [ \"\$GH_TOKEN\" = SOMEONESTOKEN ]; then echo someoneelse; else echo vladimirrott; fi;;
+esac"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$stub_dir/pin-state-3" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q "resolves to 'someoneelse'" \
+    && ok "a pinned token that resolves to another account is refused" \
+    || bad "a token for the wrong account was accepted (rc=$rc): $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
 # A network outage and a wrong account are different emergencies with different
 # fixes, and the gate said the same sentence for both. Measured 2026-09-05: the
 # 09:15 sysknife review and the 09:20 magent review both died on
@@ -186,13 +244,17 @@ case "$1" in
 esac
 HELPERSTUB
 chmod +x "$lh/.local/bin/maintainer"
-make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo vladimirrott; exit 0;; esac"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
 make_stub claude "exit 0"
+# Its OWN state dir, not the suite's shared one: other run.sh-driven tests write
+# real-timestamped review logs into the shared root, and this asserts an exact
+# log name, so a neighbour's log made it flake under load.
+lognm_state="$lh/state"; rm -rf "$lognm_state"; mkdir -p "$lognm_state"
 PATH="$stub_dir:$PATH" HOME="$lh" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$lognm_state" \
     MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
-# The suite redirects STATE_DIR away from HOME, so the logs land there.
-lgs="$(find "$MAINTAINER_STATE_DIR/logs" -name '*review.log' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
+lgs="$(find "$lognm_state/logs" -name '*review.log' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
 if [ "$lgs" = "2031-02-03T04-05-review.log " ]; then
     ok "the log is filed under the run id the helper minted"
 else
@@ -1367,7 +1429,7 @@ esac
 HELPER
 chmod +x "$envh/bin/maintainer"
 mkdir -p "$envh/state/state" "$envh/state/runs" "$envh/repo"
-make_stub gh "case \"\$*\" in *'api user'*) echo testuser;; esac; exit 0"
+make_stub gh "case \"\$*\" in *'auth token'*) echo TOKEN;; *'api user'*) echo testuser;; esac; exit 0"
 printf '# r\n' > "$envh/state/runs/testrun-review.md"
 ENVDUMP_OUT="$stub_dir/backend.env" PATH="$stub_dir:$envh/bin:$PATH" HOME="$envh" \
     MAINTAINER_FORCE=1 MAINTAINER_STATE_DIR="$envh/state" \
@@ -2308,18 +2370,24 @@ printf '%s' "$out" | grep -q "closes #355, which carries the 'claimed' label" \
     || bad "the gate merged over a claim: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
 printf '%s' "$out" | grep -q 'takes their work away' \
     && ok "and says why, rather than naming a rule" || bad "the refusal does not say what it protects"
+# The three cases below are about the claim guard LETTING a merge through, so
+# they assert its refusal text is absent rather than that the whole merge
+# succeeds. The success path prints "receipt valid" only after a real git fetch,
+# which flakes under load; whether the claim guard blocked is decided before it.
+claim_allowed() {  # stdin = gate output -> 0 if the claim guard did not block
+    ! grep -q "carries the '.*' label" ; }
 # The author DID post on it, so it is their own claim.
 cl_gh 0 2
-cl_merge | grep -q 'receipt valid' \
+cl_merge | claim_allowed \
     && ok "the author's own claim does not block them" \
     || bad "a contributor is refused their own claimed issue"
 # No claim label on the issue.
 cl_gh null null
-cl_merge | grep -q 'receipt valid' \
-    && ok "an unclaimed issue merges normally" || bad "the check fires on every PR"
+cl_merge | claim_allowed \
+    && ok "an unclaimed issue is not blocked by the claim guard" || bad "the check fires on every PR"
 # A project that does not use claims switches it off.
 cl_gh 0 null
-cl_merge "" | grep -q 'receipt valid' \
+cl_merge "" | claim_allowed \
     && ok "an empty CLAIM_LABEL disables the check" || bad "the check cannot be turned off"
 for pe in "$root"/profiles/*/profile.env; do
     pn="$(basename "$(dirname "$pe")")"

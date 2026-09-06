@@ -341,6 +341,31 @@ if [ "$gh_login" != "$GH_ACCOUNT" ]; then
 fi
 printf 'gh identity: %s\n' "$gh_login" >>"$log"
 
+# Pin the run to THIS account's token, not just to the active-account switch
+# above. The keyring on this machine holds more than one account, and the active
+# one has flipped on its own mid-run and posted to a personal repository under
+# the wrong identity. The switch and the check above run once, at the start; a
+# flip after them still posts as somebody else.
+#
+# With GH_TOKEN exported for the whole run, every gh call, the agent's included,
+# authenticates with this token and no `gh auth switch` can select another
+# account (measured: a switch to a different user is ignored while GH_TOKEN is
+# set). The token stays in this process's environment and is never written to
+# disk. A run that cannot pin its identity refuses rather than risk the flip.
+pinned_token="$(gh auth token --user "$GH_ACCOUNT" 2>>"$log" || true)"
+if [ -z "$pinned_token" ]; then
+    alert "could not pin a token for $GH_ACCOUNT, so this run's identity is not guaranteed for the whole pass; refusing rather than risk posting as another account. See $log"
+    exit 1
+fi
+export GH_TOKEN="$pinned_token"
+unset GITHUB_TOKEN
+pinned_login="$(gh api user --jq .login 2>>"$log" || true)"
+if [ -n "$pinned_login" ] && [ "$pinned_login" != "$GH_ACCOUNT" ]; then
+    alert "the pinned token resolves to '$pinned_login', not $GH_ACCOUNT; refusing to run. See $log"
+    exit 1
+fi
+printf 'gh identity pinned by token for the whole run: %s\n' "$GH_ACCOUNT" >>"$log"
+
 # 1. Refresh the checkout and compute what moved since the last run of this task.
 if ! context="$("$HELPER" start "$task" 2>&1)"; then
     printf '%s\n' "$context" >>"$log"

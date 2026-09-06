@@ -1378,3 +1378,35 @@ depends on a human reading a file to become work. The board does that.
 **A review that files nothing is a review that runs for the record.** If an
 agent is worth running to find defects, the defects it finds are worth putting
 where defects get fixed.
+
+## 53. Pinning the account once is not pinning it
+
+The run gate did the right things in the wrong tense. It ran `gh auth switch` to
+the configured account and verified `gh api user` matched, both once, at the top
+of the run. Then it handed the rest of the pass, every review and every comment,
+to whatever `gh`'s active account happened to be by the time each one ran.
+
+This machine's keyring holds two accounts, one of them a work account. The active
+one has flipped on its own, and a run posted to a personal open-source repository
+under the work identity. A start-of-run check cannot catch that: the flip happens
+after it.
+
+The fix is a tense change. Instead of selecting the account and trusting it to
+stay selected, the run exports `GH_TOKEN` for its whole duration. `gh` uses that
+token for every call and ignores the active-account setting entirely: an explicit
+`gh auth switch` to the other user is ignored while `GH_TOKEN` is set, measured
+on the host. The other account is not merely deselected, it is unreachable.
+
+Two properties made this the right shape:
+
+- **The guarantee is structural, not vigilant.** Nothing has to re-check before
+  each post. The wrong account cannot be named because the token, not a mutable
+  setting, decides who acts.
+- **It names no account in the code.** The guard is "act as the configured
+  account, whose token this is." The forbidden account is never written down,
+  which matters here because the repository is public and the account to keep out
+  of it is the reason for the fix.
+
+A run that cannot get its token refuses. An identity you cannot pin is one you
+cannot promise, and a maintainer that might post as the wrong person should post
+as no one.
