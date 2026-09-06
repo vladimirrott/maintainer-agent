@@ -419,6 +419,22 @@ printf '%s' "$out" | grep -q 'no verification receipt' \
     && ok "a real integer PR passes validation and reaches the receipt check" \
     || bad "a valid PR number was rejected or mis-routed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
 
+echo "== the mutation cannot execute on the host =="
+# verify applies $mutation with `sed -i` on the host, and GNU sed's e/w/r
+# commands run shell and touch arbitrary files. A prompt-injected PR could steer
+# the agent to pass `s/x/id/e`. sed --sandbox rejects e/w/r, so a mutation is a
+# transform and nothing else. Asserted on the source because the exec path needs
+# a real container run to exercise end to end; the flag is the guarantee.
+grep -q 'sed --sandbox -i "$mutation"' "$root/bin/maintainer-merge" \
+    && ok "the host-side mutation runs sed in --sandbox mode" \
+    || bad "the mutation runs sed without --sandbox, so an e-flag mutation execs on the host"
+# And prove --sandbox actually blocks it on this machine, so the flag is not
+# cargo-culted from a version that lacks it.
+sbx="$stub_dir/sbx"; rm -rf "$sbx"; mkdir -p "$sbx"; echo hello > "$sbx/f"; rm -f "$sbx/SBXPWN"
+sed --sandbox -i "s#hello#touch $sbx/SBXPWN#e" "$sbx/f" >/dev/null 2>&1
+[ -f "$sbx/SBXPWN" ] && bad "sed --sandbox executed on this host; the guarantee does not hold here" \
+    || ok "sed --sandbox refuses the e command on this host"
+
 echo "== a receipt dies when production code moves under it =="
 # The condition the whole gate rests on. Built against a real git repo, because
 # the check is a real `git diff` and a stub would prove nothing.
@@ -2489,6 +2505,81 @@ printf '%s' "$out" | grep -q 'backend claude unusable' \
 printf '%s' "$out" | grep -q '2026-01-03T00-00-review.*no reason' \
     && ok "and an orphan whose log says nothing is marked as unexplained" \
     || bad "a log with a reason and a log with none read the same"
+
+echo "== a finding becomes a tracker issue, exactly once =="
+# The magent loop: a review finds a defect, and instead of leaving it as prose
+# in ~/.local/state, it files an issue. `maintainer file-issue` is the one path
+# issue creation takes, and it deduplicates by fingerprint so re-finding a defect
+# does not file it twice. That is also the fix for the sysknife #342/#343 pair:
+# identical titles, filed nine minutes apart.
+fi="$stub_dir/fissue"; rm -rf "$fi"; mkdir -p "$fi"
+firun() { MAINTAINER_STATE="$fi" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=testuser MAINTAINER_PROFILE=fp \
+    PATH="$stub_dir:$PATH" python3 "$root/bin/maintainer" file-issue "$@" 2>&1; }
+
+# An empty tracker: gh issue list returns [] so nothing is deduped against.
+make_stub gh "case \"\$*\" in
+  *'issue list'*) echo '[]';;
+  *'api user'*) echo testuser;;
+  *'issue create'*) echo 'https://github.com/o/r/issues/1';;
+  *'auth switch'*) exit 0;;
+esac"
+
+# POST unset -> rehearsal: it says what it would file and posts nothing.
+out=$(firun --title 'A guard exits 1 with no output' --body 'body text')
+printf '%s' "$out" | grep -qi 'would file' \
+    && ok "with POST off, file-issue rehearses rather than posting" \
+    || bad "file-issue posted or errored at POST=off: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
+
+# POST=on, empty tracker -> it creates the issue and prints the URL.
+out=$(MAINTAINER_POST=on firun --title 'A guard exits 1 with no output' --body 'body text')
+printf '%s' "$out" | grep -q 'issues/1' \
+    && ok "with POST on, a new finding is filed and its URL returned" \
+    || bad "file-issue did not create the issue: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
+
+# The marker the body carries, so we can simulate an existing issue.
+fp=$(python3 -c "import hashlib,re; t='a guard exits 1 with no output'; print(hashlib.sha1(t.encode()).hexdigest()[:16])")
+marker="<!-- maintainer-finding: $fp -->"
+make_stub gh "case \"\$*\" in
+  *'issue list'*) printf '[{\"number\":7,\"state\":\"OPEN\",\"title\":\"A guard exits 1 with no output\",\"body\":\"old body $marker\"}]';;
+  *'api user'*) echo testuser;;
+  *'issue create'*) echo 'https://github.com/o/r/issues/99';;
+  *'auth switch'*) exit 0;;
+esac"
+
+# Same title again -> deduped by fingerprint, even at POST=on, even worded anew.
+out=$(MAINTAINER_POST=on firun --title 'A guard exits 1 with no output' --body 'reworded body')
+if printf '%s' "$out" | grep -q 'already filed as #7' && ! printf '%s' "$out" | grep -q 'issues/99'; then
+    ok "a finding already on the tracker is not filed twice (the #342/#343 case)"
+else
+    bad "file-issue filed a duplicate: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
+fi
+
+# An explicit fingerprint dedups two DIFFERENT titles that are the same defect.
+fp2=$(python3 -c "import hashlib; print(hashlib.sha1('the-defect'.encode()).hexdigest()[:16])")
+m2="<!-- maintainer-finding: $fp2 -->"
+make_stub gh "case \"\$*\" in
+  *'issue list'*) printf '[{\"number\":8,\"state\":\"CLOSED\",\"title\":\"first wording\",\"body\":\"b $m2\"}]';;
+  *'api user'*) echo testuser;;
+  *'issue create'*) echo 'https://github.com/o/r/issues/100';;
+  *'auth switch'*) exit 0;;
+esac"
+out=$(MAINTAINER_POST=on firun --title 'a completely different wording' --fingerprint the-defect --body 'b')
+printf '%s' "$out" | grep -q 'already filed as #8 (closed)' \
+    && ok "an explicit fingerprint dedups across different titles, and reports the closed one" \
+    || bad "the explicit-fingerprint dedup did not fire: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
+
+# A missing body is refused rather than filing a titled-but-empty issue.
+out=$(MAINTAINER_POST=on firun --title 'x'); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -qi 'body' \
+    && ok "a finding with no body is refused" || bad "file-issue filed an issue with no body"
+
+# Wrong identity refuses rather than filing under the wrong name.
+make_stub gh "case \"\$*\" in *'issue list'*) echo '[]';; *'api user'*) echo somebodyelse;; *'auth switch'*) exit 0;; esac"
+out=$(MAINTAINER_POST=on firun --title 'y' --body 'b'); rc=$?
+[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'refusing to file' \
+    && ok "file-issue refuses to post under the wrong gh identity" \
+    || bad "file-issue filed under an unverified identity: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
 
 echo "== the state directory does not grow forever =="
 gcd="$stub_dir/gc"; mkdir -p "$gcd/logs" "$gcd/drafts/old" "$gcd/runs"

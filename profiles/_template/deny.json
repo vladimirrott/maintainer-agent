@@ -20,6 +20,7 @@
   "gh api -X DELETE",
   "gh api -X PUT",
   "gh auth token",
+  "gh issue create",
   "gh pr create",
   "gh pr merge",
   "gh release",

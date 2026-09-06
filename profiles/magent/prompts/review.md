@@ -99,8 +99,44 @@ repository with tags and a CHANGELOG. This one has neither, so `release-check`
 will say it cannot find a tag. Report that once and do not report it again;
 filing it as a finding every run is noise.
 
+## 7. File what you found
+
+A finding that stays in the run report changes nothing. Four defects rated
+BLOCKING sat in these reports for a day because nothing turned them into work
+somebody sweeps. So each defect worth fixing becomes a tracker issue, through
+one command:
+
+```sh
+maintainer file-issue \
+  --title "A one-line statement of the defect" \
+  --body-file <a draft you wrote under the drafts directory> \
+  --fingerprint "<stable key>" \
+  --label bug
+```
+
+- **A bare `gh issue create` is denied.** `maintainer file-issue` is the only
+  path, because it deduplicates: re-finding the same defect next week must not
+  file a second issue. That is the `#342`/`#343` pair on the other tracker,
+  filed nine minutes apart.
+- **The fingerprint is what makes dedup work, so make it stable.** Key it to the
+  defect, not the wording: `merge-gate:pr-not-validated`, not a slug of today's
+  title. If you omit it, the normalised title is used, so at least two identical
+  titles still collide.
+- **One issue per distinct defect.** Add `--label security` for anything on the
+  trust boundary, and file those first.
+- **Severity in the body, evidence in the body.** The command it fails under,
+  the mutation that proves the guard is absent, the file and line.
+- At `POST=off` this rehearses: it prints `would file` and posts nothing, so a
+  rehearsal week still shows you exactly what it would have filed. At `POST=on`
+  it files and returns the URL, or prints `already filed as #N` and files
+  nothing.
+
+Do not file the `release-check has no tag` housekeeping line as an issue; that
+is section 6, reported once in the run report, never on the tracker.
+
 ## What to write
 
 A report with the SHA range, the three gate numbers, every mutation you ran with
-its output, every claim you checked with the command that settled it, and the
-list of what you would have posted if this profile were posting.
+its output, every claim you checked with the command that settled it, and every
+finding you filed with the URL `file-issue` returned (or the `already filed`
+line it printed).

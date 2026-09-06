@@ -10,6 +10,20 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`maintainer file-issue`, and the loop it closes.** The magent profile
+  reviewed its own code and found defects, but ran at `POST=off`, so every
+  finding was prose in `~/.local/state` that nothing swept: four blocking defects
+  in the merge gate sat open for a day. Findings now become tracker issues
+  through one command, deduplicated by fingerprint so re-finding a defect files
+  nothing (the `#342`/`#343` case, identical titles nine minutes apart). A bare
+  `gh issue create` is denied in every wall, so issue creation cannot route
+  around the dedup, and `magent` is `POST=on`. The wall still denies merge, push,
+  release and tag regardless of `POST`, so the most an unattended magent run does
+  is open a deduplicated issue on its own repository. The sysknife issues and CI
+  prompts route through the same command.
+
 ### Security
 
 - **The PR number was interpolated into a `python3 -c` string unvalidated.**

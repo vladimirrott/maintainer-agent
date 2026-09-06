@@ -47,7 +47,12 @@ Invoke the `sysknife-issues` skill and follow it. Read
 4. Close any merged PR thread with exactly one next-issue invite.
 5. If the tracker is short of `good first issue` + `easy` work that needs no VM,
    no live provider and no maintainer credentials, file some. Verify each defect
-   at a named SHA before writing it up.
+   at a named SHA before writing it up, then file it with
+   `maintainer file-issue --title ... --body-file ... --fingerprint <stable key> --label "good first issue" --label easy`.
+   A bare `gh issue create` is denied: `file-issue` is the only path, because it
+   deduplicates by fingerprint. That is the guard that #342 and #343 needed,
+   filed nine minutes apart with the same title. Key the fingerprint to the
+   defect, not today's wording.
 6. Read `references/twir.md`. If a This Week in Rust CfP submission is due, say so
    in the report with the three issues you would list and why. **Do not open that
    PR**; it goes to another organisation's repository and Vladimir files it.

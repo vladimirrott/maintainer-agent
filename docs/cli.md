@@ -18,6 +18,7 @@ rather than guessing when more than one profile is deployed.
 | `maintainer audit [run-id\|--all]` | compare a run's report against the transcript of what actually ran |
 | `maintainer claims` | who has claimed what, how long they have been quiet, and which claims GitHub cannot see |
 | `maintainer offers` | who can be offered an issue, and who is already over the one-offer rule |
+| `maintainer file-issue --title T --body-file F [--fingerprint FP] [--label L]` | file one tracker issue for a finding, deduplicated by fingerprint. The only path issue creation takes; a bare `gh issue create` is denied. At `POST=off` it rehearses |
 | `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`. Never touches `runs/` or `index.md` |
 | `maintainer log [n]` | the last n lines of the current run's log |
 

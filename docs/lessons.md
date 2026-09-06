@@ -1343,3 +1343,38 @@ and its Python screen), a figure typed into four files, a rule that lives as
 prose in one place and as code in another. Four `printf`s that will never
 diverge because nothing depends on them agreeing are not that. Deduplicate what
 costs correctness when it drifts, not what merely looks the same.
+
+## 52. The loop that finds a bug and the loop that fixes it were not connected
+
+The magent review of 2026-09-04 found four defects rated BLOCKING, in the merge
+gate and the screen. Three were still open a day later. The reason was not that
+anyone judged them unimportant; it was that `magent` ran at `POST=off`, so every
+finding it produced was prose in `~/.local/state/magent-maint/runs/<id>.md`, and
+nothing sweeps that file. The sysknife profile files sixteen issues in three
+days because each one becomes a row on a board a human clears. The agent's review
+of its own code produced a report nobody was required to read.
+
+Finding a defect and fixing a defect are two loops, and they were joined only by
+a person who happened to open the report. That join is the weakest kind: it runs
+when someone remembers to.
+
+The fix connects them mechanically. A finding becomes a tracker issue through one
+command, `maintainer file-issue`, and `magent` posts. Two properties make it safe
+to point an unattended agent at its own tracker:
+
+- **It deduplicates.** Re-finding the same defect next week files nothing, keyed
+  to a fingerprint the agent supplies (or the normalised title, so identical
+  titles collide even when nobody thought about dedup). That is the guard the
+  `#342`/`#343` pair needed, filed nine minutes apart with the same title.
+- **The wall still denies everything that is not filing an issue.** `POST=on`
+  lifts only the rehearsal block; `gh pr merge`, `git push`, `gh release` and
+  `git tag` are denied by the wall regardless. And a bare `gh issue create` is
+  denied too, so the agent cannot route around the dedup. The most an unattended
+  magent run can now do is open a deduplicated issue on its own repository.
+
+A human still fixes and still merges. What changed is that the finding no longer
+depends on a human reading a file to become work. The board does that.
+
+**A review that files nothing is a review that runs for the record.** If an
+agent is worth running to find defects, the defects it finds are worth putting
+where defects get fixed.

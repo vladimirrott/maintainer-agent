@@ -24,5 +24,7 @@ over a survey of many.
    each workflow's `paths:` filter can be triggered by a change to what it guards.
 
 Commit nothing and push nothing. When the fix is small and you are confident,
-write the patch to the run's draft directory, file an issue that contains it, and
-say in the report that a branch is ready to be cut. Vladimir opens the PR.
+write the patch to the run's draft directory, file an issue that contains it with
+`maintainer file-issue` (a bare `gh issue create` is denied; it deduplicates by
+fingerprint, so a re-found gate defect is not filed twice), and say in the report
+that a branch is ready to be cut. Vladimir opens the PR.

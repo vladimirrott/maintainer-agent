@@ -1086,6 +1086,112 @@ def open_failures() -> list[dict]:
     return out
 
 
+FINDING_MARKER = "maintainer-finding"
+
+
+def _finding_fp(title: str, explicit: str) -> str:
+    """A stable id for a finding, so re-finding it does not file it twice.
+
+    Given a fingerprint, hash that. Given none, hash the normalised title, so
+    two issues with the same title collide even when nobody thought about dedup.
+    That is the exact shape of the tracker's #342 and #343: identical titles,
+    filed nine minutes apart, one still open.
+    """
+    import hashlib
+    base = explicit.strip()
+    if not base:
+        base = re.sub(r"[^a-z0-9 ]", "", title.lower())
+        base = re.sub(r"\s+", " ", base).strip()
+    return hashlib.sha1(base.encode()).hexdigest()[:16]
+
+
+def _existing_finding(marker: str):
+    """The first open-or-closed issue whose body carries this marker, or None.
+
+    Reads and greps rather than `--search`, because GitHub's search index lags a
+    fresh issue by seconds to minutes and dedup that misses a just-filed issue is
+    no dedup at all. A tracker this size fits in one page.
+    """
+    issues = gh_json("issue", "list", "--repo", SLUG, "--state", "all",
+                     "--limit", "300", "--json", "number,state,title,body")
+    if not issues:
+        return None
+    for i in issues:
+        if marker in (i.get("body") or ""):
+            return i
+    return None
+
+
+def cmd_file_issue(args: list[str]) -> None:
+    """File a tracker issue for a finding, once. The one path issue creation takes.
+
+    The deny wall forbids a bare `gh issue create`, so every finding an agent
+    wants to file comes through here and is deduplicated by fingerprint. At
+    POST=off it rehearses: it prints what it would file and creates nothing.
+    """
+    title = body = body_file = fp_arg = ""
+    labels: list[str] = []
+    it = iter(args)
+    for a in it:
+        if a == "--title": title = next(it, "")
+        elif a == "--body": body = next(it, "")
+        elif a == "--body-file": body_file = next(it, "")
+        elif a == "--fingerprint": fp_arg = next(it, "")
+        elif a == "--label": labels.append(next(it, ""))
+        else:
+            raise SystemExit(f"maintainer file-issue: unknown argument '{a}'")
+    if not title:
+        raise SystemExit("maintainer file-issue: --title is required")
+    if body_file:
+        try:
+            body = Path(body_file).read_text()
+        except OSError as exc:
+            raise SystemExit(f"maintainer file-issue: cannot read --body-file: {exc}")
+    if not body.strip():
+        raise SystemExit("maintainer file-issue: a finding needs a body (--body or --body-file)")
+    if not SLUG:
+        raise SystemExit("maintainer file-issue: no repository is configured (MAINTAINER_SLUG)")
+
+    fp = _finding_fp(title, fp_arg)
+    marker = f"<!-- {FINDING_MARKER}: {fp} -->"
+
+    existing = _existing_finding(marker)
+    if existing:
+        print(f"already filed as #{existing['number']} "
+              f"({existing['state'].lower()}): {existing.get('title', '')}")
+        print("nothing filed; this finding is already on the tracker.")
+        return
+
+    full_body = body.rstrip() + "\n\n" + marker + "\n"
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    if post != "on":
+        print(f"would file (POST={post or 'off'}): {title}  [{fp}]")
+        for label in labels:
+            print(f"  label: {label}")
+        print("  rehearsal: nothing was posted.")
+        return
+
+    # Never post as the wrong identity. run.sh pins it at the top of a run; this
+    # re-checks rather than trusting the inherited state, because a mis-filed
+    # issue carries a name.
+    account = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    if account:
+        # `gh api user --jq .login` prints a bare login, not JSON, so read stdout
+        # directly rather than through gh_json (which would json.loads it to None
+        # and silently skip this check).
+        who = _spawn(("gh", "api", "user", "--jq", ".login"), cwd=REPO).stdout.strip()
+        if who and who != account:
+            raise SystemExit(f"maintainer file-issue: gh is '{who}', not {account}; refusing to file")
+
+    cmd = ["gh", "issue", "create", "--repo", SLUG, "--title", title, "--body", full_body]
+    for label in labels:
+        cmd += ["--label", label]
+    p = _spawn(tuple(cmd))
+    if p.returncode != 0:
+        raise SystemExit(f"maintainer file-issue: gh issue create failed:\n{p.stdout}")
+    print((p.stdout or "").strip())
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -1368,6 +1474,8 @@ def main() -> None:
         record_failure(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "")
     elif cmd == "ok" and len(sys.argv) == 3:
         clear_failure(sys.argv[2])
+    elif cmd == "file-issue":
+        cmd_file_issue(sys.argv[2:])
     elif cmd == "digest" and len(sys.argv) >= 3:
         cmd_digest(sys.argv[2], "--compact" in sys.argv[3:])
     elif cmd == "log":

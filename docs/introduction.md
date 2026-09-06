@@ -9,7 +9,7 @@ and this repository, on one laptop, in the owner's name.
 
 ## The three questions it is built around
 
-**What stops it doing damage?** A deny wall of 36 verbs, generated per profile
+**What stops it doing damage?** A deny wall of 37 verbs, generated per profile
 and spelled from every directory each tool could be installed in, passed to the
 model runner as settings that outrank its own permission mode. `git push`,
 `gh pr merge`, `cargo publish`, `gh release`, the credential files, and the key
@@ -45,7 +45,7 @@ documented failures of solo maintainers, and what each one changes about the
 design. [Deploying it](deploy/README.md) is the practical end, four ways, in
 order of how much you have to trust the machine.
 
-[The lessons file](lessons.md) is thirty-six defects that reached a working
+[The lessons file](lessons.md) is fifty-one defects that reached a working
 system, each with the measurement that found it. It is the fastest way to
 understand why anything here is shaped the way it is, and several entries end in
 work that is still open.

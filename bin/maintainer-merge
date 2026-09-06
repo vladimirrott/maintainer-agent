@@ -434,11 +434,15 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     say "applying the mutation and re-running"
     # The mutation is applied inside the extracted tree only. The real
     # repository is never touched.
+    # --sandbox: $mutation is agent-supplied and reaches host sed. GNU sed's
+    # e/w/r commands run shell and read/write arbitrary files, so `s/x/id/e`
+    # would be host code execution. --sandbox refuses e/w/r, leaving sed a pure
+    # text transform. Confirmed on this host by tests/run-tests.sh.
     # -type f as well as the refusal above: `sed -i` on a symlink replaces it
     # with the dereferenced content, so this must never see one.
     ( cd "$work" && find . -type f -name "$(suite_mutate_glob)" \
         -not -path './.container-target/*' -print0 \
-        | xargs -0 sed -i "$mutation" ) || die "mutation failed to apply"
+        | xargs -0 sed --sandbox -i "$mutation" ) || die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
     run_in_container "$mut_log"; local mut_rc=$?
 
     if [ "$mut_rc" = 0 ]; then
