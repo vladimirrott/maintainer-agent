@@ -772,6 +772,13 @@ def cmd_offers() -> None:
     # such people is a collision: both were pointed at one fix and neither was
     # told about the other, so whoever finishes second wasted the evening.
     unanswered_on: dict = {}
+    # Who is on each issue that the maintainer never pointed there. An issue
+    # somebody is actively working, with a second person turning up
+    # independently, is the shape that cost the most: #252 was held and being
+    # worked, somebody else implemented it, and the holder finished their
+    # evening against an issue already closed. The double-booked check could
+    # not see it, because it only counts offers nobody has answered.
+    contention_on: dict = {}
     reserved = 0
     for i in issues:
         names = {l["name"] for l in i.get("labels") or []}
@@ -797,8 +804,15 @@ def cmd_offers() -> None:
             body = c["b"] or ""
             for m in _gh_mentions(body):
                 mentioned[m] = RELEASE_MARKER not in body
+        # Everyone the maintainer ever pointed here, released or not. A person
+        # who was released is a case somebody already resolved out loud, so
+        # their old comments are not a second party turning up unannounced.
+        addressed = set(mentioned)
         mentioned = {m for m, live in mentioned.items() if live}
         posted = {c["u"] for c in comments}
+        outsiders = posted - addressed - {owner}
+        if mentioned and outsiders:
+            contention_on[i["number"]] = (sorted(mentioned), sorted(outsiders))
         if not mentioned:
             if label not in names:
                 free_nums.append(i["number"])
@@ -843,6 +857,12 @@ def cmd_offers() -> None:
             print(f"DOUBLE-BOOKED #{n}: {', '.join('@' + w for w in who)} were each "
                   "pointed at it and neither has answered.")
         print("Offering an issue somebody already holds aims two people at one fix.")
+    if contention_on:
+        print()
+        for n, (held, others) in sorted(contention_on.items()):
+            print(f"CONTENDED #{n}: held by {', '.join('@' + w for w in held)}; "
+                  f"{', '.join('@' + w for w in others)} also posted there.")
+        print("Read those threads before merging anything that closes one of these.")
 
 
 def cmd_screen(pr: str) -> None:

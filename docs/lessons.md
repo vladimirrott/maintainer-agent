@@ -1482,3 +1482,60 @@ notifies nobody and is therefore not an offer.
 
 The agent found this in itself, during a run whose subject was a different gate
 entirely, and the finding cost more than the gate it was auditing.
+
+## 57. The detector I built for the shape that had just burned me
+
+Fixing the double-booking on 2026-09-07 produced a check that reports an issue
+offered to two people **who have not answered**. Hours later it missed the case
+that cost the most.
+
+#252 was offered to one contributor on 1 September. They answered, which the
+tool scores as "working on it" rather than as an open offer. A second
+contributor, whom nobody had pointed anywhere, read the same public thread,
+implemented it, and opened a PR. I reviewed and merged that PR, closing the
+issue about twenty minutes before the first contributor posted their own
+finished implementation.
+
+Neither condition the detector looks for was true. Both holders were invisible
+to it: one because they had replied, the other because the maintainer had never
+mentioned them.
+
+The rule it encoded was "two unanswered offers". The rule that matters is
+"more than one person is spending evenings on this". An issue somebody is
+actively working deserves **more** protection than one that has been ignored
+for a week, and the first version gave it less.
+
+`offers` now also prints `CONTENDED`: any issue with a live holder where
+somebody other than that holder and the maintainer has posted. It will fire on
+people asking questions, which is the right trade. A false positive costs one
+line of output. A false negative costs somebody their evening, and they find
+out by having their pull request land on a closed issue.
+
+Worth keeping separate from the lesson about the count: that one was a tool that
+could not answer the question, this one was a tool answering a narrower question
+than the one I had just been burned by, which is harder to notice because it
+works.
+
+### The first live run, and why it still flags #219
+
+One hit across roughly a hundred open issues, which is the noise level this is
+worth having at. It is also instructive: `#219 held by @bferanmi806-sketch;
+@0xZKc0de also posted there` is correct from the data and resolved in reality.
+0xZKc0de claimed it in August and I released them on 2 September.
+
+The release is invisible to the tool because I wrote it as *"You claimed #219 on
+17 August"*, with no `@` and no marker. Nothing the maintainer says in prose
+reaches the machine. The same habit nearly broke a batch of eleven release
+comments on 2026-09-07: they addressed people as "you", so every one would have
+posted, read as a release to a human, and left the issue held. They were caught
+by running the drafts through `_gh_mentions` before posting rather than after.
+
+So the rule has two halves and the second is the one that rots: a release must
+`@`-mention the person **and** carry `<!-- maintainer: claim-released -->`. The
+marker applies to the whole comment body, so a comment that releases one person
+must not mention the person keeping the issue, or it releases them too. Name
+that person without the `@`.
+
+Retroactively marking the old ones would notify people about decisions made days
+ago, so the historical gap stays and reads as one line of output. Worth the
+trade.

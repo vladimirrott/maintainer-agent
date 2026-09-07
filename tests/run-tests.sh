@@ -2358,6 +2358,63 @@ printf '%s' "$out" | grep -qE 'DOUBLE-BOOKED.*#31' \
     && ok "and the collision names the issue" \
     || bad "the collision does not name which issue is double-booked"
 
+echo "== somebody working an issue, and somebody else turning up on it =="
+# The double-booked check only sees issues offered to two people who have NOT
+# answered. On 2026-09-07 that missed the case that cost the most: #252 was
+# offered to one contributor who ANSWERED and was working it, while a second
+# contributor nobody had pointed anywhere implemented it independently and
+# opened a PR. The first finished their evening against an issue that had
+# already been closed. An issue somebody is actively working deserves more
+# protection than one that has been ignored for a week, not less.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) echo '[{"number":40,"labels":[]},{"number":41,"labels":[]}]';;
+  # 40: ana holds it and answered; bruno turns up independently.
+  *issues/40/comments*) echo '[{"u":"owner","b":"@ana this one is yours"},{"u":"ana","b":"taking it"},{"u":"bruno","b":"I have this implemented now"}]';;
+  # 41: ana holds it and answered; nobody else has posted.
+  *issues/41/comments*) echo '[{"u":"owner","b":"@ana yours"},{"u":"ana","b":"on it"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE 'CONTENDED.*#40' \
+    && ok "an issue whose holder is working it flags a second person turning up" \
+    || bad "a second contributor on a live issue goes unreported (this cost #252)"
+printf '%s' "$out" | grep -qE 'CONTENDED.*#40.*bruno|CONTENDED.*#40[^\n]*bruno' \
+    && ok "and it names who turned up" \
+    || bad "the contention does not name the second person"
+printf '%s' "$out" | grep -qE 'CONTENDED.*#41' \
+    && bad "an issue with only its holder posting was reported as contended" \
+    || ok "the holder posting on their own issue is not contention"
+# A person the maintainer mentioned and then RELEASED is a resolved case, not
+# an unknown second party. #219 was claimed in August, released on 2026-09-02
+# with the marker, and reserved for somebody else on 2026-09-07; the first
+# claimant still shows in the comment history and must not read as contention.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) echo '[{"number":42,"labels":[]}]';;
+  *issues/42/comments*) cat <<'J'
+[{"u":"owner","b":"@early this one is yours"},
+ {"u":"early","b":"on it"},
+ {"u":"owner","b":"@early releasing this, no hard feelings <!-- maintainer: claim-released -->"},
+ {"u":"owner","b":"@later reserved for you"},
+ {"u":"later","b":"taking it"}]
+J
+    ;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE 'CONTENDED.*#42' \
+    && bad "a released earlier claimant reads as contention on a reassigned issue" \
+    || ok "a released claimant is a resolved case, not a second party"
+
 echo "== a profile variable the tool reads must be in the allowlist =="
 # _profile_env sources profile.env and reads back a literal tuple of key names.
 # A key the code reads but the tuple omits comes back empty, which is
