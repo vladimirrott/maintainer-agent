@@ -353,6 +353,63 @@ than interpolated.
 [`docs/deploy/`](docs/deploy/README.md) covers the four ways to run it and what
 each one asks you to trust.
 
+## Where it runs
+
+One machine, five user timers, two profiles, both posting to GitHub as
+`vladimirrott`.
+
+| Profile | Repository | Tasks | Cadence |
+|---|---|---|---|
+| `sysknife` | [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife) | `review` | twice a day |
+| | | `issues` | every 2 days |
+| | | `ci` | every 3 days |
+| | | `audit` | every 5 days |
+| `magent` | this repository | `review` | daily |
+
+`magent` declares an `issues` task too and ships
+`maintainer@magent-issues.timer`, left `disabled`: this repository files its
+own findings through the review task, and a second unattended writer on the
+same small tracker would duplicate them.
+
+Each profile reviews a checkout it owns under
+`~/.local/state/<profile>-maint/checkout`, cloned from `REPO_ORIGIN` on first
+run and held on `origin/main`. Neither one can reach a development tree, which
+was not true until 2026-09-07: both pointed at working copies under `~/Desktop`,
+so a run and a person editing the same files raced each other.
+
+`systemctl --user list-timers 'maintainer@*'` prints the live schedule, and
+`~/.local/state/<profile>-maint/index.md` lists every run it has made.
+
+## How it gets better
+
+Every guard in this repository is here because a real run on a real repository
+paid for it. The loop is: the agent runs unattended, it posts or refuses, then
+somebody reads the transcript and turns whatever went wrong into a test. A
+lesson that stays prose gets skipped by the next run, so it does not stay prose.
+
+Three from 2026-09-07, in the order they were found:
+
+- The `ci` task audited `tests/release/no-secrets.test.sh`, a gate nobody had
+  audited, and found that deleting the Slack pattern left it green and that its
+  tree scan passed over an empty file list. It wrote the replacement, proved it
+  against nine mutations, and filed
+  [sysknife#387](https://github.com/lacs-project/sysknife/issues/387).
+- That same run found a defect in its own tooling: `maintainer offers` read
+  every `@token` in issue text as a person, so
+  `dependency-review-action@<sha>` and `dtolnay/rust-toolchain@stable` became
+  three accounts that do not exist and held a real issue out of the free pool.
+  `_gh_mentions` now requires the word boundary a real mention has.
+- Fixing that made `offers` runnable against the live tracker, which showed
+  seven issues offered to two people each and one to three. The tool had been
+  printing a count of free issues and never their numbers, so every offering
+  round picked by hand and collided. It now names them and flags
+  `DOUBLE-BOOKED`.
+
+None of those were visible from reading the code. They came from running it
+against a repository with real contributors, real CI and real consequences for
+being wrong, which is the argument for maintaining something real rather than a
+fixture.
+
 ## Another repository
 
 ```sh
@@ -536,12 +593,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 551 offline tests
+./tests/run-tests.sh        # 554 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-551 offline tests: no network, no GitHub, no model call. Every case tests a
+554 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

@@ -39,6 +39,15 @@ Invoke the `sysknife-issues` skill and follow it. Read
    Somebody who holds nothing does not appear in that table at all; that is what
    an eligible person looks like.
 
+   It also names the issues themselves. **Offer only from the `free to offer`
+   list on the first line**, and never an issue that appears under
+   `DOUBLE-BOOKED`. Both exist because on 2026-09-07 a batch of offers picked
+   issues by hand while the tool printed only a count of free ones. Seven issues
+   ended up pointed at two people each and #342 at three, none of whom were told
+   about the others. Whoever finishes second on a double-booked issue wasted
+   their evening, so this is the person-side rule applied to the other side of
+   the pairing.
+
 5. Make at most **two** offers per run, and only under the skill's rules: one open
    offer per person, never to somebody with an unanswered one (check with
    `gh api "search/issues?q=repo:lacs-project/sysknife+mentions:USER+is:issue+is:open"`),
