@@ -1539,3 +1539,73 @@ that person without the `@`.
 Retroactively marking the old ones would notify people about decisions made days
 ago, so the historical gap stays and reads as one line of output. Worth the
 trade.
+
+## 58. The gate read a label; `offers` read the thread
+
+`maintainer-merge` refused a pull request that closed an issue carrying the
+claim label when its author had never posted there. That guard was written
+after a real incident and it works. It did not fire on sysknife#252, and the
+reason is worth more than the guard.
+
+Two things were wrong, and the second is the one that generalises.
+
+The author check asked "has this contributor engaged with the issue?" rather
+than "is somebody else on it?". The person who opened the PR had commented,
+so they passed. Being interested in an issue is not the same as being the one
+who was promised it.
+
+But it never got that far, because **the issue had no label**. The maintainer
+had offered it with an `@mention` on 1 September and never applied one. So the
+guard's entire precondition was false and it skipped the issue in silence.
+
+`offers` derives who is on an issue from the thread: the last maintainer
+comment mentioning somebody, minus a release marker. The gate derived it from a
+label. One fact, two sources of truth, and the fragile one is the one a human
+has to remember at the moment of offering, which is the moment they are thinking
+about something else.
+
+The gate now calls `maintainer holders`, which is the same derivation `offers`
+uses. Not a copy of it: reimplementing that rule in bash is how the two answers
+drift apart, which is the failure this lesson is about, one level up. The label
+check stays as a second trigger for projects that use labels and not mentions.
+
+### And it failed open on its way in
+
+The first version of the fix read:
+
+```sh
+holders="$("$mbin" holders "$iss" 2>/dev/null || true)"
+[ -n "$holders" ] || continue
+```
+
+`maintainer holders` refuses to guess which profile it is acting for when more
+than one is deployed. The gate did not pass one through, so the helper exited 1,
+`2>/dev/null || true` swallowed it, `holders` came back empty, and empty means
+*nobody holds this, go ahead*. A guard that answers "no objection" when it could
+not ask the question is worse than no guard, because it reports as if it looked.
+
+It now distinguishes the two: exit 0 with no output means no holders, and any
+non-zero exit refuses the merge and prints what went wrong. Found by running the
+gate against a stub rather than by reading the diff, which is the only way this
+class ever shows up.
+
+## 59. Telling somebody an issue is theirs when nothing was assigned
+
+`gh api -X POST /issues/N/assignees` returns 200 for a name it silently drops.
+GitHub will not assign a non-collaborator who has not posted on that specific
+issue, and it says so by doing nothing at all. `gh issue edit --add-assignee`
+404s on the same people, which is at least honest.
+
+On 2026-09-07 that produced a public comment telling a contributor an issue was
+"assigned" to them, over an issue whose assignee list was empty, and a
+correction had to follow on the same thread.
+
+`maintainer assign <issue> <user>` now POSTs and then reads the list back,
+printing what is actually there and exiting non-zero when the name is missing,
+with the reason and the alternative: reserve it with the claim label and say
+that instead.
+
+The general form: an API that returns success for a request it did not carry
+out is indistinguishable from one that did, unless you go and look. Every write
+this agent makes on somebody else's behalf should be read back before it is
+described to them in public.
