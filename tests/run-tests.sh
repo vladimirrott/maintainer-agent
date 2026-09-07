@@ -2498,6 +2498,9 @@ case "\$*" in
   *reviewDecision*) echo APPROVED;;
   *closingIssuesReferences*) echo 355;;
   *'pr view'*author*) echo newcomer;;
+  # The gate asks \`maintainer holders\` before it looks at the label. These
+  # cases measure the LABEL path, so the thread says nobody was pointed here.
+  *issues/355/comments*) echo '[]';;
   *'issue view'*labels*) echo $1;;
   *'issue view'*comments*) echo $2;;
   *headRefOid*) echo $clsha;;
@@ -2508,9 +2511,13 @@ esac
 GHEOF
     chmod +x "$stub_dir/gh"
 }
+# MAINTAINER_PROFILE is set here on purpose. A real run.sh exports it, and the
+# gate now shells out to `maintainer holders`, which refuses to guess a profile
+# when more than one is deployed. Leaving it unset made that call fail, and the
+# first version of the holder check swallowed the failure and merged anyway.
 cl_merge() { PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL="${1-claimed}" \
-    MAINTAINER_POST=off bash "$mg" merge 1 2>&1; }
+    MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$mg" merge 1 2>&1; }
 cl_gh 0 null
 PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" \
@@ -2547,6 +2554,102 @@ for pe in "$root"/profiles/*/profile.env; do
     grep -q '^CLAIM_LABEL=' "$pe" && ok "$pn states whether it uses a claim label" \
         || bad "$pn leaves CLAIM_LABEL undeclared, so the check silently does nothing"
 done
+
+echo "== the gate reads the thread, not only the label =="
+# sysknife#252, 2026-09-07. The maintainer pointed a contributor at the issue
+# with an @mention on 1 September and never applied the label. A second
+# contributor read the same public thread, implemented it, and opened a PR. The
+# gate skipped the issue entirely, because its only notion of a claim was a
+# label nobody had applied, and the merge closed the issue about twenty minutes
+# before the first contributor posted their finished implementation.
+#
+# `offers` derives holders from the thread and the gate derived them from a
+# label: two sources of truth for one fact, and the fragile one is the one a
+# human has to remember. The gate now asks `maintainer holders`, which is the
+# same derivation `offers` uses, rather than carrying a second copy of it.
+thread_gh() {  # $1 = JSON array of {u,b} for the comments API
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *closingIssuesReferences*) echo 355;;
+  *'pr view'*author*) echo newcomer;;
+  *issues/355/comments*) echo '$1';;
+  *'issue view'*labels*) echo null;;
+  *'issue view'*comments*) echo 0;;
+  *headRefOid*) echo $clsha;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
+  *'pr merge'*) echo MERGED_STUB;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+# The output is captured before it is inspected, never piped into grep. The
+# suite runs with `set -o pipefail` and the gate exits non-zero when it refuses,
+# so `cl_merge | grep -q ...` reports the gate's exit code rather than whether
+# the text matched. Every assertion below would have been decided by the die,
+# not by the message, which is the same trap as reading `$?` after a pipe.
+
+# Somebody else was pointed at it, and no label was ever applied.
+thread_gh '[{"u":"testuser","b":"@holder this one is yours"}]'
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q 'was pointed at #355' \
+    && ok "the gate refuses a PR closing an issue pointed at somebody else" \
+    || bad "an unlabelled issue somebody was pointed at is merged out from under them"
+printf '%s' "$out" | grep -q 'holder' \
+    && ok "and it names who was pointed there" \
+    || bad "the refusal does not name the person who was promised the issue"
+
+# The author is the person who was pointed there.
+thread_gh '[{"u":"testuser","b":"@newcomer this one is yours"}]'
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q 'was pointed at #355' \
+    && bad "a contributor is refused the issue the maintainer gave them" \
+    || ok "the author being the person pointed there is not blocked"
+
+# Pointed there, then released out loud.
+thread_gh '[{"u":"testuser","b":"@holder yours"},{"u":"testuser","b":"@holder releasing <!-- maintainer: claim-released -->"}]'
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q 'was pointed at #355' \
+    && bad "a released claim still blocks a merge" \
+    || ok "a released holder does not block anybody"
+
+# Nobody was ever pointed at it.
+thread_gh '[{"u":"someone","b":"is this still open?"}]'
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q 'was pointed at #355' \
+    && bad "the thread check fires when there is no holder" \
+    || ok "an issue nobody was pointed at is not blocked"
+
+# And the question failing is not the same as the answer being "nobody".
+thread_gh_broken() {   # the comments call fails outright
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *closingIssuesReferences*) echo 355;;
+  *'pr view'*author*) echo newcomer;;
+  *issues/355/comments*) echo "gh: server error" >&2; exit 1;;
+  *'issue view'*labels*) echo null;;
+  *'issue view'*comments*) echo 0;;
+  *headRefOid*) echo $clsha;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
+  *'pr merge'*) echo MERGED_STUB;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+thread_gh_broken
+out="$(cl_merge)"
+printf '%s' "$out" | grep -q 'could not read who was pointed at it' \
+    && ok "an unreadable thread refuses the merge instead of assuming nobody" \
+    || bad "the holder check fails OPEN when it cannot read the issue"
 
 echo "== the agent cannot uninstall the thing that runs it =="
 # On 2026-09-04 an unattended run of the magent profile, reviewing THIS

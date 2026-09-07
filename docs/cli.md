@@ -18,6 +18,8 @@ rather than guessing when more than one profile is deployed.
 | `maintainer audit [run-id\|--all]` | compare a run's report against the transcript of what actually ran |
 | `maintainer claims` | who has claimed what, how long they have been quiet, and which claims GitHub cannot see |
 | `maintainer offers` | who can be offered an issue, and who is already over the one-offer rule |
+| `maintainer assign <issue> <user>` | assign an issue and read the assignee list back, refusing to report success when GitHub silently dropped the name. It drops a non-collaborator who has not posted on that issue, returning 200 either way |
+| `maintainer holders <issue>` | who the maintainer has pointed at one issue and not released, one handle per line. `maintainer-merge` calls this before merging a PR that closes an issue, so the gate and `offers` share one derivation instead of two |
 | `maintainer file-issue --title T --body-file F [--fingerprint FP] [--label L]` | file one tracker issue for a finding, deduplicated by fingerprint. The only path issue creation takes; a bare `gh issue create` is denied. At `POST=off` it rehearses |
 | `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`. Never touches `runs/` or `index.md` |
 | `maintainer log [n]` | the last n lines of the current run's log |

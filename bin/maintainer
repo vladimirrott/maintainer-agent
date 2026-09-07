@@ -743,6 +743,76 @@ def cmd_claims() -> None:
         print("  gh issue edit N --repo <slug> --add-assignee <user>")
 
 
+def cmd_assign(number: str, who: str) -> None:
+    """Assign an issue to somebody, and refuse to claim it worked unless it did.
+
+    GitHub accepts an assignee it will not apply. A person who is not a
+    repository collaborator and has not posted on that specific issue is
+    dropped silently: the REST call returns 200 with a body, and the issue ends
+    up with no assignee at all. `gh issue edit --add-assignee` 404s on the same
+    people, which at least says something.
+
+    On 2026-09-07 that produced a public comment telling a contributor an issue
+    was "assigned" to them while its assignee list was empty, and the correction
+    had to be posted afterwards. So this reads the list back and reports what is
+    actually there, exiting non-zero when the name it was given is not in it.
+    """
+    if not number.isdigit():
+        raise SystemExit("maintainer: assign needs an issue number")
+    if not _gh_mentions("@" + who) == {who}:
+        raise SystemExit(f"maintainer: {who!r} is not a GitHub handle")
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    if post != "on":
+        print(f"would assign (POST={post or 'off'}): #{number} to {who}")
+        return
+    _spawn(("gh", "api", "-X", "POST",
+            f"repos/{SLUG}/issues/{number}/assignees",
+            "-f", f"assignees[]={who}"), cwd=REPO, check=False)
+    got = gh_json("api", f"repos/{SLUG}/issues/{number}",
+                  "--jq", "[.assignees[].login]")
+    if got is None:
+        raise SystemExit(f"maintainer: assigned #{number}, then could not read it back")
+    if who in got:
+        print(f"#{number} assigned to {who}" + (f" (with {', '.join(x for x in got if x != who)})" if len(got) > 1 else ""))
+        return
+    raise SystemExit(
+        f"maintainer: #{number} still has {got or 'no assignees'} after asking for {who}.\n"
+        f"            GitHub drops an assignee who is not a collaborator and has\n"
+        f"            not posted on that issue. Do not tell them it is assigned:\n"
+        f"            reserve it with the claim label and say so instead.")
+
+
+def cmd_holders(number: str) -> None:
+    """Print who the maintainer has pointed at one issue, one handle per line.
+
+    The same derivation `offers` uses: the last maintainer comment mentioning a
+    person decides their state, and a comment carrying RELEASE_MARKER retracts
+    the offer. `maintainer-merge` calls this rather than re-deriving it in bash,
+    because the gate keeping its own notion of who holds an issue is what let
+    sysknife#252 through. `offers` read the thread, the gate read a label, and
+    the label had never been applied.
+
+    An unreadable issue exits non-zero and prints nothing. The gate treats "no
+    holders" as permission, so a network failure here must not manufacture one.
+    """
+    if not number.isdigit():
+        raise SystemExit("maintainer: holders needs an issue number")
+    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
+                       "--jq", "[.[]|{u:.user.login,b:.body}]")
+    if comments is None:
+        raise SystemExit(f"maintainer: could not read issue #{number}")
+    live: dict = {}
+    for c in comments:
+        if c.get("u") != owner:
+            continue
+        body = c.get("b") or ""
+        for m in _gh_mentions(body):
+            live[m] = RELEASE_MARKER not in body
+    for who in sorted(m for m, still in live.items() if still):
+        print(who)
+
+
 def cmd_offers() -> None:
     """Who can actually be offered an issue, computed rather than remembered.
 
@@ -1530,6 +1600,10 @@ def main() -> None:
         cmd_screen(sys.argv[2])
     elif cmd == "gc":
         cmd_gc("--dry-run" in sys.argv[2:])
+    elif cmd == "assign" and len(sys.argv) == 4:
+        cmd_assign(sys.argv[2], sys.argv[3])
+    elif cmd == "holders" and len(sys.argv) == 3:
+        cmd_holders(sys.argv[2])
     elif cmd == "offers":
         cmd_offers()
     elif cmd == "claims":

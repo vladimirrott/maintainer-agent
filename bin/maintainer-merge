@@ -558,12 +558,61 @@ PYEOF
     # noticing. CLAIM_LABEL comes from the profile; a project that does not use
     # one sets it empty and this check does nothing.
     local claim_label="${CLAIM_LABEL:-}"
+    local author closes
+    author="$(gh pr view "$pr" --repo "$REPO_SLUG" --json author --jq .author.login)"
+    closes="$(gh pr view "$pr" --repo "$REPO_SLUG" --json closingIssuesReferences \
+              --jq '.closingIssuesReferences[].number' 2>/dev/null)"
+
+    # The thread, before the label. This check used to live entirely inside the
+    # `claim_label` branch, so an issue somebody had been pointed at with an
+    # @mention but never labelled was invisible to the gate. On
+    # lacs-project/sysknife#252 that is exactly what happened: the maintainer
+    # offered the issue on 1 September and never applied the label, a second
+    # contributor read the same public thread and implemented it, and the merge
+    # closed the issue about twenty minutes before the first one posted their
+    # finished work.
+    #
+    # `offers` already derives holders from the thread. Deriving them a second
+    # time here, in bash, is how two answers drift apart, so this asks
+    # `maintainer holders` for the one derivation instead of copying it.
+    local mbin holders
+    mbin="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/maintainer"
+    [ -x "$mbin" ] || mbin="$(command -v maintainer 2>/dev/null || true)"
+    local iss
+    #
+    # It fails CLOSED. The first version swallowed the helper's stderr and read
+    # its empty output as "nobody holds this", so when `maintainer holders`
+    # refused for want of a profile the gate sailed straight past the check it
+    # had just been given. A guard whose input fails must say so, not wave the
+    # merge through: exit 0 with no output means no holders, and any non-zero
+    # exit means the question was never answered.
+    for iss in $closes; do
+        [ -n "$mbin" ] || break
+        local rc=0
+        holders="$(MAINTAINER_SLUG="$REPO_SLUG" \
+                   MAINTAINER_PROFILE="${MAINTAINER_PROFILE:-}" \
+                   "$mbin" holders "$iss" 2>&1)" || rc=$?
+        if [ "$rc" -ne 0 ]; then
+            die "#$pr closes #$iss and I could not read who was pointed at it:
+
+  $holders
+
+  That question decides whether merging this takes somebody's work away, so
+  the gate refuses rather than assuming the answer is nobody."
+        fi
+        [ -n "$holders" ] || continue
+        printf '%s\n' "$holders" | grep -qxF "$author" && continue
+        die "#$pr closes #$iss, and $(printf '%s' "$holders" | tr '\n' ' ')was pointed at #$iss
+  by the maintainer and has not been released from it. $author was not.
+
+  Somebody was told that issue was theirs, in public, where other contributors
+  read it and stayed off it. Merging this spends their evening. Talk to both
+  before it lands, and if the offer is genuinely stale release it on the thread
+  first: a release comment has to @mention them and carry the release marker,
+  or nothing but a human can see it."
+    done
+
     if [ -n "$claim_label" ]; then
-        local author closes
-        author="$(gh pr view "$pr" --repo "$REPO_SLUG" --json author --jq .author.login)"
-        closes="$(gh pr view "$pr" --repo "$REPO_SLUG" --json closingIssuesReferences \
-                  --jq '.closingIssuesReferences[].number' 2>/dev/null)"
-        local iss
         for iss in $closes; do
             gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
                 --jq '[.labels[].name]|index("'"$claim_label"'")' 2>/dev/null | grep -qv '^null$' || continue
