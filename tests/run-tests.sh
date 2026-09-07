@@ -2329,6 +2329,35 @@ printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
     && bad "the issue is free, but a phantom mention held it out of the pool" \
     || ok "the issue with one real unanswered offer is not counted free"
 
+echo "== a free issue is named, and one issue offered twice is a collision =="
+# The campaign on 2026-09-07 offered #267 to QinXi-ai while VedantMadane had
+# held an unanswered offer on it since 2026-09-01. Two people were aimed at one
+# issue and neither was told. `offers` knew #267 was taken and printed only a
+# COUNT of free issues, so choosing from its output was impossible. It now names
+# them, and names any issue pointed at two people.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) echo '[{"number":30,"labels":[]},{"number":31,"labels":[]},{"number":32,"labels":[]}]';;
+  *issues/30/comments*) echo '[]';;
+  *issues/31/comments*) echo '[{"u":"owner","b":"@ana this one is yours"},{"u":"owner","b":"@bruno reserved for you as a follow-up"}]';;
+  *issues/32/comments*) echo '[{"u":"owner","b":"@ana yours"},{"u":"ana","b":"on it"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE 'free to offer:.*#30' \
+    && ok "the free issue is named, so a campaign can pick from the output" \
+    || bad "offers still prints only a count, so nothing can choose from it"
+printf '%s' "$out" | grep -q 'DOUBLE-BOOKED' \
+    && ok "one issue offered to two people is reported as a collision" \
+    || bad "#31 is pointed at two people and offers reports no collision"
+printf '%s' "$out" | grep -qE 'DOUBLE-BOOKED.*#31' \
+    && ok "and the collision names the issue" \
+    || bad "the collision does not name which issue is double-booked"
+
 echo "== a profile variable the tool reads must be in the allowlist =="
 # _profile_env sources profile.env and reads back a literal tuple of key names.
 # A key the code reads but the tuple omits comes back empty, which is

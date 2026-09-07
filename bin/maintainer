@@ -767,7 +767,12 @@ def cmd_offers() -> None:
         raise SystemExit("maintainer: could not read the tracker")
     owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
     held: dict = {}
-    free = reserved = 0
+    free_nums: list = []
+    # Which people hold an UNANSWERED offer on each issue. One issue with two
+    # such people is a collision: both were pointed at one fix and neither was
+    # told about the other, so whoever finishes second wasted the evening.
+    unanswered_on: dict = {}
+    reserved = 0
     for i in issues:
         names = {l["name"] for l in i.get("labels") or []}
         if "twir-listed" in names or "maintainer-only" in names:
@@ -796,13 +801,21 @@ def cmd_offers() -> None:
         posted = {c["u"] for c in comments}
         if not mentioned:
             if label not in names:
-                free += 1
+                free_nums.append(i["number"])
             continue
         for who in mentioned:
             state = "answered" if who in posted else "UNANSWERED"
             held.setdefault(who, []).append((i["number"], state))
+            if state == "UNANSWERED":
+                unanswered_on.setdefault(i["number"], set()).add(who)
 
-    print(f"{free} issue(s) free to offer, {reserved} reserved or maintainer-only\n")
+    # Naming them, not counting them. A campaign that has to pick issues cannot
+    # pick from an integer, so the 2026-09-07 batch picked by hand and offered
+    # #267 to a second person while the first still held it.
+    free_nums.sort()
+    print(f"{len(free_nums)} issue(s) free to offer: "
+          f"{', '.join('#%d' % n for n in free_nums) or 'none'}")
+    print(f"{reserved} reserved or maintainer-only\n")
     print("Nobody listed below can take another. Somebody who holds nothing does not")
     print("appear here at all, which is what an eligible person looks like.\n")
     print(f"{'person':22} {'open':>4} {'unans':>6}  eligible?")
@@ -823,6 +836,13 @@ def cmd_offers() -> None:
     if over:
         print(f"\n{over} person/people hold more than one unanswered offer. The rule is one,")
         print("and the measurement behind it is that a second is answered at zero.")
+    clash = {n: sorted(w) for n, w in unanswered_on.items() if len(w) > 1}
+    if clash:
+        print()
+        for n, who in sorted(clash.items()):
+            print(f"DOUBLE-BOOKED #{n}: {', '.join('@' + w for w in who)} were each "
+                  "pointed at it and neither has answered.")
+        print("Offering an issue somebody already holds aims two people at one fix.")
 
 
 def cmd_screen(pr: str) -> None:

@@ -1437,3 +1437,48 @@ should judge, and nothing else touches it.
 The tell was there in the design all along: a refresh that refuses a dirty tree
 is a refresh that assumes the tree is not shared. The assumption was never
 written down, so nobody noticed it was false.
+
+## 55. A count is not a list, and the difference cost seven issues
+
+`maintainer offers` enforced one open offer per person. It measured the person
+side carefully, printed who was over the rule, and opened with a line like:
+
+```
+3 issue(s) free to offer, 7 reserved or maintainer-only
+```
+
+Nobody can choose from an integer. Every offering round therefore picked issues
+by reading the tracker by hand, and the tool that existed to prevent bad offers
+had nothing to say about which issue was a bad offer. On 2026-09-07 a batch of
+offers went out that way. Running the fixed tool against the live tracker
+afterwards found seven issues pointed at two people each, and #342 pointed at
+three, none of whom had been told about the others.
+
+The person-side rule and the issue-side rule are the same rule seen from two
+ends: an offer pairs somebody with something, and either end can already be
+taken. Only one end was checked, because only one end was printed.
+
+It now prints the numbers, and a `DOUBLE-BOOKED` line naming every issue with
+more than one unanswered holder. The prompt says to offer only from the named
+free list.
+
+Worth noticing how it stayed hidden: the count was correct the whole time. The
+tool was not wrong, it was unusable for the decision it existed to inform, and
+a correct number is a comfortable place for that to hide.
+
+## 56. The tool that reads a tracker will read a commit SHA as a person
+
+`offers` extracted mentions with `@([A-Za-z0-9-]+)` over the comment text. An
+issue about pinning GitHub Actions quoted `dependency-review-action@a1d282b3…`,
+`trufflehog@05a58329…` and `dtolnay/rust-toolchain@stable`, so the tool reported
+three contributors who do not exist, each holding an unanswered offer, and held
+that real issue out of the free pool where nobody could be offered it.
+
+A mention starts a word. In every pin and every git ref the `@` follows the tool
+name, so the character before it decides: whitespace, a line start or a bracket
+is a mention, and an alphanumeric or one of `-._/` is not. `_gh_mentions` also
+drops code spans, which matches GitHub, since a handle inside backticks
+notifies nobody and is therefore not an offer.
+
+The agent found this in itself, during a run whose subject was a different gate
+entirely, and the finding cost more than the gate it was auditing.
