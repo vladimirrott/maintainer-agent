@@ -2298,6 +2298,37 @@ printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
     && ok "and puts the issue back in the free pool" \
     || bad "the released issue is still counted as spoken for: $(printf '%s' "$out" | head -1)"
 
+echo "== an action pin or a git ref is not a GitHub handle =="
+# `maintainer offers` read every @token in issue text as a person. #369 quoted
+# `dependency-review-action@<40-hex>`, `trufflehog@<40-hex>` and
+# `dtolnay/rust-toolchain@stable`, so the issue counted as offered to three
+# accounts that do not exist and dropped out of the free-to-offer pool while no
+# real person was ever offered it. A real mention sits at a word boundary; a pin
+# or ref has an alphanumeric immediately before the @.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) echo '[{"number":20,"labels":[]}]';;
+  *issues/20/comments*) cat <<'J'
+[{"u":"owner","b":"Bumped the pins. `actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294` and dtolnay/rust-toolchain@stable stay pinned. @be-student can you take this one?"}]
+J
+    ;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE '^be-student ' \
+    && ok "a real @mention beside the pins is still read" \
+    || bad "the real handle was lost: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+printf '%s' "$out" | grep -qiE '^stable |^a1d282|^05a583' \
+    && bad "an action pin or git ref was counted as a person: $(printf '%s' "$out" | grep -iE 'stable|a1d282|05a583' | head -1)" \
+    || ok "action pins and git refs do not become phantom people"
+printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+    && bad "the issue is free, but a phantom mention held it out of the pool" \
+    || ok "the issue with one real unanswered offer is not counted free"
+
 echo "== a profile variable the tool reads must be in the allowlist =="
 # _profile_env sources profile.env and reads back a literal tuple of key names.
 # A key the code reads but the tuple omits comes back empty, which is

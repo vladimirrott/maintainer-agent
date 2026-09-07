@@ -177,6 +177,34 @@ SENTINELS = (SENTINEL, "<!-- sysknife-maint: report not yet written -->")
 # are otherwise the same sentence shape addressed to the same person.
 RELEASE_MARKER = "<!-- maintainer: claim-released -->"
 
+# A GitHub @mention, told apart from an action pin or a git ref.
+#
+# `maintainer offers` used to read every `@token` in issue text as a person. A
+# single issue (#369) that quoted `dependency-review-action@<40-hex>`,
+# `trufflehog@<40-hex>` and `dtolnay/rust-toolchain@stable` then counted as
+# offered to three accounts that do not exist, so it fell out of the
+# free-to-offer pool while no real person was ever offered it.
+#
+# The tell is the character before the `@`. A mention starts a word, so what
+# precedes it is whitespace, a line start, or an opening bracket, never an
+# alphanumeric or one of `-._/`. In every pin and ref the `@` follows the tool
+# name, i.e. an alphanumeric. Inline and fenced code spans are dropped first,
+# since the same pins appear inside backticks elsewhere in a body. The handle
+# shape is GitHub's own: 1-39 chars, alphanumeric with single internal hyphens.
+_MENTION = re.compile(r"(?<![A-Za-z0-9\-._/])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\b")
+_CODE_SPAN = re.compile(r"```.*?```|`[^`]*`", re.S)
+
+
+def _gh_mentions(body: str) -> set:
+    """The set of real GitHub handles mentioned in a comment body."""
+    stripped = _CODE_SPAN.sub(" ", body or "")
+    out = set()
+    for m in _MENTION.findall(stripped):
+        if "--" in m:            # GitHub forbids consecutive hyphens
+            continue
+        out.add(m)
+    return out
+
 # Subcommands run.sh calls and a person does not. They are deliberately absent
 # from docs/cli.md, and tests/run-tests.sh requires that every OTHER subcommand
 # appears there: six had accumulated undocumented before anything checked.
@@ -762,7 +790,7 @@ def cmd_offers() -> None:
             if c["u"] != owner:
                 continue
             body = c["b"] or ""
-            for m in re.findall(r"@([A-Za-z0-9-]+)", body):
+            for m in _gh_mentions(body):
                 mentioned[m] = RELEASE_MARKER not in body
         mentioned = {m for m, live in mentioned.items() if live}
         posted = {c["u"] for c in comments}
