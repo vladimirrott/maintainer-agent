@@ -10,6 +10,55 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-07
+
+Most of this release came from using the agent rather than reading it. Four of
+the entries below are defects it found in itself while auditing something else,
+or that a day of doing its job by hand made visible.
+
+### Added
+
+- **`maintainer holders <issue>`.** Who the maintainer has pointed at an issue
+  and not released, one handle per line. `maintainer-merge` calls it, so the
+  gate and `offers` share one derivation instead of keeping two.
+- **`maintainer assign <issue> <user>`.** Assigns, then reads the assignee list
+  back. GitHub returns 200 for an assignee it silently drops: it will not assign
+  a non-collaborator who has not posted on that specific issue, and says so by
+  doing nothing. That produced a public comment telling a contributor an issue
+  was assigned to them over an empty assignee list.
+
+### Changed
+
+- **The merge gate reads the thread, not only a label.** It refused a pull
+  request closing a *claimed* issue whose author had never posted there, and
+  missed `lacs-project/sysknife#252` twice over: the author had commented, and
+  the issue carried no label because the offer had been made with an `@mention`
+  and nothing else. `offers` derived holders from the thread while the gate
+  derived them from a label, and the label is the half a human has to remember.
+  The first version of the fix failed open, reading the helper's error as "no
+  holders"; it now refuses when it cannot answer the question.
+- **`offers` names the free issues and reports collisions.** It printed a count
+  and never which ones, so every offering round picked by hand. Run against the
+  live tracker afterwards it found seven issues pointed at two people each and
+  one at three. It now prints the free list, `DOUBLE-BOOKED` for an issue with
+  more than one unanswered offer, and `CONTENDED` for an issue whose holder is
+  working while somebody else turns up on it.
+
+### Fixed
+
+- **`offers` read action pins and git refs as people.** `@([A-Za-z0-9-]+)`
+  matched `dependency-review-action@<40-hex>` and
+  `dtolnay/rust-toolchain@stable`, so one issue counted as offered to three
+  accounts that do not exist and stayed out of the free pool where nobody could
+  be offered it. A mention starts a word; a pin has the tool name before the
+  `@`. Code spans are dropped too, matching GitHub, where a handle in backticks
+  notifies nobody.
+
+### Documented
+
+- Where the agent is deployed, and that running it against a real repository
+  with real contributors is what turns these up. Lessons 55 through 59.
+
 ### Changed
 
 - **Each profile reviews a checkout it owns, not a dev tree a human edits.**
