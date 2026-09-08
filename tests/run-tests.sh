@@ -957,6 +957,33 @@ else
     ok "doctor fails against an empty home"
 fi
 
+echo "== the timers run what was installed, not what is in the tree =="
+# The agent was edited, merged and left undeployed several times in one session,
+# so unattended runs kept executing old code while the repository said the bug
+# was fixed. Nothing surfaced the gap, which made it depend on somebody
+# remembering at the end of a long day.
+dh="$stub_dir/drifthome"; mkdir -p "$dh/.local/share/maintainer"
+dsrc="$stub_dir/driftsrc"; git init -q -b main "$dsrc"
+git -C "$dsrc" config user.email t@t; git -C "$dsrc" config user.name t
+printf 'one\n' > "$dsrc/f"; git -C "$dsrc" add -A >/dev/null; git -C "$dsrc" commit -qm one
+old_sha="$(git -C "$dsrc" rev-parse --short HEAD)"
+printf 'two\n' > "$dsrc/f"; git -C "$dsrc" add -A >/dev/null; git -C "$dsrc" commit -qm two
+printf 'version=v0.1.0\ncommit=%s\ninstalled_from=%s\n' "$old_sha" "$dsrc" \
+    > "$dh/.local/share/maintainer/VERSION"
+dout="$(PATH="$stub_dir:$PATH" HOME="$dh" bash "$d" --quick 2>&1 || true)"
+printf '%s' "$dout" | grep -q 'commit(s) behind' \
+    && ok "doctor reports deployed code that is behind the tree it came from" \
+    || bad "a stale deployment is invisible; timers keep running old code"
+printf '%s' "$dout" | grep -q 'install.sh' \
+    && ok "and it names the command that fixes it" \
+    || bad "the drift report gives no remedy"
+# Deployed AT head, clean tree: no complaint.
+printf 'version=v0.1.0\ncommit=%s\ninstalled_from=%s\n' "$(git -C "$dsrc" rev-parse --short HEAD)" "$dsrc" \
+    > "$dh/.local/share/maintainer/VERSION"
+PATH="$stub_dir:$PATH" HOME="$dh" bash "$d" --quick 2>&1 | grep -q 'commit(s) behind' \
+    && bad "doctor calls an up-to-date deployment stale" \
+    || ok "a deployment at HEAD is not reported as drifted"
+
 echo "== housekeeping: prune and release-check =="
 mr="$root/bin/maintainer-repo"
 [ -x "$mr" ] && ok "maintainer-repo present and executable" || bad "maintainer-repo missing"

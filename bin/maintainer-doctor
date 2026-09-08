@@ -230,5 +230,33 @@ elif [ -d "$st" ]; then
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
 else yellow "no state yet; the first run creates it" ""; fi
 
+printf '\n\033[1mDeployed code\033[0m\n'
+# The timers run what is in ~/.local/bin, not what is in the working tree. Edit
+# the agent, merge it, forget to reinstall, and every unattended run afterwards
+# is old code while the repository says the bug is fixed. Nothing surfaced that,
+# so it depended on somebody remembering at the end of a long session.
+_dep_commit="$(sed -n 's/^commit=//p' "$share/VERSION" 2>/dev/null)"
+_dep_from="$(sed -n 's/^installed_from=//p' "$share/VERSION" 2>/dev/null)"
+if [ -z "$_dep_commit" ] || [ -z "$_dep_from" ]; then
+    yellow "VERSION does not record what was installed or where from" \
+           "reinstall with ./install.sh so the stamp is written"
+elif [ ! -d "$_dep_from/.git" ]; then
+    yellow "the tree it was installed from is gone: $_dep_from" \
+           "reinstall from a checkout so drift can be measured"
+else
+    _src_head="$(git -C "$_dep_from" rev-parse --short HEAD 2>/dev/null)"
+    _behind="$(git -C "$_dep_from" rev-list --count "$_dep_commit..HEAD" 2>/dev/null || echo '?')"
+    _dirty="$(git -C "$_dep_from" status --porcelain 2>/dev/null | wc -l)"
+    if [ "$_dep_commit" = "$_src_head" ] && [ "$_dirty" = "0" ]; then
+        green "deployed code is that tree's HEAD ($_dep_commit)"
+    elif [ "$_dep_commit" = "$_src_head" ]; then
+        yellow "deployed matches HEAD, but $_dep_from has $_dirty uncommitted change(s)" \
+               "commit them, then ./install.sh, or the next run uses neither version"
+    else
+        red "deployed $_dep_commit is $_behind commit(s) behind $_dep_from ($_src_head); every timer is running old code" \
+            "cd $_dep_from && ./install.sh"
+    fi
+fi
+
 printf '\n  \033[1m%d ok, %d warning(s), %d failure(s)\033[0m\n' "$ok" "$warn" "$err"
 [ "$err" -eq 0 ]
