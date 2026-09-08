@@ -2697,6 +2697,79 @@ out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAIN
 printf '%s' "$out" | grep -q 'declares no CLAIM_LABEL' \
     && ok "a profile that tracks no claims says so" || bad "claims assumes every project uses a label"
 
+
+echo "== a pull request answers an offer more strongly than a comment does =="
+# On 2026-09-07 `claims` reported sysknife#390 as "OFFERED 0d ago and never
+# answered; do not assign", while Georgefifth had an open PR #389 whose body
+# said `Closes #390`. Opening the pull request is the strongest answer anybody
+# can give to an offer, and the check that decides whether to assign them read
+# only the comment thread. The offer looked unanswered for as long as the
+# contributor did the work instead of replying.
+cp2="$stub_dir/claimspr"; mkdir -p "$cp2"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) cat <<'J'
+[{"number":389,"author":{"login":"georgefifth"},"title":"fix(e2e): per-word tags","body":"Closes #390"},
+ {"number":401,"author":{"login":"driveby"},"title":"unrelated","body":"see #391 for context"}]
+J
+    ;;
+  *'issue list'*) cat <<'J'
+[{"number":390,"title":"t","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]},
+ {"number":391,"title":"u","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]}]
+J
+    ;;
+  *issues/390/comments*) echo '[{"u":"maint","b":"@georgefifth this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+  *issues/391/comments*) echo '[{"u":"maint","b":"@driveby this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -qE '#390.*never answered' \
+    && bad "an offer answered by a pull request is still reported as unanswered" \
+    || ok "an offer answered by a pull request is not reported as unanswered"
+printf '%s' "$out" | grep -qE '#390.*#389' \
+    && ok "and the pull request that answered it is named" \
+    || bad "the answer is accepted without saying where it came from"
+printf '%s' "$out" | grep -q 'maintainer assign 390 georgefifth' \
+    && ok "and the assignment is recommended, because they did answer" \
+    || bad "somebody who answered with a PR gets no assignment suggestion"
+# The negative twin, and it is the whole point: a bare mention of the issue is
+# not a closing reference. #401 says "see #391", which GitHub would not act on
+# either, so neither does this.
+printf '%s' "$out" | grep -qE '#391.*never answered' \
+    && ok "a PR that merely mentions an issue does not answer the offer" \
+    || bad "any mention of the number counts as a claim, which is worse than the bug"
+printf '%s' "$out" | grep -q 'maintainer assign 391' \
+    && bad "a drive-by mention produced an assignment recommendation" \
+    || ok "and it recommends no assignment for a mere mention"
+# Could not ask is not an answer of "nobody". A failed PR listing must leave the
+# offer looking unanswered rather than inventing an answer, and must say so.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) exit 1;;
+  *'issue list'*) cat <<'J'
+[{"number":390,"title":"t","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]}]
+J
+    ;;
+  *issues/390/comments*) echo '[{"u":"maint","b":"@georgefifth this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+    && ok "a failed PR listing is reported rather than read as 'nobody answered'" \
+    || bad "an unreadable PR list is indistinguishable from an empty one"
+printf '%s' "$out" | grep -q 'maintainer assign 390' \
+    && bad "an unreadable PR list still produced an assignment recommendation" \
+    || ok "and it recommends no assignment it could not justify"
+rm -f "$stub_dir/gh"
+
 echo "== a claimed issue is a promise the gate has to keep =="
 # Measured on lacs-project/sysknife, 2026-09-04. A contributor said "I am taking
 # this" on #355; the maintainer replied "it is yours", applied `claimed`, and

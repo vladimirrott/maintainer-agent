@@ -1705,3 +1705,56 @@ which is the only reason it was caught at all. The checker is now one file that
 the real case and both mutations invoke, and the suite compiles it first, since a
 checker that cannot parse rejects everything and looks strict while testing
 nothing.
+
+## 62. The gate could not run, and reported the contributor as failing
+
+The 2026-09-07 19:11 review approved sysknife#389, eleven checks green,
+mutation-proven three ways, and could not merge it:
+
+```
+suite: shell (docker.io/library/bash:5 under podman)
+running 'tests/e2e/story-metadata.test.sh' unmutated
+maintainer-merge: the test does not pass unmutated (rc=1); nothing to prove yet
+    FAIL  line 184: python3: command not found
+```
+
+`bash:5` carries no python3. sysknife#386 made that test drive
+`check_evidence_claims.py`, and from that commit onward no receipt was earnable
+for the shell suite. The gate did not report itself broken. It reported the pull
+request as failing its own test, which is the more expensive way to be wrong,
+and it stayed that way until somebody tried to merge.
+
+The comment justifying `bash:5` said these tests "need bash, git and nothing
+else". Checked rather than believed: `bash:5` resolves no git either, so the
+guarantee it stated was never a guarantee. Nothing connected the image to what
+the suite runs inside it, so the drift was undetectable by construction.
+
+Every suite now declares `suite_needs()`, and `maintainer-doctor` runs each image
+and checks each binary resolves. A probe that cannot run is a warning naming the
+image, never a pass.
+
+### An offer answered by working on it looked unanswered
+
+The same run found `claims` reporting sysknife#390 as "OFFERED 0d ago and never
+answered; do not assign" while the person it was offered to had an open pull
+request whose body said `Closes #390`. The check that decides whether to assign
+somebody read only the comment thread, so the offer looked unanswered for
+exactly as long as the contributor did the work instead of replying.
+
+The rule is GitHub's own closing keywords and nothing wider. A pull request
+saying "see #391 for context" closes nothing, and counting it would commit
+somebody in public to work they never took, which is worse than the bug.
+
+### Two defects in the tests written that hour
+
+`vdoc | grep -q` decides from the pipeline's exit status, and the suite runs
+under `set -o pipefail`, so it reports doctor's status rather than the match.
+One case passed for two runs while the check it tested did not exist; its twin
+failed while the check worked. The rule was already a comment beside the
+maintainer-merge cases, and a comment did not prevent the repeat, so the suite
+now greps itself for the shape and names the offending line.
+
+Leaving `make_stub podman 'exit 0'` behind at the end of a block put a permissive
+stub first on PATH for every later case, and the real shell-suite integration
+test two hundred cases downstream reported a receipt it had not earned. Stubs
+get removed, not reset to something harmless-looking.
