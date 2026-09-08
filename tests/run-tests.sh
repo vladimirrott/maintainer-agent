@@ -194,6 +194,124 @@ PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
     && ok "and a wrong account is refused at once, never retried into" \
     || bad "the gate retried a wrong account $(wc -l < "$wrong") times"
 
+
+
+echo "== the prompt states the posting state it was given, never a written-in one =="
+# 2026-09-07, magent review. `profiles/magent/prompts/common-preamble.md` said
+# "This profile is at **POST=off**: publish nothing", and profile.env says
+# POST="${MAINTAINER_POST:-on}". run.sh injected no notice, because it only
+# injected one for POST=off, so the static sentence was the only thing in the
+# prompt that spoke about posting and it was wrong. The run believed it, called
+# `maintainer file-issue` five times, and filed issues #27 to #31 for real. It
+# caught itself by reading the variable afterwards.
+#
+# A prompt may describe what POST=off does. It may not assert which one is in
+# force: that is the environment's to say, and only run.sh can read it.
+for _pf in "$root"/profiles/*/prompts/*.md "$root/lib/preamble-core.md"; do
+    [ -e "$_pf" ] || continue
+    # Newlines folded first. The sentence that caused this wrapped between
+    # "This profile" and "is at **POST=off**", so a line-based grep passed it
+    # and the check reported clean over the exact file it was written for.
+    if tr '\n' ' ' < "$_pf" | grep -qiE 'this profile +is at [^.]*POST='; then
+        bad "$(basename "$(dirname "$(dirname "$_pf")")")/$(basename "$_pf") asserts a posting state the environment decides"
+    else
+        ok "$(basename "$(dirname "$(dirname "$_pf")")")/$(basename "$_pf") claims no posting state of its own"
+    fi
+done
+# Driven through the real assembly, both ways. --show-prompt exists so the
+# preview is the same assembly the run uses.
+pp_settings="$stub_dir/postprompt.json"
+printf '{"permissions":{"deny":[]}}\n' > "$pp_settings"
+pp() { MAINTAINER_POST="$1" MAINTAINER_SETTINGS="$pp_settings" \
+       bash "$root/lib/run.sh" --show-prompt magent review 2>&1; }
+pp_on="$(pp on)"
+printf '%s' "$pp_on" | grep -qi 'this run POSTS' \
+    && ok "at POST=on the prompt says so in its own section" \
+    || bad "a posting run is told nothing about posting"
+printf '%s' "$pp_on" | grep -q 'REHEARSAL' \
+    && bad "a posting run is handed the rehearsal notice" \
+    || ok "and it is not handed the rehearsal notice"
+pp_off="$(pp off)"
+printf '%s' "$pp_off" | grep -q 'This run is a REHEARSAL' \
+    && ok "at POST=off the rehearsal notice is still injected" \
+    || bad "the rehearsal notice was lost"
+printf '%s' "$pp_off" | grep -qi 'this run POSTS' \
+    && bad "a rehearsal is told it posts" \
+    || ok "and a rehearsal is not told it posts"
+# The two must never both appear, which is the failure the run actually hit:
+# one source saying off while the other said on.
+printf '%s' "$pp_on" | grep -ciE 'this run POSTS|This run is a REHEARSAL' | grep -qx 1 \
+    && ok "exactly one posting notice reaches the prompt" \
+    || bad "the prompt carries more than one answer to whether it posts"
+
+echo "== the cadence gate is re-read after the lock, not only before it =="
+# 2026-09-07, measured. `install.sh --timers` fired a Persistent=true catch-up
+# for `issues` at 20:09. A second run launched at 20:23 passed the cadence gate
+# (the stamp was still two days old), then waited eleven minutes on the lock,
+# acquired it at 20:34 one second after the first run promoted the stamp, and
+# started a full duplicate pass. It only stopped because the backend hit a
+# session limit.
+#
+# The gate is checked at run.sh:123 and the lock at run.sh:301, so every run
+# queued behind another decides its cadence on a stamp that the run ahead of it
+# is about to replace. Adding a catch-up slot to every timer makes this more
+# likely, not less, which is what turned it up.
+rh="$stub_dir/racehome"; rm -rf "$rh"; mkdir -p "$rh/state" "$rh/repo"
+git -C "$rh/repo" init -q -b main 2>/dev/null
+# The lock sits behind backend_check, and profiles/*/settings.json is generated
+# at install time rather than committed, so without a wall on disk this dies at
+# "backend claude unusable" and never reaches the code under test. The identity
+# gate block above records the same trap.
+race_settings="$rh/settings.json"
+printf '{"permissions":{"deny":[]}}\n' > "$race_settings"
+# A stamp old enough to pass the gate on entry.
+touch -d "100 hours ago" "$rh/state/last-review.json"
+# This block needs the REAL flock: $stub_dir carries `make_stub flock 'exit 0'`,
+# which returns success without taking anything, so a run under it never queues
+# and the case it is meant to reproduce cannot happen. Its own stub directory
+# holds only the gh stub, which exists so that a run reaching past the gate
+# fails locally instead of touching the network.
+rbin="$rh/bin"; mkdir -p "$rbin"
+printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"api user"*) echo someone-else;; esac\n' \
+    > "$rbin/gh"; chmod +x "$rbin/gh"
+# And the backend, because backend_check runs before the lock and CI's
+# no-deployed-tree job has no claude on PATH. This passed locally on a machine
+# that happens to have one installed, which is the whole reason that job exists.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$rbin/claude"; chmod +x "$rbin/claude"
+# Hold the lock, so the run gets past the gate and then blocks exactly where the
+# real one did.
+exec 8>"$rh/run.lock"
+flock 8
+# `timeout` so a release that does not happen costs a minute rather than the
+# profile's a-hour LOCK_WAIT.
+( PATH="$rbin:$PATH" MAINTAINER_STATE_DIR="$rh" MAINTAINER_REPO_PATH="$rh/repo" \
+  MAINTAINER_SETTINGS="$race_settings" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+  timeout 60 bash "$root/lib/run.sh" sysknife review > "$rh/out" 2>&1 ) &
+race_pid=$!
+# Give it time to clear the gate and reach the lock. Not a race of its own: if
+# it has not blocked yet the stamp below is simply newer still.
+sleep 3
+# The run ahead of it finishes and promotes the stamp.
+touch "$rh/state/last-review.json"
+flock -u 8; exec 8>&-
+wait "$race_pid"; race_rc=$?
+race_out="$(cat "$rh/out")"
+printf '%s' "$race_out" | grep -q '^skipped: review last ran' \
+    && ok "a run that waited on the lock re-reads the cadence gate and skips" \
+    || bad "a queued run duplicates the pass that just finished: $(printf '%s' "$race_out" | tr '\n' ' ' | cut -c1-100)"
+[ "$race_rc" = 0 ] \
+    && ok "and it exits 0, because being superseded is not a failure" \
+    || bad "a superseded run exits $race_rc, which the audit reads as a broken task"
+# MAINTAINER_FORCE has to survive the second check, or the override stops working
+# for exactly the runs that need it.
+touch "$rh/state/last-review.json"
+out=$(PATH="$rbin:$PATH" MAINTAINER_STATE_DIR="$rh" MAINTAINER_REPO_PATH="$rh/repo" \
+      MAINTAINER_SETTINGS="$race_settings" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 MAINTAINER_FORCE=1 \
+      bash "$root/lib/run.sh" sysknife review 2>&1)
+printf '%s' "$out" | grep -q '^skipped: review last ran' \
+    && bad "MAINTAINER_FORCE is defeated by the second gate check" \
+    || ok "MAINTAINER_FORCE still overrides both checks"
+
 echo "== a coverage refusal names the suites that would have covered it =="
 # The gate refused sysknife#370 because no single suite covers *.md + *.py +
 # *.sh, which is correct: a receipt from a suite that does not run the changed
@@ -2585,6 +2703,60 @@ printf '%s' "$out" | grep -q 'DOUBLE-BOOKED' \
 printf '%s' "$out" | grep -qE 'DOUBLE-BOOKED.*#31' \
     && ok "and the collision names the issue" \
     || bad "the collision does not name which issue is double-booked"
+
+
+echo "== an issue with an open pull request closing it is not free to offer =="
+# The 2026-09-07 20:09 issues run reported it in its own process notes:
+# "`maintainer offers` cannot see pull request threads ... #371 was printed as
+# free while an open PR closed it." Offering that issue to somebody is the
+# sysknife#252 shape again, two people aimed at one fix, and this time the tool
+# that exists to prevent it would have caused it.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) echo '[{"number":88,"author":{"login":"carla"},"title":"fix","body":"Closes #40"},{"number":89,"author":{"login":"drive"},"title":"x","body":"related to #41"}]';;
+  *'issue list'*) echo '[{"number":40,"labels":[]},{"number":41,"labels":[]},{"number":42,"labels":[]}]';;
+  *issues/40/comments*) echo '[]';;
+  *issues/41/comments*) echo '[]';;
+  *issues/42/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#40' \
+    && bad "an issue an open PR closes is offered to somebody else" \
+    || ok "an issue an open PR closes is kept out of the free list"
+printf '%s' "$out" | grep -qE '#40.*(PR|#88)' \
+    && ok "and it says which pull request took it, rather than dropping it silently" \
+    || bad "the issue vanishes from the count with no reason given"
+# The negative twin. A PR that merely mentions an issue closes nothing, so #41
+# stays offerable; treating a mention as a claim would starve the free pool.
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#41' \
+    && ok "an issue a PR only mentions stays free" \
+    || bad "a bare mention removed an issue from the free pool"
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#42' \
+    && ok "an issue with no pull request at all stays free" \
+    || bad "the free pool collapsed"
+# Could not ask is not an answer. With the listing unreadable the free list must
+# say it is unverified rather than silently claim every issue is offerable.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) exit 1;;
+  *'issue list'*) echo '[{"number":40,"labels":[]}]';;
+  *issues/40/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+    && ok "an unreadable PR listing is said out loud before anything is offered" \
+    || bad "offers claims a free list it could not verify"
+rm -f "$stub_dir/gh"
 
 echo "== somebody working an issue, and somebody else turning up on it =="
 # The double-booked check only sees issues offered to two people who have NOT
