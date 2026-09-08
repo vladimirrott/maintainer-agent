@@ -126,3 +126,15 @@ than waiting for someone to feel like doing them.
 Both commands push or read on your behalf through a narrow path, the same way
 `maintainer-merge` does. `git push` stays denied to you directly; what you are
 allowed is the audited script, not the verb.
+
+## Pull requests waiting on a human, not on you
+
+Your wall denies `gh api ... POST`, so you cannot approve a fork's workflow run,
+and that is deliberate: approving a run on a PR that touches `.github/workflows/**`
+is how a fork takes the token. It does mean a first-time contributor's checks sit
+at `action_required` until somebody clicks, and a review that reports "checks
+pending" reads as the contributor's problem when it is the maintainer's.
+
+List them explicitly. `gh pr checks <n>` showing `action_required`, or a rollup
+with no runs at all, goes in the report under a heading that says a human has to
+approve them, with the PR numbers. Saying nothing leaves them stalled for days.

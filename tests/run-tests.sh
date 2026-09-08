@@ -2489,7 +2489,7 @@ git -C "$clr" remote add origin "$clr"
 # through a `make_stub "..."` argument mangled the case patterns, so the stub
 # answered nothing, the gate sailed past the check, and all five cases failed
 # while the guard itself was working.
-cl_gh() {  # $1 = label index (0 = claimed, null = not), $2 = author's comment index
+cl_gh() {  # $1 = label index (0 = claimed, null = not), $2 = commenter logins
     cat > "$stub_dir/gh" <<GHEOF
 #!/usr/bin/env bash
 case "\$*" in
@@ -2502,7 +2502,11 @@ case "\$*" in
   # cases measure the LABEL path, so the thread says nobody was pointed here.
   *issues/355/comments*) echo '[]';;
   *'issue view'*labels*) echo $1;;
-  *'issue view'*comments*) echo $2;;
+  # The gate reads an assignee list and a list of commenter logins now. The old
+  # stub answered both with an index, which modelled "is the author present"
+  # and could not express WHO else was, which is the question that matters.
+  *'issue view'*assignees*) echo "";;
+  *'issue view'*comments*) printf '%s\n' $2;;
   *headRefOid*) echo $clsha;;
   *mergeStateStatus*) echo CLEAN;;
   *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
@@ -2518,7 +2522,7 @@ GHEOF
 cl_merge() { PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL="${1-claimed}" \
     MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$mg" merge 1 2>&1; }
-cl_gh 0 null
+cl_gh 0 claimant
 PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" \
     bash "$mg" receipt 1 "$clsha" 'proved' >/dev/null 2>&1
@@ -2536,17 +2540,20 @@ printf '%s' "$out" | grep -q 'takes their work away' \
 # which flakes under load; whether the claim guard blocked is decided before it.
 claim_allowed() {  # stdin = gate output -> 0 if the claim guard did not block
     ! grep -q "carries the '.*' label" ; }
-# The author DID post on it, so it is their own claim.
-cl_gh 0 2
+# Labelled, unassigned, and the author is the only voice on the thread: there is
+# nobody whose claim this could be taking. Note this used to pass merely because
+# the author had commented, which is the flaw that let a stranger clear somebody
+# else's claim by saying "I have this implemented".
+cl_gh 0 newcomer
 cl_merge | claim_allowed \
     && ok "the author's own claim does not block them" \
     || bad "a contributor is refused their own claimed issue"
 # No claim label on the issue.
-cl_gh null null
+cl_gh null claimant
 cl_merge | claim_allowed \
     && ok "an unclaimed issue is not blocked by the claim guard" || bad "the check fires on every PR"
 # A project that does not use claims switches it off.
-cl_gh 0 null
+cl_gh 0 claimant
 cl_merge "" | claim_allowed \
     && ok "an empty CLAIM_LABEL disables the check" || bad "the check cannot be turned off"
 for pe in "$root"/profiles/*/profile.env; do
@@ -2554,6 +2561,50 @@ for pe in "$root"/profiles/*/profile.env; do
     grep -q '^CLAIM_LABEL=' "$pe" && ok "$pn states whether it uses a claim label" \
         || bad "$pn leaves CLAIM_LABEL undeclared, so the check silently does nothing"
 done
+
+echo "== an offer nobody answered is not a claim, and claims must not conflate them =="
+# The agent found this in its own tooling on 2026-09-07: `claims` printed
+# "NOT assigned, so it is invisible to their dashboard" and told the maintainer
+# to assign, for two issues that `offers` called "offered and never answered".
+# Assigning somebody who never replied commits them in public to work they have
+# not accepted. The label was doing double duty as "offered" and "taken".
+clm="$stub_dir/claimstate2"; mkdir -p "$clm"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'issue list'*) cat <<'J'
+[{"number":50,"title":"never answered","assignees":[],"updatedAt":"2026-09-01T00:00:00Z","labels":[{"name":"claimed"}]},
+ {"number":51,"title":"they replied","assignees":[],"updatedAt":"2026-09-01T00:00:00Z","labels":[{"name":"claimed"}]}]
+J
+    ;;
+  # 50: offered, silence. 51: offered, and they answered.
+  *issues/50/comments*) echo '[{"u":"owner","b":"@quiet this one is yours","at":"2026-09-01T00:00:00Z"}]';;
+  *issues/51/comments*) echo '[{"u":"owner","b":"@keen this one is yours","at":"2026-09-01T00:00:00Z"},{"u":"keen","b":"taking it","at":"2026-09-02T00:00:00Z"}]';;
+  *comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$clm" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -qE '#50.*(unanswered|never answered|no reply)' \
+    && ok "an unanswered offer is reported as an offer, not as a claim" \
+    || bad "claims still calls an unanswered offer a claim: $(printf '%s' "$out" | grep '#50' | cut -c1-70)"
+printf '%s' "$out" | grep -q 'gh issue edit N --repo <slug> --add-assignee' \
+    && bad "claims still recommends the command that 404s for a non-collaborator" \
+    || ok "claims no longer recommends gh issue edit --add-assignee"
+printf '%s' "$out" | grep -q 'maintainer assign' \
+    && ok "claims points at the verb that verifies the assignment took" \
+    || bad "claims does not mention maintainer assign"
+
+echo "== a run can find the toolchain it is asked to use =="
+# The unattended ci run on 2026-09-07 hit `cargo: command not found` (rc=127) on
+# its first invocation and had to prefix PATH by hand for every later command.
+# rustup installs into ~/.cargo/bin, which is on an interactive shell's PATH via
+# the profile and absent from a systemd user unit's.
+grep -q 'cargo/bin' "$root/lib/run.sh" \
+    && ok "run.sh puts the cargo toolchain on PATH" \
+    || bad "a run cannot find cargo; every Rust gate it is asked to run fails 127"
 
 echo "== the gate reads the thread, not only the label =="
 # sysknife#252, 2026-09-07. The maintainer pointed a contributor at the issue
@@ -2623,6 +2674,43 @@ out="$(cl_merge)"
 printf '%s' "$out" | grep -q 'was pointed at #355' \
     && bad "the thread check fires when there is no holder" \
     || ok "an issue nobody was pointed at is not blocked"
+
+# A labelled issue WITH an assignee: posting on it is not the same as being the
+# person it was given to. The old check let any author through who had commented,
+# so "I've got this implemented" from a stranger cleared a claim somebody else
+# held. That is the half of sysknife#252 the thread check does not cover, for
+# projects that reserve with labels and assignments rather than mentions.
+assigned_gh() {   # $1 = assignee login
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *closingIssuesReferences*) echo 355;;
+  *'pr view'*author*) echo newcomer;;
+  *issues/355/comments*) echo '[]';;
+  *'issue view'*labels*) echo 0;;
+  *'issue view'*assignees*) echo $1;;
+  *'issue view'*comments*) echo 0;;
+  *headRefOid*) echo $clsha;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
+  *'pr merge'*) echo MERGED_STUB;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+assigned_gh someone-else
+out="$(cl_merge)"
+printf '%s' "$out" | grep -qE 'assigned to|is assigned' \
+    && ok "a labelled issue assigned to somebody else refuses another author's PR" \
+    || bad "posting on a claimed issue still clears a claim held by its assignee"
+assigned_gh newcomer
+out="$(cl_merge)"
+printf '%s' "$out" | grep -qE 'assigned to|is assigned' \
+    && bad "the assignee is refused their own assigned issue" \
+    || ok "the assignee of a claimed issue is not blocked"
 
 # And the question failing is not the same as the answer being "nobody".
 thread_gh_broken() {   # the comments call fails outright

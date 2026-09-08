@@ -616,13 +616,33 @@ PYEOF
         for iss in $closes; do
             gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
                 --jq '[.labels[].name]|index("'"$claim_label"'")' 2>/dev/null | grep -qv '^null$' || continue
-            # Who claimed it: the first commenter the maintainer answered with
-            # the label. Reading the thread is the human's job; the gate only
-            # has to stop and say which issue and which author.
-            [ "$(gh issue view "$iss" --repo "$REPO_SLUG" --json comments \
-                 --jq '[.comments[].author.login]|index("'"$author"'")' 2>/dev/null)" != "null" ] && continue
-            die "#$pr closes #$iss, which carries the '$claim_label' label and to which
-  $author has never posted. Somebody else was told that issue was theirs.
+            # An assignment is the strongest record of who was promised this,
+            # so when one exists the author has to be in it. The check here used
+            # to be "has the author ever posted on the issue", which let a
+            # stranger who commented "I have this implemented" clear a claim
+            # somebody else held. Being interested in an issue is not the same
+            # as being the person it was given to.
+            local holders_a
+            holders_a="$(gh issue view "$iss" --repo "$REPO_SLUG" --json assignees \
+                         --jq '.assignees[].login' 2>/dev/null)"
+            if [ -n "$holders_a" ]; then
+                printf '%s\n' "$holders_a" | grep -qxF "$author" && continue
+                die "#$pr closes #$iss, which carries the '$claim_label' label and is
+  assigned to $(printf '%s' "$holders_a" | tr '\n' ' '), not to $author.
+
+  Merging this takes their work away. Talk to both before it lands, and if the
+  assignment is stale, unassign it on the thread first so the record matches."
+            fi
+            # Labelled and unassigned. The author may proceed only if nobody
+            # else has spoken there: a second voice on a reserved issue is the
+            # case a human has to look at.
+            local others
+            others="$(gh issue view "$iss" --repo "$REPO_SLUG" --json comments \
+                      --jq '[.comments[].author.login]|unique|.[]' 2>/dev/null \
+                      | grep -vxF "${MAINTAINER_ACCOUNT:-}" | grep -vxF "$author" || true)"
+            [ -z "$others" ] && continue
+            die "#$pr closes #$iss, which carries the '$claim_label' label, has no
+  assignee, and $(printf '%s' "$others" | tr '\n' ' ')also posted there besides $author.
 
   Merging this takes their work away, and the label is public: other
   contributors read it and stayed off the issue. Talk to both of them first.
