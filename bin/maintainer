@@ -963,6 +963,20 @@ def cmd_offers() -> None:
     # evening against an issue already closed. The double-booked check could
     # not see it, because it only counts offers nobody has answered.
     contention_on: dict = {}
+    # An issue somebody has already opened a pull request against is not free,
+    # whatever the thread says. The 2026-09-07 issues run reported #371 printed
+    # as free while an open PR closed it: offering that is the sysknife#252
+    # shape again, two people aimed at one fix, caused by the tool that exists
+    # to prevent it. Read once, before the loop, and remembered per issue so the
+    # exclusion can be shown rather than silently subtracted from a count.
+    _prs = _open_prs()
+    closed_by: dict = {}
+    if _prs is not None:
+        for pr in _prs:
+            who = ((pr.get("author") or {}).get("login")) or ""
+            text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
+            for m in _CLOSES.findall(text):
+                closed_by.setdefault(int(m), (pr.get("number"), who))
     reserved = 0
     for i in issues:
         names = {l["name"] for l in i.get("labels") or []}
@@ -997,8 +1011,14 @@ def cmd_offers() -> None:
         outsiders = posted - addressed - {owner}
         if mentioned and outsiders:
             contention_on[i["number"]] = (sorted(mentioned), sorted(outsiders))
+        # Opening the pull request is an answer, and a stronger one than a
+        # comment. Without this a contributor who worked instead of replying
+        # reads as an unanswered offer, which is how they end up double-booked.
+        taken = closed_by.get(i["number"])
+        if taken and taken[1]:
+            posted = posted | {taken[1]}
         if not mentioned:
-            if label not in names:
+            if label not in names and not taken:
                 free_nums.append(i["number"])
             continue
         for who in mentioned:
@@ -1013,6 +1033,19 @@ def cmd_offers() -> None:
     free_nums.sort()
     print(f"{len(free_nums)} issue(s) free to offer: "
           f"{', '.join('#%d' % n for n in free_nums) or 'none'}")
+    if _prs is None:
+        # Said before anything is offered, because every line above was decided
+        # without knowing which issues already have a pull request against them.
+        print("maintainer: could not read the open pull requests, so this free list is")
+        print("unverified; an issue somebody already has a PR for may appear in it.")
+    elif closed_by:
+        # Named, not subtracted. A count that quietly shrank is what sent the
+        # 2026-09-07 campaign picking issues by hand in the first place.
+        shown = sorted(n for n in closed_by if any(n == i["number"] for i in issues))
+        if shown:
+            print("not free, an open pull request closes them: "
+                  + ", ".join("#%d (PR #%s by %s)" % (n, closed_by[n][0], closed_by[n][1])
+                              for n in shown))
     print(f"{reserved} reserved or maintainer-only\n")
     print("Nobody listed below can take another. Somebody who holds nothing does not")
     print("appear here at all, which is what an eligible person looks like.\n")

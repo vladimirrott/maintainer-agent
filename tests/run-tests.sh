@@ -274,6 +274,10 @@ touch -d "100 hours ago" "$rh/state/last-review.json"
 rbin="$rh/bin"; mkdir -p "$rbin"
 printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"api user"*) echo someone-else;; esac\n' \
     > "$rbin/gh"; chmod +x "$rbin/gh"
+# And the backend, because backend_check runs before the lock and CI's
+# no-deployed-tree job has no claude on PATH. This passed locally on a machine
+# that happens to have one installed, which is the whole reason that job exists.
+printf '#!/usr/bin/env bash\nexit 0\n' > "$rbin/claude"; chmod +x "$rbin/claude"
 # Hold the lock, so the run gets past the gate and then blocks exactly where the
 # real one did.
 exec 8>"$rh/run.lock"
@@ -2699,6 +2703,60 @@ printf '%s' "$out" | grep -q 'DOUBLE-BOOKED' \
 printf '%s' "$out" | grep -qE 'DOUBLE-BOOKED.*#31' \
     && ok "and the collision names the issue" \
     || bad "the collision does not name which issue is double-booked"
+
+
+echo "== an issue with an open pull request closing it is not free to offer =="
+# The 2026-09-07 20:09 issues run reported it in its own process notes:
+# "`maintainer offers` cannot see pull request threads ... #371 was printed as
+# free while an open PR closed it." Offering that issue to somebody is the
+# sysknife#252 shape again, two people aimed at one fix, and this time the tool
+# that exists to prevent it would have caused it.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) echo '[{"number":88,"author":{"login":"carla"},"title":"fix","body":"Closes #40"},{"number":89,"author":{"login":"drive"},"title":"x","body":"related to #41"}]';;
+  *'issue list'*) echo '[{"number":40,"labels":[]},{"number":41,"labels":[]},{"number":42,"labels":[]}]';;
+  *issues/40/comments*) echo '[]';;
+  *issues/41/comments*) echo '[]';;
+  *issues/42/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#40' \
+    && bad "an issue an open PR closes is offered to somebody else" \
+    || ok "an issue an open PR closes is kept out of the free list"
+printf '%s' "$out" | grep -qE '#40.*(PR|#88)' \
+    && ok "and it says which pull request took it, rather than dropping it silently" \
+    || bad "the issue vanishes from the count with no reason given"
+# The negative twin. A PR that merely mentions an issue closes nothing, so #41
+# stays offerable; treating a mention as a claim would starve the free pool.
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#41' \
+    && ok "an issue a PR only mentions stays free" \
+    || bad "a bare mention removed an issue from the free pool"
+printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#42' \
+    && ok "an issue with no pull request at all stays free" \
+    || bad "the free pool collapsed"
+# Could not ask is not an answer. With the listing unreadable the free list must
+# say it is unverified rather than silently claim every issue is offerable.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) exit 1;;
+  *'issue list'*) echo '[{"number":40,"labels":[]}]';;
+  *issues/40/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+    && ok "an unreadable PR listing is said out loud before anything is offered" \
+    || bad "offers claims a free list it could not verify"
+rm -f "$stub_dir/gh"
 
 echo "== somebody working an issue, and somebody else turning up on it =="
 # The double-booked check only sees issues offered to two people who have NOT
