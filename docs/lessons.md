@@ -1758,3 +1758,65 @@ Leaving `make_stub podman 'exit 0'` behind at the end of a block put a permissiv
 stub first on PATH for every later case, and the real shell-suite integration
 test two hundred cases downstream reported a receipt it had not earned. Stubs
 get removed, not reset to something harmless-looking.
+
+## 63. The prompt told the run it was a rehearsal, and it was not
+
+`profiles/magent/prompts/common-preamble.md` said "This profile is at
+**POST=off**: write the report and the drafts, publish nothing".
+`profiles/magent/profile.env:58` says `POST="${MAINTAINER_POST:-on}"`.
+
+`lib/run.sh` injected a rehearsal notice only when `POST=off`, so a posting run
+received nothing, and the stale sentence in the preamble was the only statement
+about posting anywhere in the prompt. The 2026-09-07 20:09 magent review read
+it, called `maintainer file-issue` five times for its security findings, and
+filed issues #27 to #31 for real. It caught itself afterwards by reading
+`MAINTAINER_POST`, stopped, filed nothing further, and reported it as the first
+section of its own report.
+
+The deny wall could not have caught it either, for a reason `lib/run.sh` already
+records about a different tool: the wall governs what the agent types, and
+`file-issue` reaches `gh issue create` through a spawn inside Python, so
+`Bash(gh issue create:*)` never applies. `file-issue` honoured `MAINTAINER_POST`,
+which said `on`.
+
+Two changes. A prompt may describe what `POST=off` does; it may not assert which
+one is in force, because only run.sh can read that, and the suite now folds
+newlines and fails any prompt that claims a posting state. And run.sh declares
+the state in **both** directions, quoting the live value:
+
+```
+## This run POSTS. Say it once, in public, under a real name.
+
+Writes go to vladimirrott/maintainer-agent as vladimirrott, immediately and for
+real. ... `MAINTAINER_POST` is `on` in your environment, and that variable is
+the answer, not any sentence you read in a prompt.
+```
+
+The check that was supposed to catch the sentence passed over it first: the
+claim wrapped between "This profile" and "is at **POST=off**", so a line-based
+grep reported the file clean. Fold the newlines before matching prose.
+
+## 64. Two runs queued on one lock both passed the cadence gate
+
+`install.sh --timers` on 2026-09-07 fired a `Persistent=true` catch-up for
+`issues` at 20:09, which is the retry from lesson 61 working on its first day. A
+second `issues` run launched at 20:23 read the cadence gate against a stamp two
+days old, passed, blocked on the lock for eleven minutes, took it at 20:34 one
+second after the first run promoted that stamp, and started a full duplicate
+pass. It stopped only because the backend hit a session limit.
+
+The gate is read at `run.sh:129` and the lock taken at `run.sh:308`. Every run
+that queues decides its cadence on a stamp the run ahead of it is about to
+replace, so the gate is now read again once the lock is held, and a superseded
+run exits 0 saying `skipped: ... after waiting for the lock`. Being superseded is
+not a failure and must not be recorded as one.
+
+Giving every timer a catch-up slot makes queueing more likely rather than less,
+which is how a fix from four hours earlier surfaced this. `MAINTAINER_FORCE` is
+read into a variable before it is unset, or the override would be defeated by
+the second check for exactly the runs that need it.
+
+The test could not reproduce it at first: `$stub_dir` carries
+`make_stub flock 'exit 0'`, so nothing ever queued and the case passed while the
+code was still broken. A test that needs a real lock needs a PATH without the
+stub for it.

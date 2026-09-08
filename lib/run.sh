@@ -98,8 +98,10 @@ export MAINTAINER_TASK="$task"
 #
 # The baseline is promoted by `finish` only on success, so a run that failed
 # does not lock out its own retry.
+# $1, when given, says where this call happened, so a run superseded while it
+# queued does not read like a run the scheduler suppressed.
 min_gate() {
-    [ "${MAINTAINER_FORCE:-0}" = 1 ] && return 0
+    [ "${forced:-0}" = 1 ] && return 0
     # Two statements, not one. `local a=X b=${!a}` expands every word before the
     # builtin assigns any of them, so the indirect reference sees an unset name
     # and bash reports "invalid indirect expansion". The gate then fell through
@@ -115,11 +117,15 @@ min_gate() {
     now="$(date +%s)"
     age=$(( (now - last) / 3600 ))
     if [ "$age" -lt "$min" ]; then
-        printf 'skipped: %s last ran %dh ago, minimum is %dh (MAINTAINER_FORCE=1 overrides)\n' \
-            "$task" "$age" "$min"
+        printf 'skipped: %s last ran %dh ago, minimum is %dh%s (MAINTAINER_FORCE=1 overrides)\n' \
+            "$task" "$age" "$min" "${1:+, $1}"
         exit 0
     fi
 }
+# Read once into a shell variable, because the gate is consulted a second time
+# after the lock and MAINTAINER_FORCE is unset before then.
+forced=0
+[ "${MAINTAINER_FORCE:-0}" = 1 ] && forced=1
 [ "$show" = 1 ] || min_gate
 # The override is consumed here and must not travel any further. It reached the
 # agent's environment, so every `run.sh` the agent invoked skipped its cadence
@@ -302,6 +308,18 @@ if ! flock -w "$LOCK_WAIT" 9; then
     alert "another run held the lock for over ${LOCK_WAIT}s"
     exit 1
 fi
+
+# And read the cadence gate again, now that we hold the lock.
+#
+# The gate above ran before the wait. On 2026-09-07 `install.sh --timers` fired a
+# Persistent=true catch-up for `issues` at 20:09; a second run launched at 20:23
+# passed the gate against a stamp two days old, blocked here for eleven minutes,
+# took the lock one second after the first run promoted that stamp, and began a
+# full duplicate pass. It stopped only because the backend hit a session limit.
+# Every run that queues decides its cadence on a stamp the run ahead of it is
+# about to replace, and giving each timer a catch-up slot makes queueing more
+# likely rather than less.
+min_gate "after waiting for the lock"
 
 # 0. Pin the GitHub identity and refuse to run without it.
 #
@@ -492,6 +510,25 @@ refusal here is the rehearsal working. Do not look for another way to send it.
 In the report, list what you WOULD have posted and where, so the maintainer can
 read it and decide whether to turn posting on.
 REHEARSAL
+        printf '\n\n'
+    else
+        # The other direction, which used to be silent. A prompt that says
+        # nothing about posting leaves whatever a profile's own preamble happens
+        # to claim as the only statement on it, and on 2026-09-07 that claim was
+        # a stale POST=off in front of a run that posted five issues. The state
+        # is the environment's to declare, so it is declared here, from the
+        # value actually in force.
+        cat <<POSTING
+## This run POSTS. Say it once, in public, under a real name.
+
+Writes go to $REPO_SLUG as $GH_ACCOUNT, immediately and for real. There is no
+rehearsal in front of you: a comment is delivered as you send it, an edit keeps
+its history, and a notification cannot be recalled. \`MAINTAINER_POST\` is
+\`$POST\` in your environment, and that variable is the answer, not any
+sentence you read in a prompt.
+
+Verify before you write, and read back what you wrote.
+POSTING
         printf '\n\n'
     fi
     # 5. The task, then what changed since this task last ran.

@@ -25,6 +25,10 @@ has.
 
 ## Who authorised this
 
-Vladimir runs this agent and their name is on everything it posts. This profile
-is at **POST=off**: write the report and the drafts, publish nothing. Say in the
-report what you would have published and where.
+Vladimir runs this agent and their name is on everything it posts.
+
+Whether this run publishes is decided by the environment, and run.sh puts the
+answer in its own section below. Do not infer it from anything written here: a
+sentence in this file claimed POST=off for a run that was posting, and five
+issues were filed on the strength of it. If you are about to write anywhere
+public, read `MAINTAINER_POST` yourself first.
