@@ -668,11 +668,44 @@ def cmd_gc(dry: bool) -> None:
           f"published in your name")
 
 
-def _claimant_idle_days(number: int, assignees: list) -> int:
+def _issue_parties(number) -> dict:
+    """Who is on one issue, from one fetch of its comments.
+
+    `holders`  people the maintainer mentioned and has not released
+    `posted`   everyone who spoke there except the maintainer
+    `comments` the raw rows, so callers needing timestamps do not refetch
+
+    Three commands used to derive this three ways: `offers` read the thread,
+    `claims` read a label, and the merge gate read a different label. They
+    disagreed, which is how sysknife#252 slipped through and how `claims` came
+    to tell the maintainer to assign somebody who had never answered. One
+    derivation, three callers.
+    """
+    comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
+                       "--jq", "[.[]|{u:.user.login,b:.body,at:.created_at}]")
+    if comments is None:
+        return {"holders": set(), "posted": set(), "comments": None}
+    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    live: dict = {}
+    for c in comments:
+        if c.get("u") != owner:
+            continue
+        body = c.get("b") or ""
+        for m in _gh_mentions(body):
+            live[m] = RELEASE_MARKER not in body
+    return {
+        "holders": {m for m, still in live.items() if still},
+        "posted": {c.get("u") for c in comments if c.get("u") != owner},
+        "comments": comments,
+    }
+
+
+def _claimant_idle_days(number: int, assignees: list, comments=None) -> int:
     """Days since the person who claimed this issue last said anything on it."""
     who = {a["login"] for a in assignees}
-    comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
-                       "--jq", "[.[]|{u:.user.login,at:.created_at}]")
+    if comments is None:
+        comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
+                           "--jq", "[.[]|{u:.user.login,at:.created_at}]")
     if not comments:
         return -1
     theirs = [c["at"] for c in comments if not who or c["u"] in who]
@@ -720,27 +753,52 @@ def cmd_claims() -> None:
         print(f"no open issue carries '{label}'")
         return
     stale_days = int(_setting("CLAIM_STALE_DAYS", "CLAIM_STALE_DAYS", "7") or 7)
-    print(f"{'issue':7} {'assigned to':22} {'idle':>6}  state")
-    unassigned = 0
+    print(f"{'issue':7} {'who':22} {'idle':>6}  state")
+    # An OFFER and a CLAIM are not the same thing, and this used to print both
+    # as "NOT assigned, so it is invisible to their dashboard" with an assign
+    # command underneath. Two of the issues it said that about had been offered
+    # and never answered, and assigning somebody who has not replied commits
+    # them in public to work they never took. The label carries both meanings;
+    # the thread tells them apart.
+    to_assign: list = []
     for i in issues:
-        who = ", ".join(a["login"] for a in i.get("assignees") or []) or "-"
-        if who == "-":
-            unassigned += 1
+        assignees = i.get("assignees") or []
+        who = ", ".join(a["login"] for a in assignees) or "-"
+        parties = _issue_parties(i["number"])
+        holders, posted = parties["holders"], parties["posted"]
+        answered = {h for h in holders if h in posted}
+        waiting = holders - posted
         # Idle is measured from the CLAIMANT's last comment, never from the
         # issue's updatedAt. Assigning these five reset updatedAt on every one
         # of them, so a claim eleven days old reported "0d, active": the act of
         # recording the claim blinded the check that watches it. Anything the
         # maintainer does to an issue moves updatedAt, which makes it useless
         # for measuring whether the contributor has gone quiet.
-        idle = _claimant_idle_days(i["number"], i.get("assignees") or [])
-        flag = "stale, a check-in is due" if idle >= stale_days else "active"
-        if who == "-":
-            flag += "; NOT assigned, so it is invisible to their dashboard"
+        idle = _claimant_idle_days(i["number"], assignees, parties["comments"])
+        if assignees:
+            flag = "stale, a check-in is due" if idle >= stale_days else "active"
+        elif answered:
+            who = ", ".join(sorted(answered))
+            flag = ("stale, a check-in is due" if idle >= stale_days else "active")
+            flag += "; replied but NOT assigned, so their dashboard cannot see it"
+            to_assign.append((i["number"], sorted(answered)[0]))
+        elif waiting:
+            who = ", ".join(sorted(waiting))
+            flag = f"OFFERED {idle}d ago and never answered; do not assign, this is not a claim"
+        else:
+            # Labelled, unassigned, and nobody named on the thread. The label is
+            # promising the issue to somebody this cannot identify, which is the
+            # case a human has to resolve by reading it.
+            flag = "NOT assigned, and nobody was named on the thread"
         print(f"#{i['number']:<6} {who:22} {idle:>4}d  {flag}")
-    if unassigned:
-        print(f"\n{unassigned} claim(s) carry the label and no assignee. The label is a")
-        print("promise; an assignment is the same promise where GitHub can see it:")
-        print("  gh issue edit N --repo <slug> --add-assignee <user>")
+    if to_assign:
+        print(f"\n{len(to_assign)} person/people replied and hold the label without an")
+        print("assignment. The label is a promise; an assignment is the same promise")
+        print("where GitHub can see it, and this verifies that it took:")
+        for n, w in to_assign:
+            print(f"  maintainer assign {n} {w}")
+        print("\nGitHub returns 200 for an assignee it silently drops, so read the list")
+        print("back before telling anybody they are assigned.")
 
 
 def cmd_assign(number: str, who: str) -> None:
@@ -798,18 +856,10 @@ def cmd_holders(number: str) -> None:
     if not number.isdigit():
         raise SystemExit("maintainer: holders needs an issue number")
     owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
-    comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
-                       "--jq", "[.[]|{u:.user.login,b:.body}]")
-    if comments is None:
+    parties = _issue_parties(number)
+    if parties["comments"] is None:
         raise SystemExit(f"maintainer: could not read issue #{number}")
-    live: dict = {}
-    for c in comments:
-        if c.get("u") != owner:
-            continue
-        body = c.get("b") or ""
-        for m in _gh_mentions(body):
-            live[m] = RELEASE_MARKER not in body
-    for who in sorted(m for m, still in live.items() if still):
+    for who in sorted(parties["holders"]):
         print(who)
 
 

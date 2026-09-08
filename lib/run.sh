@@ -138,7 +138,11 @@ else
     logs="$STATE_DIR/logs"; mkdir -p "$logs"
     log="$logs/$stamp-$task.log"
 fi
-export PATH="$HOME/.local/bin:$PATH"
+# ~/.cargo/bin too: rustup puts the toolchain there and a systemd user unit
+# does not read the shell profile that adds it. An unattended ci run on
+# 2026-09-07 hit `cargo: command not found` (rc=127) on its first command and
+# prefixed PATH by hand for every Rust gate after it.
+export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 
 # One notification shape, for the failure and the success alike.
 #

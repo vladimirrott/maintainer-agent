@@ -1609,3 +1609,43 @@ The general form: an API that returns success for a request it did not carry
 out is indistinguishable from one that did, unless you go and look. Every write
 this agent makes on somebody else's behalf should be read back before it is
 described to them in public.
+
+## 60. Three commands, three answers to one question
+
+`offers` asked the thread who was on an issue. `claims` asked a label. The merge
+gate asked a different label. Same question, three derivations, and they
+disagreed in ways that each cost something:
+
+- the gate skipped sysknife#252 entirely, because the label it keys on had never
+  been applied to an issue that had been offered by `@mention`;
+- `claims` printed "NOT assigned, so it is invisible to their dashboard" under
+  two issues that `offers` called "offered and never answered", and told the
+  maintainer to assign both. Assigning somebody who has not replied commits them
+  in public to work they never accepted;
+- the gate's remaining check asked whether the pull request's author had ever
+  posted on the issue, and let anyone through who had. Being interested in an
+  issue is not the same as being the person it was promised to. A stranger
+  commenting "I have this implemented" cleared a claim somebody else held.
+
+`_issue_parties` is now the one derivation: one fetch of the comments, returning
+the live holders, everyone who spoke, and the raw rows for callers that need
+timestamps. `holders`, `claims` and `offers` all read it, and the gate shells out
+to `maintainer holders` rather than carrying a fourth copy in bash.
+
+`claims` now separates the two meanings the label was carrying. An issue where
+the named person replied is a CLAIM and gets an assignment suggestion, through
+`maintainer assign`, which reads the list back. An issue where they never replied
+is an OFFER and says so, with `do not assign, this is not a claim`.
+
+The general shape: when one fact has several derivations, they do not drift
+evenly. Each one is correct for the case its author had in mind, and the gaps
+appear only where two of them are compared, which nothing does until somebody
+loses an evening.
+
+### And the gate was never actually run
+
+Every merge that day went through `gh pr merge`. The holder check written that
+morning to prevent a repeat of #252 did not gate a single one of them. It had
+tests, and the derivation was verified against the live tracker by hand, and it
+was still not deployed in any sense that matters. A guard exercised only by its
+own suite is decorative.
