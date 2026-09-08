@@ -1649,3 +1649,112 @@ morning to prevent a repeat of #252 did not gate a single one of them. It had
 tests, and the derivation was verified against the live tracker by hand, and it
 was still not deployed in any sense that matters. A guard exercised only by its
 own suite is decorative.
+
+## 61. The morning pass had never once run
+
+`alerts.log` on 2026-09-07:
+
+```
+2026-09-04T08:14  ALERT sysknife-review: the run unit failed before it could report
+2026-09-05T09:15  ALERT sysknife-review
+2026-09-06T09:16  ALERT sysknife-review
+2026-09-07T09:17  ALERT sysknife-review
+2026-09-07T10:44  ALERT sysknife-issues
+```
+
+Four consecutive days, plus `magent-review` on three of them. Every one exited
+75 on `error connecting to api.github.com`, and the preflight was right to
+refuse: this laptop's network is down overnight and comes back between 10:00 and
+12:30, so the 09:13 slot had never fired into a working connection. The evening
+slot at 21:13 kept succeeding, so a review happened every day and the schedule
+looked healthy from the outside.
+
+Two separate defects, and the second is the one that made the first survive four
+days.
+
+**The failure was recorded and never reported.** `run.sh` writes
+`state/failed-<task>.json` and appends to `alerts.log`, and nothing reads either.
+`maintainer-doctor` ran clean through all four days. The predicate needed no new
+bookkeeping: `finish` promotes `last-<task>.json` only on success, so a failure
+file newer than the success file already means "this task has not completed
+since it broke". The doctor now says so, in red, carrying the recorded reason
+and the log path, because during a network outage a bare "review failed" sends
+you hunting for a revoked token.
+
+**A refused start lost the whole cycle.** systemd will not retry a
+`Type=oneshot` unit, and five of the six timers had a single `OnCalendar` line.
+One minute of downtime at 10:43 cost the issues pass two days; ci would have
+cost three, audit five. The sixth timer had two slots twelve hours apart, which
+is a second run rather than a retry.
+
+The fix was already built and unused. `min_gate` skips a task whose
+`last-<task>.json` is younger than `MIN_HOURS_<task>`, so a second slot inside
+that window costs one `skipped:` line on a good day and runs for real on a bad
+one. Both directions were proven before relying on it: a fresh stamp printed
+`skipped: review last ran 0h ago`, and a stamp aged 100 hours went straight
+through. Every timer now carries a catch-up slot, and the suite fails a timer
+whose closest two slots are further apart than its own `MIN_HOURS`.
+
+### The proof that proved a copy
+
+The first version of that check re-cut the checker out of the suite with `sed`
+for its mutation cases. The end anchor never matched, `sed` returned 2149 lines
+of shell, python refused to compile it, and a non-zero exit read as the check
+correctly rejecting a malformed timer. One direction passed, the other failed,
+which is the only reason it was caught at all. The checker is now one file that
+the real case and both mutations invoke, and the suite compiles it first, since a
+checker that cannot parse rejects everything and looks strict while testing
+nothing.
+
+## 62. The gate could not run, and reported the contributor as failing
+
+The 2026-09-07 19:11 review approved sysknife#389, eleven checks green,
+mutation-proven three ways, and could not merge it:
+
+```
+suite: shell (docker.io/library/bash:5 under podman)
+running 'tests/e2e/story-metadata.test.sh' unmutated
+maintainer-merge: the test does not pass unmutated (rc=1); nothing to prove yet
+    FAIL  line 184: python3: command not found
+```
+
+`bash:5` carries no python3. sysknife#386 made that test drive
+`check_evidence_claims.py`, and from that commit onward no receipt was earnable
+for the shell suite. The gate did not report itself broken. It reported the pull
+request as failing its own test, which is the more expensive way to be wrong,
+and it stayed that way until somebody tried to merge.
+
+The comment justifying `bash:5` said these tests "need bash, git and nothing
+else". Checked rather than believed: `bash:5` resolves no git either, so the
+guarantee it stated was never a guarantee. Nothing connected the image to what
+the suite runs inside it, so the drift was undetectable by construction.
+
+Every suite now declares `suite_needs()`, and `maintainer-doctor` runs each image
+and checks each binary resolves. A probe that cannot run is a warning naming the
+image, never a pass.
+
+### An offer answered by working on it looked unanswered
+
+The same run found `claims` reporting sysknife#390 as "OFFERED 0d ago and never
+answered; do not assign" while the person it was offered to had an open pull
+request whose body said `Closes #390`. The check that decides whether to assign
+somebody read only the comment thread, so the offer looked unanswered for
+exactly as long as the contributor did the work instead of replying.
+
+The rule is GitHub's own closing keywords and nothing wider. A pull request
+saying "see #391 for context" closes nothing, and counting it would commit
+somebody in public to work they never took, which is worse than the bug.
+
+### Two defects in the tests written that hour
+
+`vdoc | grep -q` decides from the pipeline's exit status, and the suite runs
+under `set -o pipefail`, so it reports doctor's status rather than the match.
+One case passed for two runs while the check it tested did not exist; its twin
+failed while the check worked. The rule was already a comment beside the
+maintainer-merge cases, and a comment did not prevent the repeat, so the suite
+now greps itself for the shape and names the offending line.
+
+Leaving `make_stub podman 'exit 0'` behind at the end of a block put a permissive
+stub first on PATH for every later case, and the real shell-suite integration
+test two hundred cases downstream reported a receipt it had not earned. Stubs
+get removed, not reset to something harmless-looking.

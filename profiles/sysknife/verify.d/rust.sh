@@ -16,6 +16,16 @@ suite_covers() {  # $1 = a path from the pull request
 
 suite_image() { printf 'docker.io/library/rust:1-slim'; }
 
+# What that image has to contain. maintainer-doctor runs the image and checks
+# each of these resolves, because nothing else ties the image to what the suite
+# runs inside it. sysknife's shell suite sat in bash:5 with no python3; when
+# sysknife#386 made a test drive a python script the clean run began failing,
+# no receipt was earnable, and the merge gate reported it as the pull request
+# failing its own test rather than as itself being broken.
+#
+# cargo drives the tests; bash runs the command line this file builds.
+suite_needs() { printf 'bash cargo rustc'; }
+
 # The cargo cache is mounted with podman's :O overlay so writes stay in an
 # overlay and never touch the host's ~/.cargo. docker has no equivalent, and
 # mounting it writable there would let a contributor's build write to the real

@@ -984,6 +984,207 @@ PATH="$stub_dir:$PATH" HOME="$dh" bash "$d" --quick 2>&1 | grep -q 'commit(s) be
     && bad "doctor calls an up-to-date deployment stale" \
     || ok "a deployment at HEAD is not reported as drifted"
 
+echo "== a task whose last attempt failed is reported, not left in a log =="
+# The 09:13 sysknife review fired into a nightly network outage on four
+# consecutive days (2026-09-04 through 09-07) and exited 75 every time. The
+# only trace was a line in alerts.log that nobody reads, so the morning pass
+# had never once run and nothing said so. `finish` promotes last-<task>.json
+# only on success, so "the newest failure is newer than the newest success" is
+# exactly the condition, and it needs no new bookkeeping.
+fh="$stub_dir/failhome"; mkdir -p "$fh/.local/share/maintainer/profiles/p"
+fst="$fh/state"; mkdir -p "$fst/state" "$fst/runs"
+printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$fst" "$fh" \
+    > "$fh/.local/share/maintainer/profiles/p/profile.env"
+mkfail() { # $1 task, $2 age of the success in hours, $3 age of the failure in hours
+    touch -d "$2 hours ago" "$fst/state/last-$1.json"
+    printf '{"task":"%s","reason":"gh could not reach GitHub in 3 tries","at":"x"}\n' "$1" \
+        > "$fst/state/failed-$1.json"
+    touch -d "$3 hours ago" "$fst/state/failed-$1.json"
+}
+# review: succeeded 40h ago, failed 2h ago -> the newest attempt failed.
+mkfail review 40 2
+# issues: failed 40h ago, succeeded 2h ago -> recovered, must stay quiet.
+mkfail issues 2 40
+touch -d "2 hours ago" "$fst/state/last-issues.json"
+fout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$fout" | grep -q "review.*failed" \
+    && ok "doctor names a task whose newest attempt failed" \
+    || bad "a task that has not succeeded since its last failure is invisible"
+printf '%s' "$fout" | grep -qE 'FAIL.*review' \
+    && ok "and it is a failure, not a note" \
+    || bad "a dead task is reported at a severity nobody acts on"
+printf '%s' "$fout" | grep -q "issues" \
+    && bad "a task that recovered is still reported as failed" \
+    || ok "a task that succeeded after its failure is not reported"
+# The reason the run recorded must reach the report, or the reader goes hunting
+# for a revoked token during a network outage.
+printf '%s' "$fout" | grep -q 'could not reach GitHub' \
+    && ok "the recorded reason is carried into the report" \
+    || bad "doctor says a task failed and not why"
+# Never ran at all is the same emergency: a failure with no success behind it.
+rm -f "$fst/state/last-review.json"
+nout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$nout" | grep -qE 'FAIL.*review' \
+    && ok "a task that has never succeeded is reported too" \
+    || bad "a failure with no prior success reads as healthy"
+# And a clean profile stays clean: no failure files, no complaint.
+rm -f "$fst"/state/failed-*.json
+touch "$fst/state/last-review.json"
+PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 \
+    | grep -qE 'FAIL.*(review|issues).*failed' \
+    && bad "doctor invents a failure for a profile that has none" \
+    || ok "no failure files, no failure report"
+
+echo "== a verify suite's image must carry what its tests invoke =="
+# sysknife's shell suite ran in bash:5, which has no python3. When sysknife#386
+# made tests/e2e/story-metadata.test.sh drive check_evidence_claims.py, the
+# clean run started failing and NO receipt was earnable for that suite: the
+# merge gate had stopped working and reported it as the pull request failing its
+# own test. Nothing connected the image to what the suite runs inside it.
+for _vs in "$root"/profiles/*/verify.d/*.sh; do
+    [ -e "$_vs" ] || continue
+    _vn="$(basename "$(dirname "$(dirname "$_vs")")")/$(basename "$_vs" .sh)"
+    # shellcheck disable=SC1090  # the path is the loop variable, by design
+    if (. "$_vs" >/dev/null 2>&1; declare -F suite_needs >/dev/null) \
+       && [ -n "$(. "$_vs" >/dev/null 2>&1; suite_needs)" ]; then
+        ok "$_vn declares the binaries its image must provide"
+    else
+        bad "$_vn names an image and nothing says what that image has to contain"
+    fi
+done
+# Driven against a stubbed podman, both directions, because the whole point is
+# that the check must go red rather than quietly pass.
+vh="$stub_dir/verifyhome"; vd="$vh/.local/share/maintainer/profiles/p"
+mkdir -p "$vd/verify.d" "$vh/.config/systemd/user"
+printf 'PROFILE_NAME=p\nTASKS="review"\nMIN_HOURS_review=6\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$vh/st" "$vh" \
+    > "$vd/profile.env"
+printf 'suite_image() { printf "img:one"; }\nsuite_needs() { printf "bash python3"; }\n' \
+    > "$vd/verify.d/shell.sh"
+vdoc() { PATH="$stub_dir:$PATH" HOME="$vh" MAINTAINER_PROFILE=p bash "$d" 2>&1; }
+# The image is missing python3: the probe prints the missing name.
+make_stub podman 'case "$*" in *"img:one"*) echo "python3 "; exit 0;; esac; exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+    && ok "a suite whose image lacks a declared binary is a failure" \
+    || bad "an image that cannot run the suite reads as healthy"
+printf '%s' "$vout" | grep -q 'python3' \
+    && ok "and the missing binary is named" \
+    || bad "the report does not say what is missing"
+# The image has everything: the probe prints nothing.
+#
+# Captured, never piped. The suite runs under `set -o pipefail` and doctor exits
+# non-zero whenever anything is red, so `vdoc | grep -q` reports doctor's exit
+# rather than the match: this case passed before the check existed, and its twin
+# failed with the check working. Same trap as the one already recorded at the
+# maintainer-merge cases below.
+make_stub podman 'exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+    && bad "a sufficient image is reported as failing" \
+    || ok "an image that provides everything declared is not reported"
+printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+    && ok "and it says which image satisfied the suite" \
+    || bad "a satisfied suite leaves no positive record"
+# The probe itself could not run. That must not read as permission: a guard that
+# answers when it could not ask is worse than no guard.
+make_stub podman 'case "$*" in *"img:one"*) exit 3;; esac; exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -q 'could not probe' \
+    && ok "a probe that could not run says so rather than passing the suite" \
+    || bad "an unrunnable probe is indistinguishable from a clean one"
+printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+    && bad "the suite was reported provisioned on a probe that never ran" \
+    || ok "and it does not claim the image provides anything"
+# A suite that declares no needs is a suite nothing can check.
+printf 'suite_image() { printf "img:one"; }\n' > "$vd/verify.d/shell.sh"
+make_stub podman 'exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*suite_needs' \
+    && ok "a suite that declares no needs is reported, not skipped" \
+    || bad "an undeclared suite passes by having nothing to check"
+# Remove the stub rather than leaving a permissive one. A `podman` that always
+# exits 0 sitting first on PATH made the real shell-suite case below report a
+# receipt it never earned, two hundred cases later and with no visible link.
+rm -f "$stub_dir/podman"
+
+echo "== every timer carries a catch-up slot the cadence gate makes free =="
+# A transient failure costs a whole cycle when a task fires once. On 2026-09-07
+# the sysknife issues run exited 75 into a network outage at 10:43 and its next
+# tick was two days out; ci would have been three days, audit five. Five of the
+# six timers had a single OnCalendar line, and the one that self-healed daily,
+# sysknife-review, did so only because it happened to have a second, 12h away
+# and so no use as a retry either.
+#
+# A second slot is free on a good day: min_gate in run.sh skips a task whose
+# last-<task>.json is younger than MIN_HOURS, and `finish` writes that file only
+# on success. So a redundant fire costs one "skipped:" line, and a fire after a
+# failure runs for real.
+#
+# One checker, three invocations. Extracting the logic a second time to test it
+# is how a proof ends up proving a copy: the first attempt at this test re-cut
+# the script with sed, the end anchor missed, and the malformed 2149-line result
+# failed to compile, which read as the check correctly rejecting a bad timer.
+tcheck="$stub_dir/timercheck.py"
+cat > "$tcheck" <<'PYEOF'
+import glob, os, re, sys
+root = sys.argv[1]
+problems = []
+for f in sorted(glob.glob(os.path.join(root, "platform/linux/maintainer@*.timer"))):
+    inst = re.sub(r".*maintainer@(.*)\.timer$", r"\1", f)
+    profile, _, task = inst.partition("-")
+    env = os.path.join(root, "profiles", profile, "profile.env")
+    if not os.path.exists(env):
+        problems.append(inst + ": no profiles/" + profile + "/profile.env"); continue
+    m = re.search(r"^MIN_HOURS_" + re.escape(task) + r"=(\d+)", open(env).read(), re.M)
+    if not m:
+        problems.append(inst + ": profile.env declares no MIN_HOURS_" + task); continue
+    minh = int(m.group(1))
+    mins = []
+    for line in open(f):
+        c = re.match(r"\s*OnCalendar=.*?(\d{2}):(\d{2}):\d{2}\s*$", line)
+        if c:
+            mins.append(int(c.group(1)) * 60 + int(c.group(2)))
+    if len(mins) < 2:
+        problems.append("%s: %d OnCalendar slot(s); a refused start waits %dh"
+                        % (inst, len(mins), minh)); continue
+    mins.sort()
+    gaps = [(b - a) / 60.0 for a, b in zip(mins, mins[1:])]
+    if not any(g < minh for g in gaps):
+        problems.append("%s: closest slots are %gh apart, MIN_HOURS_%s=%d; "
+                        "no slot can retry the one before it"
+                        % (inst, min(gaps), task, minh))
+if problems:
+    print("  " + "\n  ".join(problems))
+    sys.exit(1)
+PYEOF
+if python3 -c "compile(open('$tcheck').read(), 'timercheck', 'exec')" 2>/dev/null; then
+    ok "the timer checker is valid python (a malformed one would reject everything)"
+else
+    bad "the timer checker does not compile; its verdicts mean nothing"
+fi
+if python3 "$tcheck" "$root"; then
+    ok "every timer has a slot closer than its own MIN_HOURS, so a failure retries in the same cycle"
+else
+    bad "a timer fires once per cycle; one refused start loses the whole interval"
+fi
+# Mutation, both directions, against the same checker the real case used.
+tprobe="$stub_dir/timerprobe"; mkdir -p "$tprobe/platform/linux" "$tprobe/profiles/p"
+printf 'MIN_HOURS_review=6\n' > "$tprobe/profiles/p/profile.env"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\n' > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && bad "the catch-up check passes a timer with a single slot" \
+    || ok "and it fails a timer with a single slot"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\nOnCalendar=*-*-* 21:13:00\n' \
+    > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && bad "two slots 10h apart pass a 6h MIN_HOURS; that is a second run, not a retry" \
+    || ok "and it fails two slots too far apart to retry each other"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\nOnCalendar=*-*-* 15:13:00\n' \
+    > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && ok "and it passes a timer whose second slot lands inside MIN_HOURS" \
+    || bad "the catch-up check rejects a correctly scheduled timer"
+
 echo "== housekeeping: prune and release-check =="
 mr="$root/bin/maintainer-repo"
 [ -x "$mr" ] && ok "maintainer-repo present and executable" || bad "maintainer-repo missing"
@@ -2496,6 +2697,79 @@ out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAIN
 printf '%s' "$out" | grep -q 'declares no CLAIM_LABEL' \
     && ok "a profile that tracks no claims says so" || bad "claims assumes every project uses a label"
 
+
+echo "== a pull request answers an offer more strongly than a comment does =="
+# On 2026-09-07 `claims` reported sysknife#390 as "OFFERED 0d ago and never
+# answered; do not assign", while Georgefifth had an open PR #389 whose body
+# said `Closes #390`. Opening the pull request is the strongest answer anybody
+# can give to an offer, and the check that decides whether to assign them read
+# only the comment thread. The offer looked unanswered for as long as the
+# contributor did the work instead of replying.
+cp2="$stub_dir/claimspr"; mkdir -p "$cp2"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) cat <<'J'
+[{"number":389,"author":{"login":"georgefifth"},"title":"fix(e2e): per-word tags","body":"Closes #390"},
+ {"number":401,"author":{"login":"driveby"},"title":"unrelated","body":"see #391 for context"}]
+J
+    ;;
+  *'issue list'*) cat <<'J'
+[{"number":390,"title":"t","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]},
+ {"number":391,"title":"u","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]}]
+J
+    ;;
+  *issues/390/comments*) echo '[{"u":"maint","b":"@georgefifth this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+  *issues/391/comments*) echo '[{"u":"maint","b":"@driveby this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -qE '#390.*never answered' \
+    && bad "an offer answered by a pull request is still reported as unanswered" \
+    || ok "an offer answered by a pull request is not reported as unanswered"
+printf '%s' "$out" | grep -qE '#390.*#389' \
+    && ok "and the pull request that answered it is named" \
+    || bad "the answer is accepted without saying where it came from"
+printf '%s' "$out" | grep -q 'maintainer assign 390 georgefifth' \
+    && ok "and the assignment is recommended, because they did answer" \
+    || bad "somebody who answered with a PR gets no assignment suggestion"
+# The negative twin, and it is the whole point: a bare mention of the issue is
+# not a closing reference. #401 says "see #391", which GitHub would not act on
+# either, so neither does this.
+printf '%s' "$out" | grep -qE '#391.*never answered' \
+    && ok "a PR that merely mentions an issue does not answer the offer" \
+    || bad "any mention of the number counts as a claim, which is worse than the bug"
+printf '%s' "$out" | grep -q 'maintainer assign 391' \
+    && bad "a drive-by mention produced an assignment recommendation" \
+    || ok "and it recommends no assignment for a mere mention"
+# Could not ask is not an answer of "nobody". A failed PR listing must leave the
+# offer looking unanswered rather than inventing an answer, and must say so.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*) exit 1;;
+  *'issue list'*) cat <<'J'
+[{"number":390,"title":"t","assignees":[],"updatedAt":"2026-09-07T19:00:00Z","labels":[]}]
+J
+    ;;
+  *issues/390/comments*) echo '[{"u":"maint","b":"@georgefifth this one is yours","at":"2026-09-01T10:00:00Z"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" claims 2>&1)
+printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+    && ok "a failed PR listing is reported rather than read as 'nobody answered'" \
+    || bad "an unreadable PR list is indistinguishable from an empty one"
+printf '%s' "$out" | grep -q 'maintainer assign 390' \
+    && bad "an unreadable PR list still produced an assignment recommendation" \
+    || ok "and it recommends no assignment it could not justify"
+rm -f "$stub_dir/gh"
+
 echo "== a claimed issue is a promise the gate has to keep =="
 # Measured on lacs-project/sysknife, 2026-09-04. A contributor said "I am taking
 # this" on #355; the maintainer replied "it is yours", applied `claimed`, and
@@ -3135,6 +3409,18 @@ grep -q 'list-unit-files' "$md" \
 grep -q 'none enabled: nothing runs unattended' "$md" \
     && ok "and it says out loud that nothing runs unattended" \
     || bad "a profile with no enabled timer is not told so"
+
+echo "== a verdict is read from output, not from a pipeline's exit code =="
+# `doctor | grep -q` returns doctor's status under pipefail, not the match. One
+# case in this file passed for two runs that way while the check it tested did
+# not exist. The rule already appears as a comment beside the maintainer-merge
+# cases; a comment did not stop the repeat.
+piped="$(grep -nE '^\s*(vdoc|bash "\$(d|md|mg)")[^|]*\| *grep' "$root/tests/run-tests.sh" || true)"
+if [ -z "$piped" ]; then
+    ok "no case decides from a pipeline whose left side can fail"
+else
+    bad "a case pipes a failing-capable command into grep: $(printf '%s' "$piped" | head -1)"
+fi
 
 echo "== a skip is not a pass =="
 # The container cases used to `bad` when no runtime was installed, so the suite
