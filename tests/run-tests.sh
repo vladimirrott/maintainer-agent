@@ -1035,6 +1035,78 @@ PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 \
     && bad "doctor invents a failure for a profile that has none" \
     || ok "no failure files, no failure report"
 
+echo "== a verify suite's image must carry what its tests invoke =="
+# sysknife's shell suite ran in bash:5, which has no python3. When sysknife#386
+# made tests/e2e/story-metadata.test.sh drive check_evidence_claims.py, the
+# clean run started failing and NO receipt was earnable for that suite: the
+# merge gate had stopped working and reported it as the pull request failing its
+# own test. Nothing connected the image to what the suite runs inside it.
+for _vs in "$root"/profiles/*/verify.d/*.sh; do
+    [ -e "$_vs" ] || continue
+    _vn="$(basename "$(dirname "$(dirname "$_vs")")")/$(basename "$_vs" .sh)"
+    # shellcheck disable=SC1090  # the path is the loop variable, by design
+    if (. "$_vs" >/dev/null 2>&1; declare -F suite_needs >/dev/null) \
+       && [ -n "$(. "$_vs" >/dev/null 2>&1; suite_needs)" ]; then
+        ok "$_vn declares the binaries its image must provide"
+    else
+        bad "$_vn names an image and nothing says what that image has to contain"
+    fi
+done
+# Driven against a stubbed podman, both directions, because the whole point is
+# that the check must go red rather than quietly pass.
+vh="$stub_dir/verifyhome"; vd="$vh/.local/share/maintainer/profiles/p"
+mkdir -p "$vd/verify.d" "$vh/.config/systemd/user"
+printf 'PROFILE_NAME=p\nTASKS="review"\nMIN_HOURS_review=6\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$vh/st" "$vh" \
+    > "$vd/profile.env"
+printf 'suite_image() { printf "img:one"; }\nsuite_needs() { printf "bash python3"; }\n' \
+    > "$vd/verify.d/shell.sh"
+vdoc() { PATH="$stub_dir:$PATH" HOME="$vh" MAINTAINER_PROFILE=p bash "$d" 2>&1; }
+# The image is missing python3: the probe prints the missing name.
+make_stub podman 'case "$*" in *"img:one"*) echo "python3 "; exit 0;; esac; exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+    && ok "a suite whose image lacks a declared binary is a failure" \
+    || bad "an image that cannot run the suite reads as healthy"
+printf '%s' "$vout" | grep -q 'python3' \
+    && ok "and the missing binary is named" \
+    || bad "the report does not say what is missing"
+# The image has everything: the probe prints nothing.
+#
+# Captured, never piped. The suite runs under `set -o pipefail` and doctor exits
+# non-zero whenever anything is red, so `vdoc | grep -q` reports doctor's exit
+# rather than the match: this case passed before the check existed, and its twin
+# failed with the check working. Same trap as the one already recorded at the
+# maintainer-merge cases below.
+make_stub podman 'exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+    && bad "a sufficient image is reported as failing" \
+    || ok "an image that provides everything declared is not reported"
+printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+    && ok "and it says which image satisfied the suite" \
+    || bad "a satisfied suite leaves no positive record"
+# The probe itself could not run. That must not read as permission: a guard that
+# answers when it could not ask is worse than no guard.
+make_stub podman 'case "$*" in *"img:one"*) exit 3;; esac; exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -q 'could not probe' \
+    && ok "a probe that could not run says so rather than passing the suite" \
+    || bad "an unrunnable probe is indistinguishable from a clean one"
+printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+    && bad "the suite was reported provisioned on a probe that never ran" \
+    || ok "and it does not claim the image provides anything"
+# A suite that declares no needs is a suite nothing can check.
+printf 'suite_image() { printf "img:one"; }\n' > "$vd/verify.d/shell.sh"
+make_stub podman 'exit 0'
+vout="$(vdoc)"
+printf '%s' "$vout" | grep -qE 'FAIL.*suite_needs' \
+    && ok "a suite that declares no needs is reported, not skipped" \
+    || bad "an undeclared suite passes by having nothing to check"
+# Remove the stub rather than leaving a permissive one. A `podman` that always
+# exits 0 sitting first on PATH made the real shell-suite case below report a
+# receipt it never earned, two hundred cases later and with no visible link.
+rm -f "$stub_dir/podman"
+
 echo "== every timer carries a catch-up slot the cadence gate makes free =="
 # A transient failure costs a whole cycle when a task fires once. On 2026-09-07
 # the sysknife issues run exited 75 into a network outage at 10:43 and its next
@@ -3264,6 +3336,18 @@ grep -q 'list-unit-files' "$md" \
 grep -q 'none enabled: nothing runs unattended' "$md" \
     && ok "and it says out loud that nothing runs unattended" \
     || bad "a profile with no enabled timer is not told so"
+
+echo "== a verdict is read from output, not from a pipeline's exit code =="
+# `doctor | grep -q` returns doctor's status under pipefail, not the match. One
+# case in this file passed for two runs that way while the check it tested did
+# not exist. The rule already appears as a comment beside the maintainer-merge
+# cases; a comment did not stop the repeat.
+piped="$(grep -nE '^\s*(vdoc|bash "\$(d|md|mg)")[^|]*\| *grep' "$root/tests/run-tests.sh" || true)"
+if [ -z "$piped" ]; then
+    ok "no case decides from a pipeline whose left side can fail"
+else
+    bad "a case pipes a failing-capable command into grep: $(printf '%s' "$piped" | head -1)"
+fi
 
 echo "== a skip is not a pass =="
 # The container cases used to `bad` when no runtime was installed, so the suite

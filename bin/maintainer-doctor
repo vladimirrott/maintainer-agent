@@ -214,6 +214,47 @@ else
     if podman run --rm --network=none docker.io/library/busybox:latest true >/dev/null 2>&1; then
         green "podman runs from cold"
     else red "podman cannot start a container from cold" "check newuidmap and /etc/subuid"; fi
+    # A verify suite runs its tests inside an image, and until now nothing tied
+    # that image to what the tests invoke. sysknife's shell suite sat in bash:5,
+    # which carries no python3; when sysknife#386 made
+    # tests/e2e/story-metadata.test.sh drive a python script, the clean run
+    # began failing, no receipt was earnable for that suite, and the merge gate
+    # reported the pull request as failing its own test rather than reporting
+    # itself as broken. It stayed that way until somebody tried to merge.
+    for _v in "$share/profiles/$profile"/verify.d/*.sh; do
+        [ -e "$_v" ] || continue
+        _sn="$(basename "$_v" .sh)"
+        # Sourced in a subshell each time: these files define functions with the
+        # same names, and one leaking into the next would report the previous
+        # suite's image under this suite's name.
+        # shellcheck disable=SC1090
+        _img="$( . "$_v" >/dev/null 2>&1; declare -F suite_image >/dev/null && suite_image )"
+        # shellcheck disable=SC1090
+        _needs="$( . "$_v" >/dev/null 2>&1; declare -F suite_needs >/dev/null && suite_needs )"
+        if [ -z "$_needs" ]; then
+            red "verify suite '$_sn' declares no suite_needs, so its image is unchecked" \
+                "add suite_needs() naming the binaries its tests invoke"
+            continue
+        fi
+        # $_needs is a space-separated list from a file in this repository and is
+        # split on purpose; it is passed as arguments rather than interpolated
+        # into the shell the container runs.
+        # shellcheck disable=SC2086
+        _miss="$(podman run --rm --network=none "$_img" sh -c \
+                 'for b in "$@"; do command -v "$b" >/dev/null 2>&1 || printf "%s " "$b"; done' \
+                 sh $_needs 2>/dev/null)"; _prc=$?
+        if [ "$_prc" -ne 0 ]; then
+            # Asked and could not get an answer. That is not the same as an
+            # answer of "nothing missing", and it must not print like one.
+            yellow "verify suite '$_sn': could not probe $_img (podman exited $_prc)" \
+                   "podman pull $_img, then re-run; until then this suite's image is unverified"
+        elif [ -n "$_miss" ]; then
+            red "verify suite '$_sn' runs in $_img, which has no: ${_miss% }" \
+                "no receipt is earnable for that suite; change suite_image or suite_needs in profiles/$profile/verify.d/$_sn.sh"
+        else
+            green "verify suite '$_sn': $_img provides $_needs"
+        fi
+    done
     if [ "$(uname -s)" = Linux ] && [ -f "$HOME/.config/systemd/user/podman-userns-warmup.service" ]; then
         green "userns warm-up unit installed (hardened units can reuse the namespace)"
     elif [ "$(uname -s)" = Linux ]; then

@@ -17,6 +17,17 @@ suite_covers() {
 # the first attempt used -slim and eight cases failed on missing binaries.
 suite_image() { printf 'docker.io/library/python:3.12'; }
 
+# What that image has to contain. maintainer-doctor runs the image and checks
+# each of these resolves, because nothing else ties the image to what the suite
+# runs inside it. sysknife's shell suite sat in bash:5 with no python3; when
+# sysknife#386 made a test drive a python script the clean run began failing,
+# no receipt was earnable, and the merge gate reported it as the pull request
+# failing its own test rather than as itself being broken.
+#
+# run-tests.sh is bash, drives python for the JSON walls, and builds real
+# git repositories for the prune and release-check cases.
+suite_needs() { printf 'bash python3 git'; }
+
 suite_mutate_glob() { printf '*.sh'; }
 
 # Copied out of the read-only mount first. The suite writes fixtures next to

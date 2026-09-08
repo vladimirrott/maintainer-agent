@@ -593,12 +593,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 584 offline tests
+./tests/run-tests.sh        # 598 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-584 offline tests: no network, no GitHub, no model call. Every case tests a
+598 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

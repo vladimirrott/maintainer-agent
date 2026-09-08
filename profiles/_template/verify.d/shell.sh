@@ -16,6 +16,17 @@ suite_covers() {
 # else, and a smaller image is a smaller thing to trust.
 suite_image() { printf 'docker.io/library/bash:5'; }
 
+# What that image has to contain. maintainer-doctor runs the image and checks
+# each of these resolves, because nothing else ties the image to what the suite
+# runs inside it. sysknife's shell suite sat in bash:5 with no python3; when
+# sysknife#386 made a test drive a python script the clean run began failing,
+# no receipt was earnable, and the merge gate reported it as the pull request
+# failing its own test rather than as itself being broken.
+#
+# the template's suite_command runs `bash <script>` and nothing else. A suite
+# that grows a dependency adds it here, or maintainer-doctor cannot see it.
+suite_needs() { printf 'bash'; }
+
 suite_mutate_glob() { printf '*.sh'; }
 
 suite_podman_args() { printf '%s\n' -e "BASH_ENV=/dev/null"; }
