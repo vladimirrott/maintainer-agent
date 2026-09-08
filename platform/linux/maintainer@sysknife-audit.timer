@@ -2,7 +2,19 @@
 Description=maintainer: sysknife audit (timer)
 
 [Timer]
-OnCalendar=*-*-1/5 12:19:00
+# Two slots, not one. A run that cannot reach GitHub exits 75 having done
+# nothing, and systemd will not retry a Type=oneshot unit, so a single slot
+# turns one refused start into a whole lost cycle: two days for issues, three
+# for ci, five for audit. On this host the network is down overnight and
+# returns between 10:00 and 12:30, and the 09:13 slot fired into that window on
+# 2026-09-04, 05, 06 and 07 without once succeeding.
+#
+# The second slot costs nothing on a good day. min_gate in run.sh skips a task
+# whose last-<task>.json is younger than MIN_HOURS_<task>, and `finish` writes
+# that file only on success, so the retry runs exactly when the first slot
+# failed. tests/run-tests.sh enforces that one gap here stays under MIN_HOURS.
+OnCalendar=*-*-1/5 14:51:00
+OnCalendar=*-*-1/5 19:51:00
 Persistent=true
 RandomizedDelaySec=300
 Unit=maintainer@sysknife-audit.service

@@ -2,9 +2,19 @@
 Description=maintainer: magent review (timer)
 
 [Timer]
-# Fires daily. The real cadence is MIN_HOURS_review in profiles/magent/profile.env,
-# which run.sh enforces on every platform.
-OnCalendar=*-*-* 09:17:00
+# Two slots, not one. A run that cannot reach GitHub exits 75 having done
+# nothing, and systemd will not retry a Type=oneshot unit, so a single slot
+# turns one refused start into a whole lost cycle: two days for issues, three
+# for ci, five for audit. On this host the network is down overnight and
+# returns between 10:00 and 12:30, and the 09:13 slot fired into that window on
+# 2026-09-04, 05, 06 and 07 without once succeeding.
+#
+# The second slot costs nothing on a good day. min_gate in run.sh skips a task
+# whose last-<task>.json is younger than MIN_HOURS_<task>, and `finish` writes
+# that file only on success, so the retry runs exactly when the first slot
+# failed. tests/run-tests.sh enforces that one gap here stays under MIN_HOURS.
+OnCalendar=*-*-* 11:17:00
+OnCalendar=*-*-* 16:17:00
 Persistent=true
 RandomizedDelaySec=300
 Unit=maintainer@magent-review.service

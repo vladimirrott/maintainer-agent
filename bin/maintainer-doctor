@@ -228,6 +228,42 @@ if [ -z "$st" ]; then
 elif [ -d "$st" ]; then
     green "$(ls "$st/runs" 2>/dev/null | wc -l) run report(s), $(ls "$st/receipts" 2>/dev/null | wc -l) open receipt(s)"
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
+    # A task that could not start leaves failed-<task>.json, and `finish`
+    # promotes last-<task>.json only on success. So "the newest failure is
+    # newer than the newest success" is exactly the condition for a task that
+    # has stopped running, and it needs no new bookkeeping to detect.
+    #
+    # The 09:13 sysknife review fired into a nightly network outage on four
+    # consecutive days, 2026-09-04 to 09-07, and exited 75 each time. The only
+    # trace was a line in alerts.log that nobody reads. The evening slot kept
+    # succeeding, so a review happened daily and the dead morning pass looked
+    # like a healthy schedule.
+    _dead=0
+    for _f in "$st"/state/failed-*.json; do
+        [ -e "$_f" ] || continue
+        _t="$(basename "$_f")"; _t="${_t#failed-}"; _t="${_t%.json}"
+        _l="$st/state/last-$_t.json"
+        # -nt is false when they share a timestamp, so a tie counts as recovered.
+        if [ -e "$_l" ] && [ ! "$_f" -nt "$_l" ]; then continue; fi
+        _dead=$((_dead+1))
+        _fm="$(stat -c %Y "$_f" 2>/dev/null || stat -f %m "$_f" 2>/dev/null || echo 0)"
+        _age=$(( ( $(date +%s) - _fm ) / 3600 ))
+        # An unreadable reason must not silence the report: the failure is the
+        # finding, the reason is detail. A guard that answers only when it could
+        # parse everything is a guard that goes quiet exactly when things break.
+        _why="$(python3 -c 'import json,sys
+try: print(json.load(open(sys.argv[1])).get("reason","") or "")
+except Exception: pass' "$_f" 2>/dev/null)"
+        [ -n "$_why" ] || _why="no reason recorded in $(basename "$_f")"
+        if [ -e "$_l" ]; then
+            red "$_t failed ${_age}h ago and has not completed since: $_why" \
+                "$share/run.sh $profile $_t"
+        else
+            red "$_t has never completed; its only record is a failure ${_age}h ago: $_why" \
+                "$share/run.sh $profile $_t"
+        fi
+    done
+    [ "$_dead" = 0 ] && green "every task has completed since its last failure"
 else yellow "no state yet; the first run creates it" ""; fi
 
 printf '\n\033[1mDeployed code\033[0m\n'

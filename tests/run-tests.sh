@@ -984,6 +984,135 @@ PATH="$stub_dir:$PATH" HOME="$dh" bash "$d" --quick 2>&1 | grep -q 'commit(s) be
     && bad "doctor calls an up-to-date deployment stale" \
     || ok "a deployment at HEAD is not reported as drifted"
 
+echo "== a task whose last attempt failed is reported, not left in a log =="
+# The 09:13 sysknife review fired into a nightly network outage on four
+# consecutive days (2026-09-04 through 09-07) and exited 75 every time. The
+# only trace was a line in alerts.log that nobody reads, so the morning pass
+# had never once run and nothing said so. `finish` promotes last-<task>.json
+# only on success, so "the newest failure is newer than the newest success" is
+# exactly the condition, and it needs no new bookkeeping.
+fh="$stub_dir/failhome"; mkdir -p "$fh/.local/share/maintainer/profiles/p"
+fst="$fh/state"; mkdir -p "$fst/state" "$fst/runs"
+printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$fst" "$fh" \
+    > "$fh/.local/share/maintainer/profiles/p/profile.env"
+mkfail() { # $1 task, $2 age of the success in hours, $3 age of the failure in hours
+    touch -d "$2 hours ago" "$fst/state/last-$1.json"
+    printf '{"task":"%s","reason":"gh could not reach GitHub in 3 tries","at":"x"}\n' "$1" \
+        > "$fst/state/failed-$1.json"
+    touch -d "$3 hours ago" "$fst/state/failed-$1.json"
+}
+# review: succeeded 40h ago, failed 2h ago -> the newest attempt failed.
+mkfail review 40 2
+# issues: failed 40h ago, succeeded 2h ago -> recovered, must stay quiet.
+mkfail issues 2 40
+touch -d "2 hours ago" "$fst/state/last-issues.json"
+fout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$fout" | grep -q "review.*failed" \
+    && ok "doctor names a task whose newest attempt failed" \
+    || bad "a task that has not succeeded since its last failure is invisible"
+printf '%s' "$fout" | grep -qE 'FAIL.*review' \
+    && ok "and it is a failure, not a note" \
+    || bad "a dead task is reported at a severity nobody acts on"
+printf '%s' "$fout" | grep -q "issues" \
+    && bad "a task that recovered is still reported as failed" \
+    || ok "a task that succeeded after its failure is not reported"
+# The reason the run recorded must reach the report, or the reader goes hunting
+# for a revoked token during a network outage.
+printf '%s' "$fout" | grep -q 'could not reach GitHub' \
+    && ok "the recorded reason is carried into the report" \
+    || bad "doctor says a task failed and not why"
+# Never ran at all is the same emergency: a failure with no success behind it.
+rm -f "$fst/state/last-review.json"
+nout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$nout" | grep -qE 'FAIL.*review' \
+    && ok "a task that has never succeeded is reported too" \
+    || bad "a failure with no prior success reads as healthy"
+# And a clean profile stays clean: no failure files, no complaint.
+rm -f "$fst"/state/failed-*.json
+touch "$fst/state/last-review.json"
+PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 \
+    | grep -qE 'FAIL.*(review|issues).*failed' \
+    && bad "doctor invents a failure for a profile that has none" \
+    || ok "no failure files, no failure report"
+
+echo "== every timer carries a catch-up slot the cadence gate makes free =="
+# A transient failure costs a whole cycle when a task fires once. On 2026-09-07
+# the sysknife issues run exited 75 into a network outage at 10:43 and its next
+# tick was two days out; ci would have been three days, audit five. Five of the
+# six timers had a single OnCalendar line, and the one that self-healed daily,
+# sysknife-review, did so only because it happened to have a second, 12h away
+# and so no use as a retry either.
+#
+# A second slot is free on a good day: min_gate in run.sh skips a task whose
+# last-<task>.json is younger than MIN_HOURS, and `finish` writes that file only
+# on success. So a redundant fire costs one "skipped:" line, and a fire after a
+# failure runs for real.
+#
+# One checker, three invocations. Extracting the logic a second time to test it
+# is how a proof ends up proving a copy: the first attempt at this test re-cut
+# the script with sed, the end anchor missed, and the malformed 2149-line result
+# failed to compile, which read as the check correctly rejecting a bad timer.
+tcheck="$stub_dir/timercheck.py"
+cat > "$tcheck" <<'PYEOF'
+import glob, os, re, sys
+root = sys.argv[1]
+problems = []
+for f in sorted(glob.glob(os.path.join(root, "platform/linux/maintainer@*.timer"))):
+    inst = re.sub(r".*maintainer@(.*)\.timer$", r"\1", f)
+    profile, _, task = inst.partition("-")
+    env = os.path.join(root, "profiles", profile, "profile.env")
+    if not os.path.exists(env):
+        problems.append(inst + ": no profiles/" + profile + "/profile.env"); continue
+    m = re.search(r"^MIN_HOURS_" + re.escape(task) + r"=(\d+)", open(env).read(), re.M)
+    if not m:
+        problems.append(inst + ": profile.env declares no MIN_HOURS_" + task); continue
+    minh = int(m.group(1))
+    mins = []
+    for line in open(f):
+        c = re.match(r"\s*OnCalendar=.*?(\d{2}):(\d{2}):\d{2}\s*$", line)
+        if c:
+            mins.append(int(c.group(1)) * 60 + int(c.group(2)))
+    if len(mins) < 2:
+        problems.append("%s: %d OnCalendar slot(s); a refused start waits %dh"
+                        % (inst, len(mins), minh)); continue
+    mins.sort()
+    gaps = [(b - a) / 60.0 for a, b in zip(mins, mins[1:])]
+    if not any(g < minh for g in gaps):
+        problems.append("%s: closest slots are %gh apart, MIN_HOURS_%s=%d; "
+                        "no slot can retry the one before it"
+                        % (inst, min(gaps), task, minh))
+if problems:
+    print("  " + "\n  ".join(problems))
+    sys.exit(1)
+PYEOF
+if python3 -c "compile(open('$tcheck').read(), 'timercheck', 'exec')" 2>/dev/null; then
+    ok "the timer checker is valid python (a malformed one would reject everything)"
+else
+    bad "the timer checker does not compile; its verdicts mean nothing"
+fi
+if python3 "$tcheck" "$root"; then
+    ok "every timer has a slot closer than its own MIN_HOURS, so a failure retries in the same cycle"
+else
+    bad "a timer fires once per cycle; one refused start loses the whole interval"
+fi
+# Mutation, both directions, against the same checker the real case used.
+tprobe="$stub_dir/timerprobe"; mkdir -p "$tprobe/platform/linux" "$tprobe/profiles/p"
+printf 'MIN_HOURS_review=6\n' > "$tprobe/profiles/p/profile.env"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\n' > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && bad "the catch-up check passes a timer with a single slot" \
+    || ok "and it fails a timer with a single slot"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\nOnCalendar=*-*-* 21:13:00\n' \
+    > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && bad "two slots 10h apart pass a 6h MIN_HOURS; that is a second run, not a retry" \
+    || ok "and it fails two slots too far apart to retry each other"
+printf '[Timer]\nOnCalendar=*-*-* 11:13:00\nOnCalendar=*-*-* 15:13:00\n' \
+    > "$tprobe/platform/linux/maintainer@p-review.timer"
+python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
+    && ok "and it passes a timer whose second slot lands inside MIN_HOURS" \
+    || bad "the catch-up check rejects a correctly scheduled timer"
+
 echo "== housekeeping: prune and release-check =="
 mr="$root/bin/maintainer-repo"
 [ -x "$mr" ] && ok "maintainer-repo present and executable" || bad "maintainer-repo missing"

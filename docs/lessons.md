@@ -1649,3 +1649,59 @@ morning to prevent a repeat of #252 did not gate a single one of them. It had
 tests, and the derivation was verified against the live tracker by hand, and it
 was still not deployed in any sense that matters. A guard exercised only by its
 own suite is decorative.
+
+## 61. The morning pass had never once run
+
+`alerts.log` on 2026-09-07:
+
+```
+2026-09-04T08:14  ALERT sysknife-review: the run unit failed before it could report
+2026-09-05T09:15  ALERT sysknife-review
+2026-09-06T09:16  ALERT sysknife-review
+2026-09-07T09:17  ALERT sysknife-review
+2026-09-07T10:44  ALERT sysknife-issues
+```
+
+Four consecutive days, plus `magent-review` on three of them. Every one exited
+75 on `error connecting to api.github.com`, and the preflight was right to
+refuse: this laptop's network is down overnight and comes back between 10:00 and
+12:30, so the 09:13 slot had never fired into a working connection. The evening
+slot at 21:13 kept succeeding, so a review happened every day and the schedule
+looked healthy from the outside.
+
+Two separate defects, and the second is the one that made the first survive four
+days.
+
+**The failure was recorded and never reported.** `run.sh` writes
+`state/failed-<task>.json` and appends to `alerts.log`, and nothing reads either.
+`maintainer-doctor` ran clean through all four days. The predicate needed no new
+bookkeeping: `finish` promotes `last-<task>.json` only on success, so a failure
+file newer than the success file already means "this task has not completed
+since it broke". The doctor now says so, in red, carrying the recorded reason
+and the log path, because during a network outage a bare "review failed" sends
+you hunting for a revoked token.
+
+**A refused start lost the whole cycle.** systemd will not retry a
+`Type=oneshot` unit, and five of the six timers had a single `OnCalendar` line.
+One minute of downtime at 10:43 cost the issues pass two days; ci would have
+cost three, audit five. The sixth timer had two slots twelve hours apart, which
+is a second run rather than a retry.
+
+The fix was already built and unused. `min_gate` skips a task whose
+`last-<task>.json` is younger than `MIN_HOURS_<task>`, so a second slot inside
+that window costs one `skipped:` line on a good day and runs for real on a bad
+one. Both directions were proven before relying on it: a fresh stamp printed
+`skipped: review last ran 0h ago`, and a stamp aged 100 hours went straight
+through. Every timer now carries a catch-up slot, and the suite fails a timer
+whose closest two slots are further apart than its own `MIN_HOURS`.
+
+### The proof that proved a copy
+
+The first version of that check re-cut the checker out of the suite with `sed`
+for its mutation cases. The end anchor never matched, `sed` returned 2149 lines
+of shell, python refused to compile it, and a non-zero exit read as the check
+correctly rejecting a malformed timer. One direction passed, the other failed,
+which is the only reason it was caught at all. The checker is now one file that
+the real case and both mutations invoke, and the suite compiles it first, since a
+checker that cannot parse rejects everything and looks strict while testing
+nothing.
