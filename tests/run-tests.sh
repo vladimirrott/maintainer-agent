@@ -1139,6 +1139,32 @@ printf '%s' "$fout" | grep -q "issues" \
 printf '%s' "$fout" | grep -q 'could not reach GitHub' \
     && ok "the recorded reason is carried into the report" \
     || bad "doctor says a task failed and not why"
+# A failure that follows a success on a task still inside its cadence is a
+# warning, not a failure. On 2026-09-07 a superseded duplicate `issues` run died
+# one second AFTER the real run promoted the stamp, and the check called the
+# task dead while it had completed two hours earlier. The question doctor should
+# answer is "has this task stopped", and the answer is no while its last success
+# is younger than its own MIN_HOURS.
+touch -d "40 hours ago" "$fst/state/last-review.json"
+printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\nMIN_HOURS_review=100\n' "$fst" "$fh" \
+    > "$fh/.local/share/maintainer/profiles/p/profile.env"
+cout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$cout" | grep -qE 'warn.*review.*failed' \
+    && ok "a failed attempt on a task still inside its cadence is a warning" \
+    || bad "a task that completed inside its own interval is called dead"
+printf '%s' "$cout" | grep -qE 'FAIL.*review' \
+    && bad "a superseded attempt turns the whole report red" \
+    || ok "and it does not turn the report red"
+# Overdue AND its last attempt failed is the original emergency, still red.
+printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\nMIN_HOURS_review=6\n' "$fst" "$fh" \
+    > "$fh/.local/share/maintainer/profiles/p/profile.env"
+oout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
+printf '%s' "$oout" | grep -qE 'FAIL.*review' \
+    && ok "a task that is overdue and whose last attempt failed is still a failure" \
+    || bad "the four-day outage this check was written for would not be reported"
+printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$fst" "$fh" \
+    > "$fh/.local/share/maintainer/profiles/p/profile.env"
+touch -d "40 hours ago" "$fst/state/last-review.json"
 # Never ran at all is the same emergency: a failure with no success behind it.
 rm -f "$fst/state/last-review.json"
 nout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"

@@ -297,8 +297,22 @@ try: print(json.load(open(sys.argv[1])).get("reason","") or "")
 except Exception: pass' "$_f" 2>/dev/null)"
         [ -n "$_why" ] || _why="no reason recorded in $(basename "$_f")"
         if [ -e "$_l" ]; then
-            red "$_t failed ${_age}h ago and has not completed since: $_why" \
-                "$share/run.sh $profile $_t"
+            # "Has this task stopped?" is the question, and the answer is no
+            # while its last success is younger than its own MIN_HOURS. On
+            # 2026-09-07 a superseded duplicate `issues` run died one second
+            # AFTER the real run promoted the stamp, and calling that task dead
+            # while it had completed two hours earlier is the kind of red that
+            # teaches a reader to skim past reds.
+            _lm="$(stat -c %Y "$_l" 2>/dev/null || stat -f %m "$_l" 2>/dev/null || echo 0)"
+            _sage=$(( ( $(date +%s) - _lm ) / 3600 ))
+            _mv="MIN_HOURS_$_t"; _min="${!_mv:-0}"
+            if [ "$_min" -gt 0 ] && [ "$_sage" -lt "$_min" ]; then
+                yellow "$_t failed ${_age}h ago, but it completed ${_sage}h ago and its interval is ${_min}h: $_why" \
+                       "nothing is overdue; read the log if you want to know why that attempt died"
+            else
+                red "$_t failed ${_age}h ago and has not completed since: $_why" \
+                    "$share/run.sh $profile $_t"
+            fi
         else
             red "$_t has never completed; its only record is a failure ${_age}h ago: $_why" \
                 "$share/run.sh $profile $_t"
