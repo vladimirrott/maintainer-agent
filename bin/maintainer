@@ -698,6 +698,41 @@ def _open_prs():
     return None if _OPEN_PRS == "unreadable" else _OPEN_PRS
 
 
+def _past_contributors():
+    """Everyone outside who has merged something here: login -> (count, days since).
+
+    None when the listing could not be read, for the same reason `_open_prs`
+    does it: an empty roster and an unreadable one are the same empty list, and
+    only one of them means nobody is available.
+
+    Bots and the maintainer are dropped. Dependabot has more merged pull
+    requests here than any human and cannot be offered an issue.
+    """
+    rows = gh_json("pr", "list", "--state", "merged", "--limit", "300",
+                   "--json", "author,mergedAt")
+    if rows is None:
+        return None
+    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    out: dict = {}
+    now = datetime.now(timezone.utc)
+    for r in rows:
+        who = ((r.get("author") or {}).get("login")) or ""
+        if not who or who == owner:
+            continue
+        if "[bot]" in who or who.startswith("app/"):
+            continue
+        n, best = out.get(who, (0, -1))
+        at = r.get("mergedAt") or ""
+        try:
+            days = (now - datetime.fromisoformat(at.replace("Z", "+00:00"))).days
+        except ValueError:
+            days = -1
+        if best < 0 or (0 <= days < best):
+            best = days
+        out[who] = (n + 1, best)
+    return out
+
+
 def _issue_parties(number) -> dict:
     """Who is on one issue, from one fetch of its comments.
 
@@ -946,7 +981,7 @@ def cmd_offers() -> None:
     """
     label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
     issues = gh_json("issue", "list", "--state", "open", "--limit", "100",
-                     "--json", "number,labels")
+                     "--json", "number,labels,assignees")
     if issues is None:
         raise SystemExit("maintainer: could not read the tracker")
     owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
@@ -963,6 +998,10 @@ def cmd_offers() -> None:
     # evening against an issue already closed. The double-booked check could
     # not see it, because it only counts offers nobody has answered.
     contention_on: dict = {}
+    # Mentions retired by a later assignment to somebody else. Named rather than
+    # dropped: a hold that vanishes with no line saying why is indistinguishable
+    # from a hold the tool failed to see.
+    superseded_on: dict = {}
     # An issue somebody has already opened a pull request against is not free,
     # whatever the thread says. The 2026-09-07 issues run reported #371 printed
     # as free while an open PR closed it: offering that is the sysknife#252
@@ -1017,8 +1056,41 @@ def cmd_offers() -> None:
         taken = closed_by.get(i["number"])
         if taken and taken[1]:
             posted = posted | {taken[1]}
-        if not mentioned:
-            if label not in names and not taken:
+        # A maintainer mention is not the only way to hold an issue, and it was
+        # the only one this counted. Somebody who writes "I will take this",
+        # gets the claim label and the assignment, and opens the pull request,
+        # was never mentioned by the maintainer and so appeared nowhere. The
+        # footer below tells the reader that an absent name is an available
+        # person, so the tool recommended double-booking the one contributor it
+        # had correctly refused to double-book on the issue side. Measured on
+        # sysknife 2026-09-09: @sonalisrisivani held #371 by assignment and by
+        # open PR #379, and this printed seventeen people, none of them her.
+        #
+        # Three ways to hold one issue, all counted here: the maintainer pointed
+        # you at it, GitHub says it is assigned to you, or you have a pull
+        # request open against it.
+        assigned = {a.get("login") for a in (i.get("assignees") or []) if a.get("login")}
+        assigned.discard(owner)
+        # An assignment to somebody else retires an older mention. sysknife #331
+        # on 2026-09-09: @ITSMERNB was offered it on 09-01 and answered, it was
+        # handed to @be-student on 09-06 who took the assignment and opened PR
+        # #377, and this still printed "ITSMERNB no: working on #331". A
+        # contributor with five merged pull requests sat out of the eligible
+        # pool for three days because of an issue that was no longer his.
+        #
+        # The assignee field is the tiebreak because it is where the project
+        # says out loud who has it, and it is what the contributor sees.
+        if assigned:
+            for who in sorted(mentioned - assigned):
+                superseded_on.setdefault(i["number"], (sorted(assigned), []))[1].append(who)
+            mentioned = mentioned & assigned
+        self_claimed = assigned | ({taken[1]} if taken and taken[1] else set())
+        self_claimed -= mentioned
+        if not mentioned and not self_claimed:
+            # An issue assigned to the maintainer is not free either, and this
+            # used to offer them: sysknife #392, a release checklist assigned to
+            # the owner, was printed as free to hand to a contributor.
+            if label not in names and not taken and not (i.get("assignees") or []):
                 free_nums.append(i["number"])
             continue
         for who in mentioned:
@@ -1026,6 +1098,10 @@ def cmd_offers() -> None:
             held.setdefault(who, []).append((i["number"], state))
             if state == "UNANSWERED":
                 unanswered_on.setdefault(i["number"], set()).add(who)
+        # Nobody offered them this, so there is no offer to leave unanswered.
+        # They are working, and working is a full queue.
+        for who in sorted(self_claimed):
+            held.setdefault(who, []).append((i["number"], "answered"))
 
     # Naming them, not counting them. A campaign that has to pick issues cannot
     # pick from an integer, so the 2026-09-07 batch picked by hand and offered
@@ -1067,6 +1143,42 @@ def cmd_offers() -> None:
     if over:
         print(f"\n{over} person/people hold more than one unanswered offer. The rule is one,")
         print("and the measurement behind it is that a second is answered at zero.")
+
+    # Naming the available people, because absence is not an answer anybody can
+    # act on. On 2026-09-09 this printed seventeen blocked names and was read as
+    # "zero eligible contributors", and that reading went to the user as a
+    # finding. @Georgefifth had five merged pull requests, the most recent
+    # merged the day before, and held nothing; the only evidence of it was a
+    # name that was not printed. A reader cannot notice the absence of a name
+    # they have to already know.
+    if superseded_on:
+        print()
+        for n, (owners, gone) in sorted(superseded_on.items()):
+            print(f"#{n} is assigned to {', '.join('@' + w for w in owners)}, so "
+                  f"{', '.join('@' + w for w in sorted(gone))} no longer holds it.")
+        print("They are free again, and were counted as busy until this line existed.")
+
+    veterans = _past_contributors()
+    print()
+    if veterans is None:
+        # MISTAKES rule 6. "I could not ask" and "nobody is eligible" are the
+        # same empty list, and the second reads as permission to stop looking.
+        print("maintainer: could not read the merged pull requests, so this run cannot")
+        print("say who is free. Do not read that as nobody being available.")
+    else:
+        free_people = [(w, n, d) for w, (n, d) in veterans.items() if w not in held]
+        free_people.sort(key=lambda r: (-r[1], r[2]))
+        if not free_people:
+            print("Nobody who has merged something here is free. Every past contributor")
+            print("holds an open offer, an assignment or a pull request.")
+        else:
+            noun = "person is" if len(free_people) == 1 else "people are"
+            print(f"{len(free_people)} {noun} free to take one, most merges first:")
+            for who, n, days in free_people:
+                warm = "unknown" if days < 0 else f"{days}d ago"
+                print(f"  @{who:20} {n:>3} merged, last {warm}")
+            print("Somebody whose last merge is inside 72h converts; past five days, "
+                  "the measured rate is 0 for 5.")
     clash = {n: sorted(w) for n, w in unanswered_on.items() if len(w) > 1}
     if clash:
         print()
