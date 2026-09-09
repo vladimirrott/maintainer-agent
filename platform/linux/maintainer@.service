@@ -22,7 +22,18 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=%t/bus
 Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
 # %i is "<profile>-<task>", split by the wrapper.
 ExecStart=%h/.local/share/maintainer/run-instance.sh %i
-TimeoutStartSec=5400
+# 75 is EX_TEMPFAIL: the run could not ask (no network, another run holding the
+# lock), recorded it in failed-<task>.json, and the catch-up slot in this
+# profile's timer retries it. Without this, systemd calls that a unit failure
+# and OnFailure raises a second critical popup on top of the one run.sh already
+# sent. 2026-09-08: six such failures, up to twelve popups, every one of them
+# self-healing.
+SuccessExitStatus=75
+# 5400 killed a magent review at 11:58 -> 13:28 on 2026-09-08 just as it
+# finished, and because it held the profile lock the whole time, the 12:20
+# issues run then timed out waiting. Reviews of this repository grew; the
+# ceiling had not.
+TimeoutStartSec=10800
 
 # --- Containment -----------------------------------------------------------
 # Mount-based isolation is NOT available here, and the directives for it were

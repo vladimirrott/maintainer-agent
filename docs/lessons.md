@@ -1820,3 +1820,96 @@ The test could not reproduce it at first: `$stub_dir` carries
 `make_stub flock 'exit 0'`, so nothing ever queued and the case passed while the
 code was still broken. A test that needs a real lock needs a PATH without the
 stub for it.
+
+## 65. Five findings the agent filed while it believed it was rehearsing
+
+The 2026-09-08 magent review filed #27 to #31 under a stale `POST=off` claim
+(lesson 63). The issues were real. Every one was verified here before being
+acted on, because a finding filed by a run that thought it was posting nothing
+has not been checked by anybody:
+
+- **#27, the wall had no relative spelling.** `render-settings.py` spelled the
+  bare verb, seven FHS directories, six home directories three ways each, and
+  whatever `which` resolved. It never spelled `./`. That matters most for the
+  one verb nobody types any other way: `install.sh --uninstall` is denied
+  because a run once used it to turn off every timer on this machine, and
+  `install.sh` sits at a repository root and is never on PATH. All 31 rendered
+  rules for it missed `./install.sh --uninstall`. An interpreter is a second way
+  past a rule keyed on a filename, so `.sh` verbs now get `bash ` and `sh `
+  spellings too, and nothing else does: `bash curl` is noise, and a wall padded
+  with rules that cannot fire is a wall nobody reads.
+- **#28, both identity checks passed when they could not ask.** `pinned_login="$(gh
+  api user ... || true)"` turned "could not resolve" into "resolved to nothing",
+  and the `[ -n ... ]` test then fell through to a log line announcing the
+  identity as pinned. The log recorded a verification that had not happened,
+  which is worse than not checking, because it reads as evidence afterwards.
+  `file-issue` had the same shape and filed under a name nothing confirmed.
+- **#29, the innermost guard failed closed and the five reads feeding it did
+  not.** `maintainer holders` was hardened and says so in its own comment.
+  `closingIssuesReferences`, the author, the label, the assignee list and the
+  comment list each swallowed an error into an empty string that the next line
+  read as permission. `holders` reads REST and those read GraphQL, so a rate
+  limit on one and not the other left the claim protection off silently.
+- **#30, `backend_rehearsal` was tested for existence and never for its value.**
+  run.sh chose the rehearsal wall from a hardcoded list of two filenames. The
+  cursor backend reads a third variable that nothing set, so `POST=off` there
+  handed over the live wall while `cursor-rehearsal` sat rendered and unread. An
+  enumeration that must be updated per backend goes stale silently, and this one
+  had. The backend is now asked, because it is the only thing that knows which
+  variable it reads.
+- **#31, the pin verifier could not see an unpinned action.** Its extraction
+  required a line to be pinned already, so a floating tag never entered the loop
+  and the all-clear printed over it. The first fix reproduced the defect it was
+  fixing: anchoring to `^uses:` missed the `- uses:` list form, so the probe line
+  was not seen either.
+
+## 66. Six critical popups a day for something that fixes itself
+
+Reported as constant error toasts. Six unit failures on 2026-09-08 produced up
+to twelve, because each one alerts twice: `run.sh` calls `alert`, which sends
+`notify-send -u critical`, then exits non-zero, and systemd's `OnFailure` runs
+`alert.sh`, which sends a second.
+
+Every one of the six was `gh could not reach GitHub in 3 tries` or a lock wait
+expiring. Both are recorded in `failed-<task>.json`, reported by
+`maintainer-doctor`, and retried by the catch-up slot every timer now carries.
+A critical popup six times a day for a condition that heals itself is how
+somebody learns to dismiss the one that matters.
+
+The record is unchanged and the urgency drops. `SuccessExitStatus=75` stops
+systemd calling a TEMPFAIL a unit failure, so `OnFailure` fires for real problems
+only. A lock wait that expires now exits 75 as well, because another run of the
+profile is still working and this one is superseded rather than broken.
+
+Two things surfaced underneath it. `alert.sh` globbed every `*-maint` directory
+and wrote each alert into all of them, so magent incidents appeared in
+sysknife's `alerts.log`. And `TimeoutStartSec=5400` killed a magent review that
+ran 11:58 to 13:28 just as it finished, which then starved the queued issues run
+into its lock timeout: one long run, two popups.
+
+## 67. The suite was flaky, and the flake was the rule it teaches
+
+Three consecutive runs failed on three different assertions in the same block,
+which is the shape of truncated output rather than missing text. The cause:
+
+```sh
+printf '%s' "$out" | grep -q 'pattern'      # 23 KB of prompt
+```
+
+`grep -q` exits on the first match, `printf` takes SIGPIPE, and `set -o
+pipefail` reports the match as a failure. Measured on a 23 KB payload matching
+early: 3 spurious failures in 300 calls, and 0 in 300 with a herestring. There
+were 187 such sites, every one using `grep -q`, and roughly two runs in five
+failed for no reason.
+
+A gate that fails at random teaches everyone to re-run until green, which is
+exactly how a real failure gets waved through. All 187 now read
+`grep -q 'pattern' <<<"$out"`.
+
+The same runs turned up two cases that cloned `lacs-project/sysknife` from
+github.com on every invocation, in a suite whose own README calls it offline.
+That cost minutes per run and, on a slow link, produced two failures about
+things that were not under test. The suite now exports `MAINTAINER_REPO_ORIGIN`
+pointing at a bare repository it creates, so a case added later cannot
+reintroduce it by forgetting. Suite wall clock went from about four minutes to
+29 seconds.

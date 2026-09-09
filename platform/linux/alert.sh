@@ -13,14 +13,23 @@ set -uo pipefail
 instance="${1:-unknown}"
 msg="the run unit failed before it could report; systemd killed or refused it"
 
-# Deduplicated: both globs match `sysknife-maint`, so the first version wrote
-# every alert to the same file twice and an operator counting alerts would have
-# counted double.
+# The trail of the profile that failed, and no other. The instance is
+# `<profile>-<task>`, so the profile is everything before the last hyphen; the
+# earlier version globbed every *-maint directory and wrote each alert into all
+# of them, so magent failures appeared in sysknife's alerts.log and an operator
+# reading either file was reading two projects' incidents interleaved.
+#
+# Falling back to the glob when the profile cannot be placed is deliberate: an
+# alert that lands somewhere is worth more than one that lands nowhere.
+profile="${instance%-*}"
+dirs="$HOME/.local/state/${profile}-maint"
+[ -d "$dirs" ] || dirs="$(printf '%s\n' "$HOME"/.local/state/*-maint | sort -u)"
+# shellcheck disable=SC2086  # $dirs is newline-separated and is split on purpose
 while read -r d; do
     [ -d "$d" ] || continue
     mkdir -p "$d/logs"
     printf '%s  ALERT %s: %s\n' "$(date -Is)" "$instance" "$msg" >> "$d/logs/alerts.log"
-done < <(printf '%s\n' "$HOME"/.local/state/*-maint "$HOME"/.local/state/*maint* | sort -u)
+done < <(printf '%s\n' $dirs)
 
 DISPLAY="${DISPLAY:-:1}" \
 DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \

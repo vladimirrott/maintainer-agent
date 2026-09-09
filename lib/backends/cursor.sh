@@ -31,6 +31,19 @@ backend_name() { printf 'cursor'; }
 
 # Declared now, because the wall exists and run.sh can hand it a POST=off run.
 backend_rehearsal() { printf 'config-dir'; }
+# And WHERE that wall is, in the variable this backend reads to find it.
+#
+# `backend_rehearsal` was only ever tested for existence; the value it returns
+# is read nowhere. run.sh chose the wall from a hardcoded list of two filenames
+# instead, the list did not include this backend, and a POST=off run was handed
+# the LIVE wall while the rehearsal one sat rendered and unread beside it. A
+# backend is the only thing that knows which variable it reads, so it answers.
+# Returning non-zero means the wall is not rendered, and run.sh refuses.
+backend_rehearsal_wall() {
+    local d="$PROFILE_DIR/cursor-rehearsal"
+    [ -f "$d/cli-config.json" ] || return 1
+    export MAINTAINER_CURSOR_DIR="$d"
+}
 
 # STILL restricted, and the restriction is now gated on proof rather than on the
 # stale claim it used to rest on. The wall renders and matches the documented

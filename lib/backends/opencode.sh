@@ -25,6 +25,19 @@ backend_name() { printf 'opencode'; }
 # opencode can honour POST=off: the rehearsal config is the same default-deny
 # map with every posting verb appended, and last-match-wins puts them on top.
 backend_rehearsal() { printf 'config'; }
+# And WHERE that wall is, in the variable this backend reads to find it.
+#
+# `backend_rehearsal` was only ever tested for existence; the value it returns
+# is read nowhere. run.sh chose the wall from a hardcoded list of two filenames
+# instead, the list did not include this backend, and a POST=off run was handed
+# the LIVE wall while the rehearsal one sat rendered and unread beside it. A
+# backend is the only thing that knows which variable it reads, so it answers.
+# Returning non-zero means the wall is not rendered, and run.sh refuses.
+backend_rehearsal_wall() {
+    local w="$PROFILE_DIR/opencode-rehearsal.json"
+    [ -f "$w" ] || return 1
+    export MAINTAINER_SETTINGS="$w"
+}
 
 backend_check() {
     command -v opencode >/dev/null || { echo "opencode not on PATH (curl -fsSL https://opencode.ai/install | bash)"; return 1; }

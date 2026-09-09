@@ -80,7 +80,13 @@ static() {
       bad "$id has no entry in $map_file; add a needle or an explicit \"n/a\" with a reason"
       continue
     fi
-    if printf '%s' "$corpus" | grep -qiF "$needle"; then
+    # A herestring, not a pipe. `grep -q` exits on the first match, `printf`
+    # then takes SIGPIPE, and `set -o pipefail` reports the match as a failure.
+    # The corpus here is the whole assembled prompt, tens of kilobytes, which is
+    # exactly the size where that races: measured at 3 spurious failures in 300
+    # calls. It cost a red "RULE MISSING from everything the agent reads" for a
+    # rule that was present.
+    if grep -qiF -- "$needle" <<<"$corpus"; then
       ok "$id -> the agent still reads: \"$needle\""
     else
       bad "$id -> RULE MISSING from everything the agent reads: \"$needle\""

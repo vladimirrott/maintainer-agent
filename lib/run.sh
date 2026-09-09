@@ -207,6 +207,26 @@ session_display() {
     printf '%s' "${d:-${DISPLAY:-:0}}"
 }
 
+# A failure that retries itself, reported without interrupting anybody.
+#
+# 2026-09-08 produced six unit failures and up to twelve critical desktop
+# popups, because each one alerts twice: this file calls `alert`, then exits
+# non-zero and systemd's OnFailure fires platform/linux/alert.sh for a second.
+# All six were `gh could not reach GitHub` or a lock wait expiring. Both are
+# already in failed-<task>.json, already reported by maintainer-doctor, and
+# already retried by the catch-up slot every timer carries.
+#
+# The record is unchanged. Only the urgency drops, because a critical popup six
+# times a day for a condition that heals itself teaches you to dismiss the one
+# that matters.
+alert_transient() {
+    printf '%s\n' "$1" | tee -a "$log" >&2
+    "$HELPER" failed "$task" "$1" "$log" >/dev/null 2>&1 || \
+        printf 'run.sh: could not even record the failure marker\n' >&2
+    notify low "maintainer · $profile $task · will retry" \
+        "$(humanise "$1")" "log  $log"
+}
+
 alert() {
     printf '%s\n' "$1" | tee -a "$log" >&2
     # 1. Disk first. No display, no bus, no network, no way for this to be
@@ -243,21 +263,8 @@ POST="${POST:-on}"
 # from inside a script, which no Bash deny rule can see, so a rehearsal would
 # have deleted remote branches while reporting that it reached nobody.
 export MAINTAINER_POST="$POST"
-if [ "$POST" = off ]; then
-    if [ -f "$PROFILE_DIR/settings-rehearsal.json" ]; then
-        export MAINTAINER_SETTINGS="$PROFILE_DIR/settings-rehearsal.json"
-    elif [ -f "$PROFILE_DIR/opencode-rehearsal.json" ]; then
-        export MAINTAINER_SETTINGS="$PROFILE_DIR/opencode-rehearsal.json"
-    elif [ "$show" = 1 ]; then
-        echo "run.sh: (preview) no rehearsal wall is rendered in this tree; a real" >&2
-        echo "        run would refuse here. ./install.sh renders it." >&2
-    else
-        echo "run.sh: POST=off but no rehearsal wall was rendered for '$profile'" >&2
-        echo "        re-run ./install.sh, which renders it beside settings.json" >&2
-        exit 78
-    fi
-fi
-
+# The backend is sourced BEFORE the rehearsal wall is chosen, because it is the
+# thing that knows where its own wall is and which variable it reads to find it.
 # shellcheck disable=SC1090
 . "$BACKEND_DIR/$BACKEND.sh" || { alert "no backend '$BACKEND'"; exit 64; }
 
@@ -266,6 +273,27 @@ fi
 if [ "$show" = 0 ] && [ "$POST" = off ] && ! declare -F backend_rehearsal >/dev/null; then
     alert "backend '$BACKEND' cannot enforce POST=off (no per-command deny list); use claude or opencode"
     exit 78
+fi
+
+if [ "$POST" = off ]; then
+    # Asked, not guessed. This used to test for two filenames,
+    # settings-rehearsal.json and opencode-rehearsal.json, and pick the first
+    # that existed. The cursor backend reads CURSOR_CONFIG_DIR through
+    # MAINTAINER_CURSOR_DIR, which nothing in the tree ever set, so a POST=off
+    # run there was handed profiles/<p>/cursor, the LIVE wall, while
+    # cursor-rehearsal sat rendered and unread beside it. An enumeration that
+    # has to be updated for every backend is an enumeration that goes stale
+    # silently, and this one did.
+    if declare -F backend_rehearsal_wall >/dev/null && backend_rehearsal_wall; then
+        :
+    elif [ "$show" = 1 ]; then
+        echo "run.sh: (preview) no rehearsal wall is rendered in this tree; a real" >&2
+        echo "        run would refuse here. ./install.sh renders it." >&2
+    else
+        echo "run.sh: POST=off but backend '$BACKEND' has no rehearsal wall rendered for '$profile'" >&2
+        echo "        re-run ./install.sh, which renders it beside the live wall" >&2
+        exit 78
+    fi
 fi
 
 # The deployed tree stamps itself at install time. A run report that does not
@@ -305,8 +333,10 @@ if [ "$show" = 0 ]; then
 # in the audit trail.
 exec 9>"$STATE_DIR/run.lock"
 if ! flock -w "$LOCK_WAIT" 9; then
-    alert "another run held the lock for over ${LOCK_WAIT}s"
-    exit 1
+    # 75, not 1. Another run of this profile is still working; this one is
+    # superseded rather than broken, and the next catch-up slot picks it up.
+    alert_transient "another run held the lock for over ${LOCK_WAIT}s, so this one never started"
+    exit 75
 fi
 
 # And read the cadence gate again, now that we hold the lock.
@@ -354,7 +384,7 @@ if [ -z "$gh_login" ]; then
     # 75 is EX_TEMPFAIL: nothing is wrong with the credentials, the run could
     # not ask. The next timer tick is the fix, so this must not read as a
     # refusal in the journal.
-    alert "gh could not reach GitHub in $gh_tries tries, so the identity was never verified and nothing ran. Check the network, not the token. See $log"
+    alert_transient "gh could not reach GitHub in $gh_tries tries, so the identity was never verified and nothing ran. Check the network, not the token. See $log"
     exit 75
 fi
 if [ "$gh_login" != "$GH_ACCOUNT" ]; then
@@ -381,8 +411,19 @@ if [ -z "$pinned_token" ]; then
 fi
 export GH_TOKEN="$pinned_token"
 unset GITHUB_TOKEN
-pinned_login="$(gh api user --jq .login 2>>"$log" || true)"
-if [ -n "$pinned_login" ] && [ "$pinned_login" != "$GH_ACCOUNT" ]; then
+# `|| true` here turned "the token could not be resolved" into "the token
+# resolved to nothing", and the empty string then passed the `-n` test below and
+# fell through to a log line announcing the identity as pinned. The log recorded
+# a verification that had not happened, which is worse than not checking: it
+# reads as evidence afterwards.
+pinned_rc=0
+pinned_login="$(gh api user --jq .login 2>>"$log")" || pinned_rc=$?
+if [ "$pinned_rc" -ne 0 ] || [ -z "$pinned_login" ]; then
+    # 75, not 1: nothing is wrong with the credentials, the run could not ask.
+    alert_transient "the pinned token could not be resolved to an account (gh exited $pinned_rc), so this run's identity was never confirmed and nothing ran. See $log"
+    exit 75
+fi
+if [ "$pinned_login" != "$GH_ACCOUNT" ]; then
     alert "the pinned token resolves to '$pinned_login', not $GH_ACCOUNT; refusing to run. See $log"
     exit 1
 fi
