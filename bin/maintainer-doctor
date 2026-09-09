@@ -269,6 +269,36 @@ if [ -z "$st" ]; then
 elif [ -d "$st" ]; then
     green "$(ls "$st/runs" 2>/dev/null | wc -l) run report(s), $(ls "$st/receipts" 2>/dev/null | wc -l) open receipt(s)"
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
+    # A pinned token that outlived the run that used it. run.sh scrubs on exit,
+    # so anything found here was written by a build older than that trap, by a
+    # run that was killed before its trap fired, or into a file the scrubber
+    # will not rewrite. On 2026-09-09 two session transcripts held the live PAT
+    # in plain text, put there by an agent printing ${GH_TOKEN:-no}, whose `:-`
+    # arm expands to the value.
+    _tok="$(gh auth token --user "${GH_ACCOUNT:-}" 2>/dev/null || true)"
+    if [ "${#_tok}" -ge 16 ]; then
+        _sess="$HOME/.claude/projects/$(printf '%s' "${REPO_PATH:-/nonexistent}" | tr '/.' '--')"
+        # Named subdirectories rather than $st, because the state directory also
+        # holds container build trees: gigabytes of object files that a doctor
+        # run must not walk, and that no token is ever written into.
+        _where=""
+        for _d in logs runs drafts state receipts; do
+            [ -d "$st/$_d" ] && _where="$_where $st/$_d"
+        done
+        [ -d "$_sess" ] && _where="$_where $_sess"
+        [ -n "$_where" ] || _where="$st"
+        # shellcheck disable=SC2086
+        _left="$(grep -rlaF -e "$_tok" $_where 2>/dev/null | head -5)"
+        if [ -n "$_left" ]; then
+            red "the pinned token is on disk in $(printf '%s\n' "$_left" | wc -l) file(s), starting $(printf '%s' "$_left" | head -1)" \
+                "rotate the token, then: $share/run.sh $profile <task> rescrubs on exit"
+        else
+            green "no pinned token left on disk by an earlier run"
+        fi
+    else
+        yellow "cannot read the pinned token, so nothing checked whether one was left on disk" \
+            "gh auth switch --user ${GH_ACCOUNT:-<account>}"
+    fi
     # A task that could not start leaves failed-<task>.json, and `finish`
     # promotes last-<task>.json only on success. So "the newest failure is
     # newer than the newest success" is exactly the condition for a task that

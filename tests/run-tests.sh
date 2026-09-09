@@ -3357,6 +3357,64 @@ grep -q 'backend_transient_reason' "$root/lib/run.sh" \
 n=$(grep -c 'exit 75' "$root/lib/run.sh")
 [ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
     || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
+
+echo "== the pinned token never survives the run that used it =="
+# Found by the magent issues run on 2026-09-09, in its own report: it wrote
+#   echo "GH_TOKEN set? ${GH_TOKEN:+yes}${GH_TOKEN:-no}"
+# and the `:-` arm expands to the VALUE when the variable is set, so the live
+# PAT printed. It went nowhere public, and it landed in two Claude session
+# transcripts on disk, from two separate runs. run.sh exports the pinned token
+# for the whole run on purpose, so the token being reachable is by design and
+# the token OUTLIVING the run is the defect.
+scr="$stub_dir/scrub"; rm -rf "$scr"; mkdir -p "$scr/sub"
+( . "$root/lib/profile.sh" 2>/dev/null; declare -F maintainer_scrub_secret >/dev/null ) \
+    && ok "the scrubber is a sourceable function" \
+    || bad "no maintainer_scrub_secret in lib/profile.sh"
+
+SECRET='ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
+printf 'line one\nGH_TOKEN set? yes%s\nline three\n' "$SECRET" > "$scr/a.log"
+printf '{"t":"x","stdout":"len=40 %s"}\n' "$SECRET" > "$scr/sub/b.jsonl"
+printf 'nothing sensitive here\n' > "$scr/clean.log"
+head -c 512 /dev/urandom > "$scr/sub/binary.bin"
+before_a=$(wc -l < "$scr/a.log"); before_b=$(wc -l < "$scr/sub/b.jsonl")
+
+( . "$root/lib/profile.sh" 2>/dev/null; maintainer_scrub_secret "$SECRET" "$scr" ) > "$scr/report.txt" 2>&1
+grep -qF "$SECRET" "$scr/a.log" \
+    && bad "the secret survived in a.log" || ok "the secret is gone from the log"
+grep -qF "$SECRET" "$scr/sub/b.jsonl" \
+    && bad "the secret survived in a nested jsonl" || ok "it recurses into subdirectories"
+[ "$(wc -l < "$scr/a.log")" = "$before_a" ] && [ "$(wc -l < "$scr/sub/b.jsonl")" = "$before_b" ] \
+    && ok "the surrounding records are intact, line for line" \
+    || bad "scrubbing changed the file structure"
+grep -q 'line three' "$scr/a.log" \
+    && ok "and the content around the secret survives" \
+    || bad "the scrubber ate more than the secret"
+grep -qE 'a\.log|b\.jsonl' "$scr/report.txt" \
+    && ok "it names the files it changed" \
+    || bad "the scrubber cleans in silence, so nothing can act on it"
+# The negative twin that matters most. An empty secret matches everywhere, and a
+# scrubber that accepts one rewrites every file it walks.
+: > "$scr/canary.log"; printf 'untouched\n' > "$scr/canary.log"
+( . "$root/lib/profile.sh" 2>/dev/null; maintainer_scrub_secret "" "$scr" ) >/dev/null 2>&1
+[ "$(cat "$scr/canary.log")" = "untouched" ] \
+    && ok "an empty secret is refused rather than matched against everything" \
+    || bad "an empty secret rewrote a file"
+( . "$root/lib/profile.sh" 2>/dev/null; maintainer_scrub_secret "short" "$scr" ) >/dev/null 2>&1
+[ "$(cat "$scr/canary.log")" = "untouched" ] \
+    && ok "a too-short secret is refused, because a common substring is not a credential" \
+    || bad "a five-character string was scrubbed out of every file"
+# The secret must not travel in argv, where /proc and any ps make it readable.
+grep -nE 'maintainer_scrub_secret\(\)' -A 24 "$root/lib/profile.sh" 2>/dev/null \
+    | grep -qE '(sed|perl|grep)[^\n]*"\$(secret|1)"' \
+    && bad "the scrubber passes the secret as a command-line argument" \
+    || ok "the secret reaches the helper through the environment, not argv"
+
+grep -q 'maintainer_scrub_secret' "$root/lib/run.sh" \
+    && ok "run.sh scrubs before it exits" \
+    || bad "the scrubber exists and no run ever calls it"
+grep -q 'maintainer_scrub_secret\|token still on disk\|pinned token' "$root/bin/maintainer-doctor" \
+    && ok "doctor looks for a token left behind by an earlier run" \
+    || bad "nothing notices a token that a previous run left on disk"
 # Could not ask is not an answer. With the listing unreadable the free list must
 # say it is unverified rather than silently claim every issue is offerable.
 cat > "$stub_dir/gh" <<'GHEOF'

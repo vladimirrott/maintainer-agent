@@ -402,8 +402,12 @@ printf 'gh identity: %s\n' "$gh_login" >>"$log"
 # With GH_TOKEN exported for the whole run, every gh call, the agent's included,
 # authenticates with this token and no `gh auth switch` can select another
 # account (measured: a switch to a different user is ignored while GH_TOKEN is
-# set). The token stays in this process's environment and is never written to
-# disk. A run that cannot pin its identity refuses rather than risk the flip.
+# set). The token stays in this process's environment, and an EXIT trap below
+# removes it from anything this run left behind, because "never written to disk"
+# is a claim about the agent's behaviour rather than a property of the design:
+# on 2026-09-09 a run printed it with `${GH_TOKEN:-no}` and the value landed in
+# a session transcript. A run that cannot pin its identity refuses rather than
+# risk the flip.
 pinned_token="$(gh auth token --user "$GH_ACCOUNT" 2>>"$log" || true)"
 if [ -z "$pinned_token" ]; then
     alert "could not pin a token for $GH_ACCOUNT, so this run's identity is not guaranteed for the whole pass; refusing rather than risk posting as another account. See $log"
@@ -411,6 +415,26 @@ if [ -z "$pinned_token" ]; then
 fi
 export GH_TOKEN="$pinned_token"
 unset GITHUB_TOKEN
+
+# Every exit path from here on, including the transient exit 75 and the refusals
+# below, passes through this. No deny rule can enumerate the commands that print
+# an environment variable, so the token is cleaned up on the way out instead.
+#
+# The Claude CLI files a session under a directory named after the working
+# directory with every `/` and `.` turned into `-`, so that is where a printed
+# token lands. Anything binary is reported and left alone: rotating beats
+# corrupting a disk image.
+scrub_pinned_token() {
+    local rc=$?
+    local sess where
+    sess="$HOME/.claude/projects/$(printf '%s' "$REPO_PATH" | tr '/.' '--')"
+    where="$STATE_DIR"
+    [ -d "$sess" ] && where="$where $sess"
+    # shellcheck disable=SC2086
+    maintainer_scrub_secret "$GH_TOKEN" $where >>"$log" 2>&1 || true
+    return "$rc"
+}
+trap scrub_pinned_token EXIT
 # `|| true` here turned "the token could not be resolved" into "the token
 # resolved to nothing", and the empty string then passed the `-n` test below and
 # fell through to a log line announcing the identity as pinned. The log recorded
