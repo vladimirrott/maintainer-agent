@@ -3716,12 +3716,18 @@ broken_read_refuses "*'issue view'*assignees*"    "assignee list"
 broken_read_refuses "*'issue view'*comments*"     "comment list"
 # The helper that answers the thread question. Absent, the loop used to `break`
 # before `rc` was ever set, so the fail-closed branch below it never ran.
-nohelp="$stub_dir/nohelper"; rm -rf "$nohelp"; mkdir -p "$nohelp"
-cp "$mg" "$nohelp/maintainer-merge"
+# A whole little tree, because maintainer-merge sources ../lib/profile.sh
+# relative to itself and falls back to the deployed copy under HOME. CI runs
+# this job with no deployed tree on purpose, so a copy sitting next to no lib/
+# died at line 15 and the case reported the gate as having merged. What must be
+# absent here is `maintainer`, not everything.
+nohelp="$stub_dir/nohelperroot"; rm -rf "$nohelp"; mkdir -p "$nohelp/bin" "$nohelp/lib"
+cp "$mg" "$nohelp/bin/maintainer-merge"
+cp "$root/lib/profile.sh" "$nohelp/lib/profile.sh"
 cl_gh 0 claimant
 out="$(PATH="$stub_dir:/usr/bin:/bin" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
-    MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$nohelp/maintainer-merge" merge 1 2>&1)"; rc=$?
+    MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$nohelp/bin/maintainer-merge" merge 1 2>&1)"; rc=$?
 grep -q 'could not read' <<<"$out" \
     && ok "a missing holders helper refuses the merge" \
     || bad "with no helper on PATH the gate merged without asking who holds the issue: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
