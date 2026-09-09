@@ -584,9 +584,19 @@ fi
 
 # 3. Hand it to the backend. Wall-clock is bounded by systemd, not here.
 cd "$REPO_PATH" || { alert "cannot cd to $REPO_PATH"; exit 1; }
+backend_why=""
 if ! backend_run "$prompt_file" "$model" "$log" "$STATE_DIR"; then
-    alert "$BACKEND exited non-zero for $run_id. See $log"
-    # Fall through: a partial report is better than none.
+    # A model usage window that resets on a clock, or an overloaded upstream, is
+    # the same class as an unreachable GitHub: recorded, reported by doctor,
+    # retried by the next slot, and worth nobody's attention at `critical`.
+    backend_why="$(backend_transient_reason "$log")" || backend_why=""
+    if [ -n "$backend_why" ]; then
+        alert_transient "the $BACKEND backend stopped on something that clears itself ($backend_why); the next slot retries this task"
+    else
+        alert "$BACKEND exited non-zero for $run_id. See $log"
+    fi
+    # Fall through either way: a partial report is better than none, and a run
+    # that still wrote one finishes normally.
 fi
 
 # 4. Close the run. `finish` refuses an empty report, which is the point.
@@ -596,6 +606,13 @@ if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
     # from a run that never started, and this run demonstrably started: it has
     # a log, and it may already have posted.
     "$HELPER" abort "$run_id" "the run wrote no usable report" >>"$log" 2>&1 || true
+    if [ -n "$backend_why" ]; then
+        # The backend never got far enough to write anything, and the reason
+        # heals on its own. Exit 75 so SuccessExitStatus absorbs it and
+        # OnFailure does not raise the third popup for one condition.
+        alert_transient "$run_id wrote no report: the $BACKEND backend stopped on $backend_why"
+        exit 75
+    fi
     alert "$run_id produced no report; the run is not auditable. See $log"
     exit 1
 fi
