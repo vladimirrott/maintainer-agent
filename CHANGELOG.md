@@ -21,6 +21,14 @@ middle digit.
 
 ### Fixed
 
+- **A backend that stopped on a model usage window no longer raises three
+  critical alerts.** `2026-09-07T20-34-issues` ended on "You've hit your session
+  limit, resets 10:10pm": `run.sh` alerted for the backend exit, alerted again
+  for the missing report, and exited 1 so systemd's `OnFailure` alerted a third
+  time, and `maintainer-doctor` stayed red for 39 hours over a window that
+  reopened in ninety minutes. `backend_transient_reason` reads the run's own log
+  and names what it matched. An empty credit balance and an unreadable log stay
+  critical, because no retry fixes either.
 - **A hold is read from three places, not one.** `offers` derived every hold from
   maintainer `@mentions`, so a contributor who claimed an issue themselves was
   invisible. @sonalisrisivani held sysknife #371 by assignment and by open PR

@@ -1953,3 +1953,39 @@ shipped version.
 An issue assigned to the maintainer stopped being offered as free in the same
 change. sysknife #392, a release checklist with the owner's own name on it, was
 in the free-to-offer list every time this ran.
+
+## 69. A model usage window closing is not a defect
+
+`2026-09-07T20-34-issues` stopped here:
+
+```
+I'll start by loading the skill that governs this task.
+Skill loaded. Reading required references before any action.
+You've hit your session limit · resets 10:10pm (America/Mexico_City)
+```
+
+That produced three critical popups for one condition. `lib/run.sh` alerted
+because the backend exited non-zero, alerted again because the run wrote no
+report, and exited 1, so systemd's `OnFailure` fired `alert.sh` for a third.
+`maintainer-doctor` then carried a red line for 39 hours over a window that
+reopened ninety minutes later.
+
+Lesson 66 had already routed the transient conditions through `alert_transient`
+and exit 75. Every one of them arrived through `gh`: an unreachable API, an
+unresolvable token, a lock wait expiring. Nothing looked at how the **backend**
+failed, so the class was half-swept. Fixing by inspection reaches the instances
+in front of you and stops there; the class had to be named by its definition,
+which is "the run stopped for a reason that waiting fixes", not by the list of
+`gh` failures that happened to be on screen that day.
+
+**Guard:** `backend_transient_reason` in `lib/profile.sh` reads the run's own log
+and prints the line it matched. A session or usage limit, a 429, a 5xx, an
+`overloaded_error`, a dropped connection. `run.sh` consults it on both alert
+paths: a run that still wrote a report finishes normally with one low-urgency
+notice, and a run that wrote nothing exits 75 so the next slot retries it.
+
+The negative twins matter more than the positives here. An empty credit balance
+is deliberately absent from that list, because no retry pays an invoice, and so
+is an unreadable log. A classifier that calls everything transient silences the
+alerts it exists to raise, which is a worse failure than the popups it removes.
+Seven tests, four of them proving it stays silent.

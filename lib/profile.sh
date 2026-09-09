@@ -63,6 +63,28 @@ maintainer_load_profile() {
 
 # Find lib/profile.sh from a tool in bin/, whether running from a checkout or
 # from the deployed tree.
+# Which backend failures fix themselves, and which do not.
+#
+# 2026-09-07T20-34-issues stopped on "You've hit your session limit, resets
+# 10:10pm". run.sh alerted at critical for the backend exit, alerted again
+# because the run wrote no report, and exited 1 so systemd's OnFailure alerted a
+# third time. Three popups and a red in maintainer-doctor for 39 hours, for a
+# window that reopened by itself ninety minutes later.
+#
+# Prints the line it matched and returns 0 when waiting is the whole fix.
+#
+# The list stays short on purpose. An empty credit balance is deliberately NOT
+# in it: no retry pays an invoice, and a classifier that calls everything
+# transient silences the alerts it exists to raise. An unreadable log is not
+# transient either, for the same reason a guard that cannot ask must not answer.
+backend_transient_reason() {
+    local log="${1:-}" hit=""
+    [ -n "$log" ] && [ -r "$log" ] || return 1
+    hit="$(grep -aoiE "you'?ve hit your (session|usage) limit.{0,60}|usage limit reached.{0,60}|overloaded_error|rate_limit_error|api error: (429|5[0-9][0-9])|connection error|fetch failed" "$log" 2>/dev/null | tail -1)"
+    [ -n "$hit" ] || return 1
+    printf '%s' "$hit"
+}
+
 maintainer_lib() {
     local here; here="$(cd "$(dirname "${BASH_SOURCE[1]}")" && pwd)"
     for c in "$here/../lib/profile.sh" "$HOME/.local/share/maintainer/profile.sh"; do

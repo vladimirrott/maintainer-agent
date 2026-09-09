@@ -3302,6 +3302,61 @@ grep -qE 'free to take one' <<<"$out" \
 grep -qE '#60 .*(superseded|reassigned|assigned to)' <<<"$out" \
     && ok "the retirement is stated, not silent" \
     || bad "a hold disappeared with no line saying why"
+
+
+echo "== a model usage window that resets on a clock is transient =="
+# 2026-09-07T20-34-issues: the backend stopped with
+#   You've hit your session limit · resets 10:10pm (America/Mexico_City)
+# run.sh alerted at `critical` for the backend exit, alerted again because the
+# run wrote no report, and exited 1 so systemd's OnFailure alerted a third time.
+# Three popups for a condition that healed itself ninety minutes later, and a
+# permanent red in maintainer-doctor until somebody re-ran the task by hand.
+# This is the same class as the unreachable-API path, arriving through the
+# backend instead of through gh.
+tfix="$stub_dir/transient"; rm -rf "$tfix"; mkdir -p "$tfix"
+( . "$root/lib/profile.sh" 2>/dev/null
+  declare -F backend_transient_reason >/dev/null ) \
+    && ok "the transient classifier is a sourceable function, so it can be tested" \
+    || bad "no backend_transient_reason in lib/profile.sh"
+
+printf "I'll start by loading the skill.\nYou've hit your session limit · resets 10:10pm (America/Mexico_City)\n" > "$tfix/limit.log"
+printf 'API Error: 529 {"type":"overloaded_error"}\n' > "$tfix/overloaded.log"
+printf 'API Error: 429 rate_limit_error\n' > "$tfix/rate.log"
+printf 'Credit balance is too low to run this request\n' > "$tfix/credit.log"
+printf 'thread panicked at src/main.rs:12: assertion failed\n' > "$tfix/real.log"
+printf 'wrote the report and finished cleanly\n' > "$tfix/clean.log"
+
+check_transient() { ( . "$root/lib/profile.sh" 2>/dev/null; backend_transient_reason "$1" ); }
+
+r="$(check_transient "$tfix/limit.log")"; rc=$?
+[ "$rc" = 0 ] && ok "a session limit that names its reset time is transient" \
+    || bad "the 2026-09-07 session limit still reads as a real failure"
+grep -qi 'session limit' <<<"$r" \
+    && ok "and the reason quotes what the backend actually said" \
+    || bad "the reason does not name the limit: '$r'"
+check_transient "$tfix/overloaded.log" >/dev/null \
+    && ok "a 529 overloaded_error is transient" || bad "an overloaded upstream reads as a defect"
+check_transient "$tfix/rate.log" >/dev/null \
+    && ok "a 429 rate_limit_error is transient" || bad "a rate limit reads as a defect"
+# The negative twins. A guard that calls everything transient silences the
+# alerts it exists to raise, which is worse than the popups it removes.
+check_transient "$tfix/credit.log" >/dev/null \
+    && bad "an empty credit balance was called transient; no retry pays an invoice" \
+    || ok "an empty credit balance stays critical, because no retry fixes it"
+check_transient "$tfix/real.log" >/dev/null \
+    && bad "a panic was classified as transient" || ok "a real failure stays a real failure"
+check_transient "$tfix/clean.log" >/dev/null \
+    && bad "a clean log was classified as transient" || ok "a clean log is not transient"
+check_transient "$tfix/does-not-exist.log" >/dev/null \
+    && bad "a missing log was called transient" || ok "a log that cannot be read is not transient"
+
+# run.sh has to USE it, on both alert paths, or the classifier is decoration.
+grep -q 'backend_transient_reason' "$root/lib/run.sh" \
+    && ok "run.sh consults the classifier" \
+    || bad "the classifier exists and run.sh never calls it"
+n=$(grep -c 'exit 75' "$root/lib/run.sh")
+[ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
+    || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
 # Could not ask is not an answer. With the listing unreadable the free list must
 # say it is unverified rather than silently claim every issue is offerable.
 cat > "$stub_dir/gh" <<'GHEOF'
