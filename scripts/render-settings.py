@@ -46,8 +46,20 @@ from pathlib import Path
 #
 # /opt/homebrew/bin earns its place on Apple Silicon: Homebrew puts `gh` there,
 # and without it a POST=off rehearsal on a Mac would not block posting.
-STATIC_DIRS = ("", "/bin/", "/usr/bin/", "/usr/local/bin/", "/usr/local/sbin/",
+#
+# "./" is here because the matcher keys on the command as written, and a verb
+# invoked from the directory it sits in is written that way. It cost a real
+# bypass: `install.sh --uninstall` is denied because a run once used it to turn
+# off every timer on this machine, `install.sh` lives at a repository root and
+# is never on PATH, so `./install.sh --uninstall` is the only spelling anybody
+# types, and not one of the 31 rendered rules for that verb matched it.
+STATIC_DIRS = ("", "./", "/bin/", "/usr/bin/", "/usr/local/bin/", "/usr/local/sbin/",
                "/opt/homebrew/bin/", "/snap/bin/")
+# A script can also be run by naming its interpreter, which is a spelling no
+# amount of directory enumeration reaches. Applied only to verbs whose first
+# word ends in .sh: `bash curl` is not a thing anybody types, and a wall padded
+# with rules that can never fire is a wall nobody reads.
+INTERPRETERS = ("bash ", "sh ")
 # Under the home directory, spelled the three ways a shell accepts.
 HOME_DIRS = (".local/bin/", "bin/", ".cargo/bin/", "go/bin/",
              ".npm-global/bin/", ".local/share/npm/bin/")
@@ -99,12 +111,25 @@ def wall(spec: dict, home: str) -> list[str]:
     # walks straight past. `bare` is still read for older profiles.
     verbs = list(spec.get("spelled_everywhere", [])) + list(spec.get("bare", []))
     pref = prefixes(home, verbs)
+
+    def spellings(verb: str) -> list[str]:
+        """Every way of writing this verb that a shell would accept.
+
+        Each prefix, and for a script each prefix again behind an interpreter.
+        Enumeration stays incomplete and the module docstring says so; the two
+        spellings recorded in an incident report are not the ones to leave out.
+        """
+        out = [f"{p}{verb}" for p in pref]
+        if verb.split()[0].endswith(".sh"):
+            out += [f"{i}{p}{verb}" for i in INTERPRETERS for p in pref]
+        return out
+
     for verb in verbs:
-        for p in pref:
-            rules.add(f"Bash({p}{verb}:*)")
+        for written in spellings(verb):
+            rules.add(f"Bash({written}:*)")
     for verb in spec.get("bare_exact", []):
-        for p in pref:
-            rules.add(f"Bash({p}{verb})")
+        for written in spellings(verb):
+            rules.add(f"Bash({written})")
     for path in spec.get("credential_paths", []):
         rules.add(f"Read({path})")
         tail = path[2:]                      # strip the leading "~/"

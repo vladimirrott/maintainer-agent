@@ -558,10 +558,42 @@ PYEOF
     # noticing. CLAIM_LABEL comes from the profile; a project that does not use
     # one sets it empty and this check does nothing.
     local claim_label="${CLAIM_LABEL:-}"
-    local author closes
-    author="$(gh pr view "$pr" --repo "$REPO_SLUG" --json author --jq .author.login)"
+    # Every read below captures its exit status.
+    #
+    # The innermost check (`maintainer holders`) was hardened to fail closed and
+    # says so in its own comment. The reads that decide whether it RUNS were not,
+    # and each swallowed its error into an empty string that the next line read
+    # as permission: no issues closed, no label, nobody assigned, nobody else
+    # spoke. `maintainer holders` reads the comments over REST while these read
+    # GraphQL, so a 502 or a secondary rate limit on one and not the other left
+    # the claim protection off with nothing printed.
+    # What it closes first, because that decides whether any of this applies.
+    local author="" closes crc=0
     closes="$(gh pr view "$pr" --repo "$REPO_SLUG" --json closingIssuesReferences \
-              --jq '.closingIssuesReferences[].number' 2>/dev/null)"
+              --jq '.closingIssuesReferences[].number' 2>&1)" || crc=$?
+    if [ "$crc" -ne 0 ]; then
+        die "#$pr: I could not read which issues this closes:
+
+  $closes
+
+  A pull request that closes nothing and a question that could not be asked
+  produce the same empty answer here, and one of them means every claim check
+  below inspects nothing. Refusing instead."
+    fi
+    # The author is only needed when there is a claim to compare it against, and
+    # a pull request that closes no issue cannot take anybody's work away.
+    if [ -n "$closes" ]; then
+        local arc=0
+        author="$(gh pr view "$pr" --repo "$REPO_SLUG" --json author --jq .author.login 2>&1)" || arc=$?
+        if [ "$arc" -ne 0 ] || [ -z "$author" ]; then
+            die "#$pr: I could not read who opened this pull request:
+
+  $author
+
+  Every claim check below compares against that name, and comparing against an
+  empty one matches nobody and blocks nothing. Refusing instead."
+        fi
+    fi
 
     # The thread, before the label. This check used to live entirely inside the
     # `claim_label` branch, so an issue somebody had been pointed at with an
@@ -587,7 +619,15 @@ PYEOF
     # merge through: exit 0 with no output means no holders, and any non-zero
     # exit means the question was never answered.
     for iss in $closes; do
-        [ -n "$mbin" ] || break
+        # `break` here left the loop before rc was ever set, so the fail-closed
+        # branch below could not run. A guard whose helper is missing has not
+        # asked the question.
+        [ -n "$mbin" ] || die "#$pr closes #$iss and I could not read who was pointed at it:
+
+  no \`maintainer\` helper beside $(basename "${BASH_SOURCE[0]}") or on PATH
+
+  That question decides whether merging this takes somebody's work away.
+  Install the agent (./install.sh) or put \`maintainer\` on PATH, then retry."
         local rc=0
         holders="$(MAINTAINER_SLUG="$REPO_SLUG" \
                    MAINTAINER_PROFILE="${MAINTAINER_PROFILE:-}" \
@@ -614,17 +654,38 @@ PYEOF
 
     if [ -n "$claim_label" ]; then
         for iss in $closes; do
-            gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
-                --jq '[.labels[].name]|index("'"$claim_label"'")' 2>/dev/null | grep -qv '^null$' || continue
+            # `gh ... | grep -qv '^null$' || continue` cannot tell an issue
+            # without the label from a `gh` that died: an empty pipe and a
+            # missing label both exit 1, and both skipped the whole branch.
+            local lbl lrc=0
+            lbl="$(gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
+                   --jq '[.labels[].name]|index("'"$claim_label"'")' 2>&1)" || lrc=$?
+            if [ "$lrc" -ne 0 ] || [ -z "$lbl" ]; then
+                die "#$pr closes #$iss and I could not read its labels:
+
+  $lbl
+
+  The '$claim_label' label is how this project records that somebody was
+  promised an issue, so a merge decided without reading it is decided blind."
+            fi
+            [ "$lbl" = null ] && continue
             # An assignment is the strongest record of who was promised this,
             # so when one exists the author has to be in it. The check here used
             # to be "has the author ever posted on the issue", which let a
             # stranger who commented "I have this implemented" clear a claim
             # somebody else held. Being interested in an issue is not the same
             # as being the person it was given to.
-            local holders_a
+            local holders_a hrc=0
             holders_a="$(gh issue view "$iss" --repo "$REPO_SLUG" --json assignees \
-                         --jq '.assignees[].login' 2>/dev/null)"
+                         --jq '.assignees[].login' 2>&1)" || hrc=$?
+            if [ "$hrc" -ne 0 ]; then
+                die "#$pr closes #$iss and I could not read who it is assigned to:
+
+  $holders_a
+
+  An unread assignee list and an empty one are the same string here, and one of
+  them means somebody's name is on this issue and I cannot see it."
+            fi
             if [ -n "$holders_a" ]; then
                 printf '%s\n' "$holders_a" | grep -qxF "$author" && continue
                 die "#$pr closes #$iss, which carries the '$claim_label' label and is
@@ -636,9 +697,22 @@ PYEOF
             # Labelled and unassigned. The author may proceed only if nobody
             # else has spoken there: a second voice on a reserved issue is the
             # case a human has to look at.
-            local others
-            others="$(gh issue view "$iss" --repo "$REPO_SLUG" --json comments \
-                      --jq '[.comments[].author.login]|unique|.[]' 2>/dev/null \
+            # The read and the filtering are separate statements on purpose.
+            # `grep -vxF` legitimately exits 1 when it filters everything out,
+            # so a single pipeline ending in `|| true` cannot tell "nobody else
+            # spoke" from "the comment list never arrived".
+            local others others_raw orc=0
+            others_raw="$(gh issue view "$iss" --repo "$REPO_SLUG" --json comments \
+                          --jq '[.comments[].author.login]|unique|.[]' 2>&1)" || orc=$?
+            if [ "$orc" -ne 0 ]; then
+                die "#$pr closes #$iss and I could not read who has posted there:
+
+  $others_raw
+
+  A reserved issue with a second voice on it is the case a human has to look
+  at, and I cannot tell whether this is one."
+            fi
+            others="$(printf '%s\n' "$others_raw" \
                       | grep -vxF "${MAINTAINER_ACCOUNT:-}" | grep -vxF "$author" || true)"
             [ -z "$others" ] && continue
             die "#$pr closes #$iss, which carries the '$claim_label' label, has no

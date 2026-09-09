@@ -1138,11 +1138,30 @@ def cmd_screen(pr: str) -> None:
             print(f"  - {path}: {why}")
         if len(ordered) > 12:
             print(f"  ... and {len(ordered) - 12} more")
-        print("\nIn an unattended run there is no fallback: do not build, do not test,")
-        print("do not run its scripts. Say in the review that you reviewed by reading.")
-        print("Interactively, you can execute it in podman:")
+        # The invariant, stated as an invariant. This used to read "in an
+        # unattended run there is no fallback ... interactively, you can execute
+        # it in podman", which was measured on 2026-09-02, when every hardening
+        # directive on the systemd unit blocked rootless podman and only an
+        # unhardened unit could start a container. A podman-userns-warmup unit
+        # the service orders itself after fixed that: the 2026-09-07 11:27 `ci`
+        # run, a real timer run under the full hardening, started
+        # postgres:17-alpine and read PostgreSQL 17.10 out of it.
+        #
+        # The stale sentence cost more than a wrong fact. Reviews were already
+        # running mutation proofs in podman on PRs screened DO NOT EXECUTE, so
+        # the doctrine contradicted the practice, and a doctrine nobody follows
+        # teaches that doctrine is optional. What the verdict forbids has not
+        # changed; only the claim about who has a sandbox has.
+        print("\nNever on this host. That is what the verdict means, and it does not")
+        print("depend on who is watching: this code runs in a container or it does not run.")
+        print("\nRootless podman does start inside the hardened systemd unit, so an")
+        print("unattended run has the sandbox too. Test that, rather than assuming it in")
+        print("either direction:")
+        print("  podman run --rm --network=none docker.io/library/busybox:latest true")
+        print("\nIf that works, run the proof with no network and the tree read-only:")
         print("  podman run --rm --network=none -v \"$PWD:/repo:ro\" docker.io/library/rust:1-slim \\")
         print("    sh -c 'cd /repo && cargo test --offline'")
+        print("If it does not, say in the review that you reviewed by reading.")
         if any(".github/workflows/" in p for p, _ in ordered):
             print("\nThis PR touches .github/workflows/. Do NOT approve its queued workflow")
             print("run: that approval is the control that stops a fork's code running in CI.")
@@ -1464,8 +1483,19 @@ def cmd_file_issue(args: list[str]) -> None:
         # `gh api user --jq .login` prints a bare login, not JSON, so read stdout
         # directly rather than through gh_json (which would json.loads it to None
         # and silently skip this check).
-        who = _spawn(("gh", "api", "user", "--jq", ".login"), cwd=REPO).stdout.strip()
-        if who and who != account:
+        got = _spawn(("gh", "api", "user", "--jq", ".login"), cwd=REPO)
+        who = got.stdout.strip()
+        # `if who and ...` let an unanswerable call through, and the issue was
+        # then filed carrying a name nothing had confirmed. An issue is signed
+        # work: not knowing whose name goes on it is a reason to stop, not a
+        # reason to continue.
+        if got.returncode != 0 or not who:
+            raise SystemExit(
+                f"maintainer file-issue: gh could not say which account this is "
+                f"(exit {got.returncode}); refusing to file an issue under a name "
+                f"nothing confirmed.\n"
+                f"            {(got.stderr or '').strip()[:200]}")
+        if who != account:
             raise SystemExit(f"maintainer file-issue: gh is '{who}', not {account}; refusing to file")
 
     cmd = ["gh", "issue", "create", "--repo", SLUG, "--title", title, "--body", full_body]

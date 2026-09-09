@@ -49,6 +49,21 @@ make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 make_stub codex  'echo "codex stub invoked" >&2; exit 0'
 make_stub flock  'exit 0'
 
+# Every run.sh case provisions from HERE, never from github.com.
+#
+# run.sh step 0b clones REPO_ORIGIN when REPO_PATH has no .git, and the sysknife
+# profile defaults that to https://github.com/lacs-project/sysknife.git. Two
+# cases reached it, so a suite whose own README calls it offline cloned a real
+# repository twice per run: minutes of wall clock, and on 2026-09-09 a slow link
+# turned it into two failures about the identity gate and a log rename, neither
+# of which was the thing under test.
+#
+# Exported once here rather than fixed per case, so a case added later cannot
+# reintroduce it by forgetting. A case that wants its own origin still sets one.
+suite_origin="$stub_dir/suite-origin.git"
+git init -q --bare "$suite_origin"
+export MAINTAINER_REPO_ORIGIN="$suite_origin"
+
 echo "== argument handling =="
 out=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" nosuchprofile review 2>&1); rc=$?
 check "unknown profile is rejected" "$rc" "64"
@@ -74,7 +89,7 @@ gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc, $3 = message
         MAINTAINER_GH_TRIES=2 MAINTAINER_GH_BACKOFF=0 \
         bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
     if [ "$rc" = "$2" ]; then ok "gh='${1:-<empty>}' -> rc=$2"; else bad "gh='${1:-<empty>}' expected rc=$2, got $rc"; fi
-    if printf '%s' "$out" | grep -qi "$3"; then
+    if grep -qi "$3" <<<"$out"; then
         ok "gh='${1:-<empty>}' -> the gate's own message, not an upstream failure"
     else
         bad "gh='${1:-<empty>}' exited $rc without saying '$3': $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
@@ -97,15 +112,21 @@ make_stub gh "case \"\$*\" in
   *'auth token'*) echo PINNEDTOKEN;;
   *'api user'*) echo vladimirrott;;
 esac"
+# A checkout that already exists, so run.sh skips provisioning. Naming neither
+# REPO_PATH nor REPO_ORIGIN made this case `git clone` lacs-project/sysknife
+# from github.com on every run of a suite whose own README calls it offline: it
+# cost minutes, and on 2026-09-08 a slow network turned it into a failure that
+# had nothing to do with the identity gate it tests.
+pin_repo="$stub_dir/pin-repo-1"; rm -rf "$pin_repo"; git init -q -b main "$pin_repo"
 out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
-    MAINTAINER_STATE_DIR="$stub_dir/pin-state-1" \
+    MAINTAINER_STATE_DIR="$stub_dir/pin-state-1" MAINTAINER_REPO_PATH="$pin_repo" \
     MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review 2>&1)
 # The pin message lands in the run log; the observable on stdout is that the run
 # got PAST the identity gate (a token was pinned and verified) and on to refresh,
 # rather than refusing at the pin.
-if ! printf '%s' "$out" | grep -q 'could not pin\|resolves to' \
-   && printf '%s' "$out" | grep -q 'refresh failed'; then
+if ! grep -q 'could not pin\|resolves to' <<<"$out" \
+   && grep -q 'refresh failed' <<<"$out"; then
     ok "the run pins its gh identity by token and proceeds past the gate"
 else
     bad "the run refused at the identity pin: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
@@ -122,7 +143,7 @@ out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_setting
     MAINTAINER_STATE_DIR="$stub_dir/pin-state-2" \
     MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'could not pin a token' \
+[ "$rc" != 0 ] && grep -q 'could not pin a token' <<<"$out" \
     && ok "with no token to pin, the run refuses rather than trust the active account" \
     || bad "the run proceeded without a pinned token (rc=$rc)"
 
@@ -137,7 +158,7 @@ out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_setting
     MAINTAINER_STATE_DIR="$stub_dir/pin-state-3" \
     MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q "resolves to 'someoneelse'" \
+[ "$rc" != 0 ] && grep -q "resolves to 'someoneelse'" <<<"$out" \
     && ok "a pinned token that resolves to another account is refused" \
     || bad "a token for the wrong account was accepted (rc=$rc): $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
 # A network outage and a wrong account are different emergencies with different
@@ -152,10 +173,10 @@ out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_setting
     bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
 [ "$rc" = 75 ] && ok "an unreachable API exits 75 (try again), not 1 (refused)" \
     || bad "an unreachable API exits $rc, indistinguishable from a wrong account"
-printf '%s' "$out" | grep -qi 'could not reach\|unreachable' \
+grep -qi 'could not reach\|unreachable' <<<"$out" \
     && ok "and the alert names the network rather than the identity" \
     || bad "the alert blames the identity for a network failure: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
-printf '%s' "$out" | grep -q "authenticated as" \
+grep -q "authenticated as" <<<"$out" \
     && bad "the unreachable path still reports an account it never read" \
     || ok "and it does not name an identity it never got an answer about"
 # A transient outage is transient, so the gate retries before giving up. A wrong
@@ -225,22 +246,22 @@ printf '{"permissions":{"deny":[]}}\n' > "$pp_settings"
 pp() { MAINTAINER_POST="$1" MAINTAINER_SETTINGS="$pp_settings" \
        bash "$root/lib/run.sh" --show-prompt magent review 2>&1; }
 pp_on="$(pp on)"
-printf '%s' "$pp_on" | grep -qi 'this run POSTS' \
+grep -qi 'this run POSTS' <<<"$pp_on" \
     && ok "at POST=on the prompt says so in its own section" \
     || bad "a posting run is told nothing about posting"
-printf '%s' "$pp_on" | grep -q 'REHEARSAL' \
+grep -q 'REHEARSAL' <<<"$pp_on" \
     && bad "a posting run is handed the rehearsal notice" \
     || ok "and it is not handed the rehearsal notice"
 pp_off="$(pp off)"
-printf '%s' "$pp_off" | grep -q 'This run is a REHEARSAL' \
+grep -q 'This run is a REHEARSAL' <<<"$pp_off" \
     && ok "at POST=off the rehearsal notice is still injected" \
     || bad "the rehearsal notice was lost"
-printf '%s' "$pp_off" | grep -qi 'this run POSTS' \
+grep -qi 'this run POSTS' <<<"$pp_off" \
     && bad "a rehearsal is told it posts" \
     || ok "and a rehearsal is not told it posts"
 # The two must never both appear, which is the failure the run actually hit:
 # one source saying off while the other said on.
-printf '%s' "$pp_on" | grep -ciE 'this run POSTS|This run is a REHEARSAL' | grep -qx 1 \
+grep -ciE 'this run POSTS|This run is a REHEARSAL' <<<"$pp_on" | grep -qx 1 \
     && ok "exactly one posting notice reaches the prompt" \
     || bad "the prompt carries more than one answer to whether it posts"
 
@@ -296,7 +317,7 @@ touch "$rh/state/last-review.json"
 flock -u 8; exec 8>&-
 wait "$race_pid"; race_rc=$?
 race_out="$(cat "$rh/out")"
-printf '%s' "$race_out" | grep -q '^skipped: review last ran' \
+grep -q '^skipped: review last ran' <<<"$race_out" \
     && ok "a run that waited on the lock re-reads the cadence gate and skips" \
     || bad "a queued run duplicates the pass that just finished: $(printf '%s' "$race_out" | tr '\n' ' ' | cut -c1-100)"
 [ "$race_rc" = 0 ] \
@@ -308,7 +329,7 @@ touch "$rh/state/last-review.json"
 out=$(PATH="$rbin:$PATH" MAINTAINER_STATE_DIR="$rh" MAINTAINER_REPO_PATH="$rh/repo" \
       MAINTAINER_SETTINGS="$race_settings" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 MAINTAINER_FORCE=1 \
       bash "$root/lib/run.sh" sysknife review 2>&1)
-printf '%s' "$out" | grep -q '^skipped: review last ran' \
+grep -q '^skipped: review last ran' <<<"$out" \
     && bad "MAINTAINER_FORCE is defeated by the second gate check" \
     || ok "MAINTAINER_FORCE still overrides both checks"
 
@@ -331,13 +352,13 @@ SUITE
 msg="$(PROFILE_DIR="$covp" MAINTAINER_PROFILE=cov MAINTAINER_SLUG=o/r \
     MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_MERGE_SOURCE_ONLY=1 \
     bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" a.md b.sh c.py' 2>&1 || true)"
-printf '%s' "$msg" | grep -q 'a\.md.*docs' \
+grep -q 'a\.md.*docs' <<<"$msg" \
     && ok "the refusal says which suite covers each path it can place" \
     || bad "the refusal lists paths without naming the suites that cover them: $(printf '%s' "$msg" | tr '\n' ' ' | cut -c1-110)"
-printf '%s' "$msg" | grep -qE 'c\.py.*(no suite|NONE|nothing)' \
+grep -qE 'c\.py.*(no suite|NONE|nothing)' <<<"$msg" \
     && ok "and singles out the path no suite covers at all" \
     || bad "the uncovered path is not distinguished from the covered ones"
-printf '%s' "$msg" | grep -q 'docs.*shell\|shell.*docs' \
+grep -q 'docs.*shell\|shell.*docs' <<<"$msg" \
     && ok "and names the union that would cover the rest" \
     || bad "the message does not say that two suites together would cover the others"
 
@@ -368,8 +389,13 @@ make_stub claude "exit 0"
 # real-timestamped review logs into the shared root, and this asserts an exact
 # log name, so a neighbour's log made it flake under load.
 lognm_state="$lh/state"; rm -rf "$lognm_state"; mkdir -p "$lognm_state"
+# A checkout that already exists, so step 0b skips provisioning. Without this the
+# run `git clone`s lacs-project/sysknife from github.com, and on 2026-09-09 a
+# slow link made it die before `maintainer start` ever minted a run id, which
+# reads here as the rename having failed.
+lognm_repo="$lh/repo"; rm -rf "$lognm_repo"; git init -q -b main "$lognm_repo"
 PATH="$stub_dir:$PATH" HOME="$lh" MAINTAINER_SETTINGS="$gate_settings" \
-    MAINTAINER_STATE_DIR="$lognm_state" \
+    MAINTAINER_STATE_DIR="$lognm_state" MAINTAINER_REPO_PATH="$lognm_repo" \
     MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
 lgs="$(find "$lognm_state/logs" -name '*review.log' -printf '%f\n' 2>/dev/null | sort | tr '\n' ' ')"
@@ -378,6 +404,178 @@ if [ "$lgs" = "2031-02-03T04-05-review.log " ]; then
 else
     bad "a lock wait splits one run across two names; logs present: ${lgs:-none}"
 fi
+
+
+echo "== an identity that could not be read is not an identity that was verified =="
+# Issue #28. Two identity checks landed in the same range. Both refuse when `gh`
+# answers with the wrong login, and both PROCEEDED when `gh` could not answer at
+# all, which is the shape docs/lessons.md keeps recording: a guard that answers
+# when it could not ask.
+#
+# Site one, lib/run.sh, after the token is pinned. The stub below fails
+# `api user` only once GH_TOKEN is exported, which is exactly the call made
+# after the pin, so the run reaches the second check having passed the first.
+idh="$stub_dir/idhome"; rm -rf "$idh"; mkdir -p "$idh"
+id_repo="$idh/repo"; git init -q -b main "$id_repo"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) echo PINNEDTOKEN;;
+  *'api user'*)
+      # Before the pin GH_TOKEN is unset and the answer is good; after it, the
+      # call cannot be answered at all.
+      if [ -n "${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+      echo vladimirrott;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+idlog="$idh/state"; mkdir -p "$idlog"
+out=$(PATH="$stub_dir:$PATH" HOME="$idh" MAINTAINER_SETTINGS="$gate_settings" \
+      MAINTAINER_STATE_DIR="$idlog" MAINTAINER_REPO_PATH="$id_repo" \
+      MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "a pinned token that cannot be resolved stops the run" \
+    || bad "the run proceeded on an identity nothing confirmed (rc=$rc)"
+grep -qi 'identity' <<<"$out" \
+    && ok "and the refusal names the identity rather than blaming something downstream" \
+    || bad "the refusal does not mention the identity: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+# The log must not claim a verification that did not happen. This is the line
+# that made the defect invisible: it printed unconditionally.
+if grep -rq 'pinned by token for the whole run' "$idlog"/logs/*.log 2>/dev/null; then
+    bad "the log records the identity as pinned after a check that never ran"
+else
+    ok "and the log does not record a pin it could not confirm"
+fi
+# Site two, `maintainer file-issue`, whose comment says it re-checks rather than
+# trusting the inherited state. Driven at POST=on against a fake slug.
+fih="$stub_dir/fihome"; rm -rf "$fih"; mkdir -p "$fih"
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'api user'*) echo "error connecting to api.github.com" >&2; exit 1;;
+  *'issue list'*) echo '[]';;
+  *'issue create'*) echo 'https://github.com/o/r/issues/5678';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$fih" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=vladimirrott MAINTAINER_PROFILE=fileissue MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" file-issue --title "probe" --body "b" 2>&1); rc=$?
+[ "$rc" != 0 ] && ok "file-issue refuses when it cannot confirm whose name goes on the issue" \
+    || bad "an issue was filed under a name nothing verified (rc=$rc)"
+grep -q 'issues/5678' <<<"$out" \
+    && bad "the issue was created despite the unverifiable identity" \
+    || ok "and nothing was created"
+# The twin, so the check is not simply refusing everything: a gh that answers
+# with the right account still files.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'api user'*) echo vladimirrott;;
+  *'issue list'*) echo '[]';;
+  *'issue create'*) echo 'https://github.com/o/r/issues/5679';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$fih" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=vladimirrott MAINTAINER_PROFILE=fileissue MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" file-issue --title "probe two" --body "b" 2>&1)
+grep -q 'issues/5679' <<<"$out" \
+    && ok "and a confirmed identity still files the issue" \
+    || bad "the identity check now blocks a legitimate filing: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+rm -f "$stub_dir/gh"
+
+
+echo "== a failure that retries itself does not raise a critical alert =="
+# Reported 2026-09-09: constant critical toasts from the magent timers. Six unit
+# failures on 2026-09-08 produced up to twelve, because each one alerts twice:
+# lib/run.sh calls `alert` (notify-send -u critical) and then exits non-zero, and
+# systemd's OnFailure fires platform/linux/alert.sh, which sends a second one.
+#
+# Every one of those six was `gh could not reach GitHub in 3 tries` or a lock
+# wait expiring: transient, already recorded in failed-<task>.json, already
+# reported by maintainer-doctor, and already retried by the catch-up slot each
+# timer now carries. A critical popup six times a day for a condition that heals
+# itself is how somebody learns to dismiss the one that matters.
+tn="$stub_dir/toasthome"; rm -rf "$tn"; mkdir -p "$tn"
+tn_repo="$tn/repo"; git init -q -b main "$tn_repo"
+tn_state="$tn/state"; mkdir -p "$tn_state"
+# notify-send records its arguments instead of reaching a desktop.
+cat > "$stub_dir/notify-send" <<'NEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NOTIFY_LOG"
+NEOF
+chmod +x "$stub_dir/notify-send"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo 'error connecting to api.github.com' >&2; exit 1;; esac"
+: > "$tn/notify.log"
+out=$(NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+      MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+      MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+      bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 75 ] && ok "an unreachable API still exits 75" \
+    || bad "the transient path no longer exits 75 (rc=$rc)"
+grep -q 'u critical' "$tn/notify.log" \
+    && bad "a transient failure still raises a critical desktop alert" \
+    || ok "and raises no critical desktop alert"
+[ -s "$tn/notify.log" ] \
+    && ok "it still says something, at a lower urgency" \
+    || bad "the failure now reaches the desktop not at all, which is the other failure mode"
+# The record has to survive, or this traded noise for silence. Asserted through
+# a stub helper rather than the marker file, because the real `maintainer failed`
+# needs a deployed profile and this case is about run.sh still calling it.
+mkdir -p "$tn/.local/bin"
+cat > "$tn/.local/bin/maintainer" <<'MEOF'
+#!/usr/bin/env bash
+[ "$1" = failed ] && printf '%s
+' "$*" >> "$MARKER_LOG"
+exit 0
+MEOF
+chmod +x "$tn/.local/bin/maintainer"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo 'error connecting to api.github.com' >&2; exit 1;; esac"
+: > "$tn/marker.log"; : > "$tn/notify.log"
+MARKER_LOG="$tn/marker.log" NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+    MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+    MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+grep -q '^failed review' "$tn/marker.log" \
+    && ok "and the failure marker is still recorded" \
+    || bad "suppressing the toast also suppressed the record"
+grep -q 'could not reach GitHub' "$tn/marker.log" \
+    && ok "with the reason the run recorded" \
+    || bad "the marker does not carry the reason"
+# A real refusal is NOT transient and must still be critical: a wrong identity is
+# somebody else's name on this account and no retry fixes it.
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
+: > "$tn/notify.log"
+NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+    MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
+    MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+grep -q 'u critical' "$tn/notify.log" \
+    && ok "a wrong identity is still critical, because no retry fixes it" \
+    || bad "the wrong-account refusal was downgraded along with the transient ones"
+rm -f "$stub_dir/notify-send" "$stub_dir/gh"
+make_stub notify-send 'exit 0'
+# systemd must not fire OnFailure for the transient code either, or the second
+# toast arrives whatever run.sh does about the first.
+grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
+    && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
+    || bad "systemd still calls a transient failure a unit failure"
+# And the OnFailure script must write to the failing profile's trail only. It
+# globbed every *-maint directory, so a magent failure appeared in sysknife's
+# alerts.log and an operator reading either one saw the other's incidents.
+grep -q 'instance%%-\*\|profile=' "$root/platform/linux/alert.sh" \
+    && ok "the alert resolves which profile failed" \
+    || bad "the alert still writes every profile's trail"
+
+echo "== the suite provisions from a local origin, never from the network =="
+grep -q 'export MAINTAINER_REPO_ORIGIN=' "$root/tests/run-tests.sh" \
+    && ok "every case clones from a bare repo created here" \
+    || bad "a case that reaches provisioning would clone from github.com"
+[ -d "$suite_origin" ] \
+    && ok "and that origin exists before any case runs" \
+    || bad "the local origin was never created"
 
 echo "== a run provisions its own checkout, isolated from any dev tree =="
 # A review bot must not operate in a working copy a human edits. REPO_PATH now
@@ -540,12 +738,12 @@ mkdir -p "$MAINTAINER_STATE" "$MAINTAINER_REPO"
 # Identity is checked before anything else.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo wronguser; exit 0;; esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not testuser'; then ok "merge refuses under the wrong gh account"; else bad "merge did not refuse a wrong account (rc=$rc)"; fi
+if [ "$rc" != 0 ] && grep -q 'not testuser' <<<"$out"; then ok "merge refuses under the wrong gh account"; else bad "merge did not refuse a wrong account (rc=$rc)"; fi
 
 # Right account, but no receipt exists.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo testuser; exit 0;; esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no verification receipt'; then ok "merge refuses with no receipt"; else bad "merge did not refuse a missing receipt (rc=$rc)"; fi
+if [ "$rc" != 0 ] && grep -q 'no verification receipt' <<<"$out"; then ok "merge refuses with no receipt"; else bad "merge did not refuse a missing receipt (rc=$rc)"; fi
 
 # Receipt exists, but the review is not approved.
 PATH="$stub_dir:$PATH" bash "$mg" receipt 1 abcdef1234 "drift guard mutated, went red" >/dev/null 2>&1
@@ -557,7 +755,7 @@ make_stub gh "case \"\$*\" in
   *mergeStateStatus*) echo CLEAN;;
 esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not APPROVED'; then ok "merge refuses an unapproved PR"; else bad "merge did not refuse an unapproved PR (rc=$rc)"; fi
+if [ "$rc" != 0 ] && grep -q 'not APPROVED' <<<"$out"; then ok "merge refuses an unapproved PR"; else bad "merge did not refuse an unapproved PR (rc=$rc)"; fi
 
 # Approved, but a check is failing.
 make_stub gh "case \"\$*\" in
@@ -569,7 +767,7 @@ make_stub gh "case \"\$*\" in
   *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"fail\"}]';;
 esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'failing check'; then ok "merge refuses a failing board"; else bad "merge did not refuse a failing board (rc=$rc)"; fi
+if [ "$rc" != 0 ] && grep -q 'failing check' <<<"$out"; then ok "merge refuses a failing board"; else bad "merge did not refuse a failing board (rc=$rc)"; fi
 
 # Approved, board green, but zero checks reported at all.
 make_stub gh "case \"\$*\" in
@@ -581,7 +779,7 @@ make_stub gh "case \"\$*\" in
   *'pr checks'*) echo '';;
 esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no checks at all'; then ok "merge refuses when no checks reported (empty is not green)"; else bad "merge treated an empty board as green (rc=$rc)"; fi
+if [ "$rc" != 0 ] && grep -q 'no checks at all' <<<"$out"; then ok "merge refuses when no checks reported (empty is not green)"; else bad "merge treated an empty board as green (rc=$rc)"; fi
 
 # A receipt is signed over its bytes, and the bytes name the PR it was earned
 # for. cmd_merge selected it by filename and read back only `head` and `kind`,
@@ -599,14 +797,14 @@ make_stub gh "case \"\$*\" in
   *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]';;
 esac"
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 8 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -qi 'earned for #7\|names #7\|different pull request'; then
+if [ "$rc" != 0 ] && grep -qi 'earned for #7\|names #7\|different pull request' <<<"$out"; then
     ok "a receipt copied onto another PR number is refused"
 else
     bad "a receipt earned for #7 was accepted for #8 (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-110)"
 fi
 # And the signature check must not be what catches it: the bytes are untouched,
 # so a signature failure here would mean the test is proving the wrong thing.
-printf '%s' "$out" | grep -q 'does not match its signature' \
+grep -q 'does not match its signature' <<<"$out" \
     && bad "the copied receipt was caught by the signature, which does not cover the filename" \
     || ok "and it is refused on the PR it names, not by a signature that still verifies"
 rm -f "$MAINTAINER_STATE/receipts/7.json" "$MAINTAINER_STATE/receipts/8.json"
@@ -617,7 +815,7 @@ echo "== the merge gate validates the PR number before it becomes a path =="
 # surface in the security boundary. GitHub only issues integer PR numbers.
 for bad in "1;rm -rf x" "../../etc/passwd" "1'\''))__import__('\''os'\'')" "1 2" "x"; do
     out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "$bad" 2>&1); rc=$?
-    if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'must be a positive integer'; then
+    if [ "$rc" != 0 ] && grep -q 'must be a positive integer' <<<"$out"; then
         ok "merge rejects a non-integer PR ('$bad')"
     else
         bad "merge accepted a non-integer PR ('$bad') rc=$rc: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
@@ -628,7 +826,7 @@ out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "" 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "merge rejects an empty PR argument" || bad "merge ran with no PR"
 # And a real integer still reaches the receipt check rather than being rejected.
 out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 12345 2>&1); rc=$?
-printf '%s' "$out" | grep -q 'no verification receipt' \
+grep -q 'no verification receipt' <<<"$out" \
     && ok "a real integer PR passes validation and reaches the receipt check" \
     || bad "a valid PR number was rejected or mis-routed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-70)"
 
@@ -686,7 +884,7 @@ gate_case() {  # $1 pr, $2 head, $3 expect-substring, $4 label
       *'pr merge'*) echo MERGED_STUB;;
     esac"
     out=$(PATH="$stub_dir:$PATH" bash "$mg" merge "$1" 2>&1)
-    if printf '%s' "$out" | grep -q "$3"; then ok "$4"; else bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"; fi
+    if grep -q "$3" <<<"$out"; then ok "$4"; else bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"; fi
 }
 gate_case 7 "$docs_head" "receipt still applies" "docs-only movement keeps the receipt valid"
 gate_case 8 "$prod_head" "production code changed" "production movement invalidates the receipt"
@@ -711,7 +909,7 @@ ms_case() {  # $1 = mergeStateStatus, $2 = expected substring
       *'pr merge'*) echo MERGED_STUB;;
     esac"
     out=$(PATH="$stub_dir:$PATH" bash "$mg" merge 9 2>&1)
-    if printf '%s' "$out" | grep -q "$2"; then ok "mergeStateStatus $1 -> $2"
+    if grep -q "$2" <<<"$out"; then ok "mergeStateStatus $1 -> $2"
     else bad "mergeStateStatus $1 did not produce '$2' (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"; fi
 }
 ms_case BEHIND  "BEHIND its base"
@@ -762,13 +960,13 @@ cp -r "$root/lib" "$root/profiles" "$vlay/"
 cp "$root/lib/run.sh" "$vlay/run.sh"
 printf 'version=v9.9.9\ncommit=deadbee\ninstalled_at=2026-01-01T00:00:00Z\ninstalled_from=/nowhere\n' >"$vlay/VERSION"
 vout=$(PATH="$stub_dir:$PATH" bash "$vlay/run.sh" --show-prompt sysknife review 2>/dev/null)
-printf '%s' "$vout" | grep -q 'v9.9.9' \
+grep -q 'v9.9.9' <<<"$vout" \
     && ok "the prompt carries the deployed version" \
     || bad "the prompt ignores VERSION, so every run is stamped the same"
-printf '%s' "$vout" | grep -q 'deadbee' \
+grep -q 'deadbee' <<<"$vout" \
     && ok "the prompt carries the deployed commit" \
     || bad "the prompt names a version with no commit, which cannot be checked out"
-printf '%s' "$vout" | grep -qi 'not copy\|do not copy' \
+grep -qi 'not copy\|do not copy' <<<"$vout" \
     && ok "the prompt forbids copying the stamp from an earlier report" \
     || bad "nothing tells the agent where NOT to get the version from"
 
@@ -1057,6 +1255,137 @@ PYEOF
 grep -q '"\*": "deny"' "$oc" && ok "opencode config is default-deny" || bad "opencode config is not default-deny"
 grep -q 'default-deny' "$root/lib/backends/opencode.sh" && ok "opencode backend explains its posture" || bad "opencode backend does not state its containment"
 
+
+echo "== a denied verb is denied when written with a relative path =="
+# Issue #27. The Claude matcher keys on the command AS WRITTEN, which is the
+# premise render-settings.py's own docstring records. It spelled "", seven FHS
+# directories, six home directories three ways each, and whatever `which`
+# resolved. It never spelled `./`.
+#
+# That matters most for the one verb nobody types any other way. `install.sh
+# --uninstall` is in deny.json because a magent run once ran it against this
+# machine and turned off every timer, including another project's. `install.sh`
+# sits at a repository root and is never on PATH, so `./install.sh --uninstall`
+# is the only spelling anybody uses, and all 31 rendered rules missed it.
+rp="$stub_dir/relpath"; rm -rf "$rp"; mkdir -p "$rp"
+cat > "$rp/deny.json" <<'DENYEOF'
+{"spelled_everywhere": ["install.sh --uninstall", "curl"], "bare_exact": [], "credential_paths": ["~/.ssh/**"]}
+DENYEOF
+python3 "$root/scripts/render-settings.py" "$rp" /home/fakeuser >/dev/null 2>&1 \
+    && ok "the probe wall renders" || bad "render-settings.py failed on the probe spec"
+relrules() { python3 -c "
+import json,sys
+print('\n'.join(json.load(open(sys.argv[1]))['permissions']['deny']))" "$rp/settings.json"; }
+rules="$(relrules)"
+grep -qxF 'Bash(./install.sh --uninstall:*)' <<<"$rules" \
+    && ok "the relative spelling of a script verb is denied" \
+    || bad "./install.sh --uninstall walks past the wall that names it"
+grep -qxF 'Bash(./curl:*)' <<<"$rules" \
+    && ok "and the relative spelling of an ordinary verb is denied" \
+    || bad "a copied binary run as ./curl is not denied"
+# The interpreter is a second way past a rule keyed on the file name.
+grep -qxF 'Bash(bash install.sh --uninstall:*)' <<<"$rules" \
+    && ok "a .sh verb is denied when handed to bash" \
+    || bad "bash install.sh --uninstall walks past"
+grep -qxF 'Bash(sh ./install.sh --uninstall:*)' <<<"$rules" \
+    && ok "and when handed to sh with a relative path" \
+    || bad "sh ./install.sh --uninstall walks past"
+# The twin: an interpreter prefix belongs only on scripts. Spelling `bash curl`
+# would be noise, and noise in a wall is how nobody reads it.
+grep -qxF 'Bash(bash curl:*)' <<<"$rules" \
+    && bad "a non-script verb got an interpreter spelling it can never be run with" \
+    || ok "a non-script verb gets no interpreter spelling"
+# And the live wall on this machine carries it, since that is the one that runs.
+grep -q 'install.sh --uninstall' "$root/profiles/magent/deny.json" \
+    && ok "the magent profile still denies the uninstall verb" \
+    || bad "the verb this case exists for is no longer in deny.json"
+
+
+echo "== POST=off selects the rehearsal wall by asking the backend, not by guessing filenames =="
+# Issue #30. run.sh chose the rehearsal wall from a hardcoded list of two
+# filenames, settings-rehearsal.json and opencode-rehearsal.json. The cursor
+# backend reads CURSOR_CONFIG_DIR through MAINTAINER_CURSOR_DIR, which nothing
+# in the tree ever set, so a POST=off run on that backend was handed
+# profiles/<p>/cursor, the LIVE wall, while cursor-rehearsal sat rendered and
+# unread beside it. The difference is every verb that reaches a person.
+#
+# `backend_rehearsal` existed and looked like the gate, but only its EXISTENCE
+# was ever tested; the value it returns is read nowhere. A backend now says
+# where its own rehearsal wall is, because the backend is the only thing that
+# knows which variable it reads.
+for b in claude opencode cursor; do
+    bf="$root/lib/backends/$b.sh"
+    if grep -q 'backend_rehearsal()' "$bf" && ! grep -q 'backend_rehearsal_wall()' "$bf"; then
+        bad "$b claims it can honour POST=off and cannot say where its rehearsal wall is"
+    else
+        ok "$b says where its rehearsal wall is"
+    fi
+done
+# run.sh must not carry the enumeration that went stale.
+# Comments stripped first. The paragraph explaining why the enumeration is gone
+# names the files it used to test for, and matching that is the same over-match
+# this suite already records for `jq`.
+if grep -v '^[[:space:]]*#' "$root/lib/run.sh" | grep -q 'opencode-rehearsal.json'; then
+    bad "run.sh still hardcodes a backend's rehearsal filename"
+else
+    ok "run.sh names no backend's rehearsal file"
+fi
+grep -q 'backend_rehearsal_wall' "$root/lib/run.sh" \
+    && ok "run.sh asks the backend for it" \
+    || bad "nothing asks the backend where its rehearsal wall is"
+# Driven, per backend, against a scratch profile directory. The function must
+# export the variable ITS backend reads and refuse when the wall is absent.
+rw="$stub_dir/rehearsalwall"; rm -rf "$rw"; mkdir -p "$rw"
+rw_probe() {  # $1 backend, $2 expected env var, $3 what to create
+    ( rm -rf "$rw"; mkdir -p "$rw"
+      case "$3" in
+          dir)  mkdir -p "$rw/cursor-rehearsal"; : > "$rw/cursor-rehearsal/cli-config.json" ;;
+          file) : > "$rw/$4" ;;
+          none) : ;;
+      esac
+      PROFILE_DIR="$rw"
+      # shellcheck disable=SC1090
+      . "$root/lib/backends/$1.sh"
+      if backend_rehearsal_wall; then
+          printf 'OK %s\n' "${!2:-<unset>}"
+      else
+          printf 'REFUSED\n'
+      fi )
+}
+printf '%s' "$(rw_probe claude MAINTAINER_SETTINGS file settings-rehearsal.json)" \
+    | grep -q 'OK .*settings-rehearsal.json' \
+    && ok "claude points MAINTAINER_SETTINGS at its rehearsal wall" \
+    || bad "claude does not select its rehearsal wall"
+printf '%s' "$(rw_probe claude MAINTAINER_SETTINGS none)" | grep -q REFUSED \
+    && ok "and refuses when that wall is not rendered" \
+    || bad "claude accepted a rehearsal with no wall on disk"
+printf '%s' "$(rw_probe opencode MAINTAINER_SETTINGS file opencode-rehearsal.json)" \
+    | grep -q 'OK .*opencode-rehearsal.json' \
+    && ok "opencode points MAINTAINER_SETTINGS at its rehearsal config" \
+    || bad "opencode does not select its rehearsal config"
+# The one the issue is about.
+printf '%s' "$(rw_probe cursor MAINTAINER_CURSOR_DIR dir)" \
+    | grep -q 'OK .*cursor-rehearsal' \
+    && ok "cursor points MAINTAINER_CURSOR_DIR at cursor-rehearsal" \
+    || bad "POST=off on cursor still hands the agent the live wall"
+printf '%s' "$(rw_probe cursor MAINTAINER_CURSOR_DIR none)" | grep -q REFUSED \
+    && ok "and refuses when the rehearsal directory is not rendered" \
+    || bad "cursor accepted a rehearsal with no wall on disk"
+# The rehearsal wall has to be the STRICTER one, or selecting it buys nothing.
+# Measured from the rendered pair rather than asserted.
+cw2="$stub_dir/cursorwalls"; rm -rf "$cw2"; mkdir -p "$cw2"
+cp "$root/profiles/magent/deny.json" "$cw2/deny.json"
+python3 "$root/scripts/render-settings.py" "$cw2" /home/fakeuser >/dev/null 2>&1
+if [ -f "$cw2/cursor/cli-config.json" ] && [ -f "$cw2/cursor-rehearsal/cli-config.json" ]; then
+    n_live=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(json.dumps(d)))" "$cw2/cursor/cli-config.json")
+    n_reh=$(python3 -c "import json,sys;d=json.load(open(sys.argv[1]));print(len(json.dumps(d)))" "$cw2/cursor-rehearsal/cli-config.json")
+    [ "$n_reh" -gt "$n_live" ] \
+        && ok "the cursor rehearsal wall denies strictly more than the live one" \
+        || bad "the cursor rehearsal wall is not stricter, so selecting it changes nothing"
+else
+    bad "render-settings did not write both cursor walls"
+fi
+
 echo "== the universal cron fallback =="
 cr="$root/platform/posix/install-cron.sh"
 [ -x "$cr" ] && ok "cron installer present and executable" || bad "cron installer missing"
@@ -1089,10 +1418,10 @@ printf 'two\n' > "$dsrc/f"; git -C "$dsrc" add -A >/dev/null; git -C "$dsrc" com
 printf 'version=v0.1.0\ncommit=%s\ninstalled_from=%s\n' "$old_sha" "$dsrc" \
     > "$dh/.local/share/maintainer/VERSION"
 dout="$(PATH="$stub_dir:$PATH" HOME="$dh" bash "$d" --quick 2>&1 || true)"
-printf '%s' "$dout" | grep -q 'commit(s) behind' \
+grep -q 'commit(s) behind' <<<"$dout" \
     && ok "doctor reports deployed code that is behind the tree it came from" \
     || bad "a stale deployment is invisible; timers keep running old code"
-printf '%s' "$dout" | grep -q 'install.sh' \
+grep -q 'install.sh' <<<"$dout" \
     && ok "and it names the command that fixes it" \
     || bad "the drift report gives no remedy"
 # Deployed AT head, clean tree: no complaint.
@@ -1125,18 +1454,18 @@ mkfail review 40 2
 mkfail issues 2 40
 touch -d "2 hours ago" "$fst/state/last-issues.json"
 fout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
-printf '%s' "$fout" | grep -q "review.*failed" \
+grep -q "review.*failed" <<<"$fout" \
     && ok "doctor names a task whose newest attempt failed" \
     || bad "a task that has not succeeded since its last failure is invisible"
-printf '%s' "$fout" | grep -qE 'FAIL.*review' \
+grep -qE 'FAIL.*review' <<<"$fout" \
     && ok "and it is a failure, not a note" \
     || bad "a dead task is reported at a severity nobody acts on"
-printf '%s' "$fout" | grep -q "issues" \
+grep -q "issues" <<<"$fout" \
     && bad "a task that recovered is still reported as failed" \
     || ok "a task that succeeded after its failure is not reported"
 # The reason the run recorded must reach the report, or the reader goes hunting
 # for a revoked token during a network outage.
-printf '%s' "$fout" | grep -q 'could not reach GitHub' \
+grep -q 'could not reach GitHub' <<<"$fout" \
     && ok "the recorded reason is carried into the report" \
     || bad "doctor says a task failed and not why"
 # A failure that follows a success on a task still inside its cadence is a
@@ -1149,17 +1478,17 @@ touch -d "40 hours ago" "$fst/state/last-review.json"
 printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\nMIN_HOURS_review=100\n' "$fst" "$fh" \
     > "$fh/.local/share/maintainer/profiles/p/profile.env"
 cout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
-printf '%s' "$cout" | grep -qE 'warn.*review.*failed' \
+grep -qE 'warn.*review.*failed' <<<"$cout" \
     && ok "a failed attempt on a task still inside its cadence is a warning" \
     || bad "a task that completed inside its own interval is called dead"
-printf '%s' "$cout" | grep -qE 'FAIL.*review' \
+grep -qE 'FAIL.*review' <<<"$cout" \
     && bad "a superseded attempt turns the whole report red" \
     || ok "and it does not turn the report red"
 # Overdue AND its last attempt failed is the original emergency, still red.
 printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\nMIN_HOURS_review=6\n' "$fst" "$fh" \
     > "$fh/.local/share/maintainer/profiles/p/profile.env"
 oout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
-printf '%s' "$oout" | grep -qE 'FAIL.*review' \
+grep -qE 'FAIL.*review' <<<"$oout" \
     && ok "a task that is overdue and whose last attempt failed is still a failure" \
     || bad "the four-day outage this check was written for would not be reported"
 printf 'PROFILE_NAME=p\nTASKS="review issues"\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$fst" "$fh" \
@@ -1168,7 +1497,7 @@ touch -d "40 hours ago" "$fst/state/last-review.json"
 # Never ran at all is the same emergency: a failure with no success behind it.
 rm -f "$fst/state/last-review.json"
 nout="$(PATH="$stub_dir:$PATH" HOME="$fh" MAINTAINER_PROFILE=p bash "$d" --quick 2>&1 || true)"
-printf '%s' "$nout" | grep -qE 'FAIL.*review' \
+grep -qE 'FAIL.*review' <<<"$nout" \
     && ok "a task that has never succeeded is reported too" \
     || bad "a failure with no prior success reads as healthy"
 # And a clean profile stays clean: no failure files, no complaint.
@@ -1208,10 +1537,10 @@ vdoc() { PATH="$stub_dir:$PATH" HOME="$vh" MAINTAINER_PROFILE=p bash "$d" 2>&1; 
 # The image is missing python3: the probe prints the missing name.
 make_stub podman 'case "$*" in *"img:one"*) echo "python3 "; exit 0;; esac; exit 0'
 vout="$(vdoc)"
-printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+grep -qE 'FAIL.*shell.*img:one' <<<"$vout" \
     && ok "a suite whose image lacks a declared binary is a failure" \
     || bad "an image that cannot run the suite reads as healthy"
-printf '%s' "$vout" | grep -q 'python3' \
+grep -q 'python3' <<<"$vout" \
     && ok "and the missing binary is named" \
     || bad "the report does not say what is missing"
 # The image has everything: the probe prints nothing.
@@ -1223,27 +1552,27 @@ printf '%s' "$vout" | grep -q 'python3' \
 # maintainer-merge cases below.
 make_stub podman 'exit 0'
 vout="$(vdoc)"
-printf '%s' "$vout" | grep -qE 'FAIL.*shell.*img:one' \
+grep -qE 'FAIL.*shell.*img:one' <<<"$vout" \
     && bad "a sufficient image is reported as failing" \
     || ok "an image that provides everything declared is not reported"
-printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+grep -qE "verify suite 'shell'.*provides" <<<"$vout" \
     && ok "and it says which image satisfied the suite" \
     || bad "a satisfied suite leaves no positive record"
 # The probe itself could not run. That must not read as permission: a guard that
 # answers when it could not ask is worse than no guard.
 make_stub podman 'case "$*" in *"img:one"*) exit 3;; esac; exit 0'
 vout="$(vdoc)"
-printf '%s' "$vout" | grep -q 'could not probe' \
+grep -q 'could not probe' <<<"$vout" \
     && ok "a probe that could not run says so rather than passing the suite" \
     || bad "an unrunnable probe is indistinguishable from a clean one"
-printf '%s' "$vout" | grep -qE "verify suite 'shell'.*provides" \
+grep -qE "verify suite 'shell'.*provides" <<<"$vout" \
     && bad "the suite was reported provisioned on a probe that never ran" \
     || ok "and it does not claim the image provides anything"
 # A suite that declares no needs is a suite nothing can check.
 printf 'suite_image() { printf "img:one"; }\n' > "$vd/verify.d/shell.sh"
 make_stub podman 'exit 0'
 vout="$(vdoc)"
-printf '%s' "$vout" | grep -qE 'FAIL.*suite_needs' \
+grep -qE 'FAIL.*suite_needs' <<<"$vout" \
     && ok "a suite that declares no needs is reported, not skipped" \
     || bad "an undeclared suite passes by having nothing to check"
 # Remove the stub rather than leaving a permissive one. A `podman` that always
@@ -1357,28 +1686,28 @@ rc_run() { PATH="$stub_dir:$PATH" MAINTAINER_SLUG=o/r MAINTAINER_REPO="$rcrepo" 
     MAINTAINER_STATE="$stub_dir/rcstate" MAINTAINER_ACCOUNT=t PROD_GLOBS="bin/*" \
     bash "$mr" release-check 2>&1; }
 out="$(rc_run)"
-printf '%s' "$out" | grep -q 'rests on file counts alone' \
+grep -q 'rests on file counts alone' <<<"$out" \
     && ok "an empty Unreleased section is reported as read nothing" \
     || bad "release-check read an empty Unreleased section without saying so"
 # The delimiter bug: sed prints BOTH headings, so an empty section came back as
 # two lines and -z was false. The warning above never printed once in practice.
-printf '%s' "$out" | grep -q 'newest version heading' \
+grep -q 'newest version heading' <<<"$out" \
     && ok "and it names the heading the entries were probably promoted into" \
     || bad "the warning does not say where to look instead"
-printf '%s' "$out" | grep -q 'digit:   last' \
+grep -q 'digit:   last' <<<"$out" \
     && ok "with nothing to read it does not claim a breaking change" \
     || bad "release-check guessed a digit from an unread CHANGELOG"
 # Now a populated section that removes a capability.
 printf '# Changelog\n\n## [Unreleased]\n\n### Removed\n\n- A run can no longer assert a receipt.\n\n## [0.1.0] - 2026-01-01\n' \
     > "$rcrepo/CHANGELOG.md"
 out="$(rc_run)"
-printf '%s' "$out" | grep -q 'RELEASE DUE' \
+grep -q 'RELEASE DUE' <<<"$out" \
     && ok "a removed capability makes the release due" \
     || bad "a removed capability did not make the release due"
-printf '%s' "$out" | grep -q 'digit:   middle' \
+grep -q 'digit:   middle' <<<"$out" \
     && ok "and it moves the middle digit" \
     || bad "a removed capability was scored as a patch"
-printf '%s' "$out" | grep -q 'CHANGELOG read from' \
+grep -q 'CHANGELOG read from' <<<"$out" \
     && ok "it names which tree the CHANGELOG came from" \
     || bad "the CHANGELOG source is unstated while the counts come from origin/main"
 
@@ -1472,16 +1801,16 @@ cad_run() { MAINTAINER_STATE_DIR="$cad" PATH="$stub_dir:$PATH" \
 # MIN_HOURS_review is 6.
 age_last 7200
 out=$(cad_run X=1)
-printf '%s' "$out" | grep -q '^skipped' && ok "a task inside its minimum interval is skipped" \
+grep -q '^skipped' <<<"$out" && ok "a task inside its minimum interval is skipped" \
     || bad "the gate did not hold a 2h-old task (got: $(printf '%s' "$out" | head -1))"
-printf '%s' "$out" | grep -q 'MAINTAINER_FORCE' && ok "the skip names the override" || bad "the skip does not say how to override"
+grep -q 'MAINTAINER_FORCE' <<<"$out" && ok "the skip names the override" || bad "the skip does not say how to override"
 age_last 32400
 out=$(cad_run X=1)
-printf '%s' "$out" | grep -q '^skipped' && bad "a task past its interval was skipped anyway" \
+grep -q '^skipped' <<<"$out" && bad "a task past its interval was skipped anyway" \
     || ok "a task past its minimum interval proceeds"
 age_last 60
 out=$(cad_run MAINTAINER_FORCE=1)
-printf '%s' "$out" | grep -q '^skipped' && bad "MAINTAINER_FORCE did not override the gate" \
+grep -q '^skipped' <<<"$out" && bad "MAINTAINER_FORCE did not override the gate" \
     || ok "MAINTAINER_FORCE overrides the gate"
 # The gate must read the profile's number, not a constant compiled into run.sh.
 grep -q 'MIN_HOURS_\$task' "$root/lib/run.sh" && ok "the interval comes from the profile" \
@@ -1506,12 +1835,12 @@ grep -qF "Bash(/usr/bin/gh issue comment:*)" "$reh" && ok "rehearsal blocks the 
 # The prompt must say so as well. A wall alone produces a confused run that
 # keeps trying; the sentence is what makes it stop.
 banner=$(PATH="$stub_dir:$PATH" MAINTAINER_POST=off bash "$root/lib/run.sh" --show-prompt sysknife review 2>/dev/null)
-printf '%s' "$banner" | grep -q 'REHEARSAL' && ok "POST=off puts the rehearsal notice in the prompt" \
+grep -q 'REHEARSAL' <<<"$banner" && ok "POST=off puts the rehearsal notice in the prompt" \
     || bad "POST=off does not tell the agent it is rehearsing"
-printf '%s' "$banner" | grep -q 'list what you WOULD have posted' && ok "the rehearsal asks for the drafts it withheld" \
+grep -q 'list what you WOULD have posted' <<<"$banner" && ok "the rehearsal asks for the drafts it withheld" \
     || bad "a rehearsal that withholds without recording is not reviewable"
 default=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife review 2>/dev/null)
-printf '%s' "$default" | grep -q 'REHEARSAL' && bad "the rehearsal notice appears when POST is on" \
+grep -q 'REHEARSAL' <<<"$default" && bad "the rehearsal notice appears when POST is on" \
     || ok "POST=on carries no rehearsal notice"
 grep -q 'backend_rehearsal' "$root/lib/backends/claude.sh" && ok "claude declares it can enforce POST=off" \
     || bad "claude no longer declares rehearsal support"
@@ -1533,7 +1862,7 @@ cp "$root/profiles/sysknife/profile.env" "$lay2/profiles/sysknife/"
 cp "$root/profiles/sysknife/prompts/"*.md "$lay2/profiles/sysknife/prompts/"
 cp "$root/lib/prose-style.md" "$lay2/prose-style.md"
 out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" bash "$lay2/run.sh" --show-prompt sysknife review 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'preamble-core'; then
+if [ "$rc" != 0 ] && grep -q 'preamble-core' <<<"$out"; then
     ok "a tree with no core preamble refuses to run"
 else
     bad "a run assembled a prompt with no doctrine in it (rc=$rc)"
@@ -1593,9 +1922,9 @@ check "one timer per task" "$made" "$tasks"
 # The closing instructions must name commands that exist. They told the adopter
 # to call run.sh by its deployed path after `maintainer run` had replaced it.
 nextsteps=$( cd "$np" && ./new-profile.sh steps acme/s /tmp/s acmebot "A" 2>&1 )
-printf '%s' "$nextsteps" | grep -q 'maintainer run' && ok "the next steps name the command that exists" \
+grep -q 'maintainer run' <<<"$nextsteps" && ok "the next steps name the command that exists" \
     || bad "new-profile still points at a path instead of a command"
-printf '%s' "$nextsteps" | grep -q 'MAINTAINER_PROFILE' && ok "the next steps say to export the profile" \
+grep -q 'MAINTAINER_PROFILE' <<<"$nextsteps" && ok "the next steps say to export the profile" \
     || bad "the next steps would have the adopter querying the wrong profile"
 # The scaffolded profile must produce a real prompt, not a template with holes.
 ( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null ) | grep -q 'acme/widget' \
@@ -1606,13 +1935,13 @@ printf '%s' "$nextsteps" | grep -q 'MAINTAINER_PROFILE' && ok "the next steps sa
 # them again: the screen rule reading as a ban on running your own gates, and a
 # first run having no previous baseline to diff against.
 scaffolded=$( cd "$np" && PATH="$stub_dir:$PATH" bash lib/run.sh --show-prompt demo review 2>/dev/null )
-printf '%s' "$scaffolded" | grep -q 'about code arriving' \
+grep -q 'about code arriving' <<<"$scaffolded" \
     && ok "the template says whose code the agent may run" \
     || bad "the template leaves the screen rule reading as a ban on its own gates"
-printf '%s' "$scaffolded" | grep -q 'YOU HAVE NOT REVIEWED' \
+grep -q 'YOU HAVE NOT REVIEWED' <<<"$scaffolded" \
     && ok "the template points at the unreviewed range, not the fetch delta" \
     || bad "the template still points the agent at the fetch delta"
-printf '%s' "$scaffolded" | grep -q 'first run there is no previous baseline' \
+grep -q 'first run there is no previous baseline' <<<"$scaffolded" \
     && ok "the template handles a first run with no baseline" \
     || bad "a scaffolded first run has no instruction for an empty baseline"
 # And no code file may carry a repository's name for it to work.
@@ -1655,13 +1984,13 @@ out=$(PATH="$stub_dir:$PATH" HOME="$sh_home" MAINTAINER_PROFILE=sk \
       env -u MAINTAINER_STATE -u MAINTAINER_REPO -u MAINTAINER_SLUG -u MAINTAINER_TASKS \
           -u MAINTAINER_STATE_DIR python3 "$root/bin/maintainer" status 2>&1)
 for want in "acme/sk" "posting" "review" "issues"; do
-    printf '%s' "$out" | grep -q "$want" && ok "status reports $want" || bad "status does not report $want"
+    grep -q "$want" <<<"$out" && ok "status reports $want" || bad "status does not report $want"
 done
-printf '%s' "$out" | grep -qE 'in [0-9]+' && ok "status converts the next-run time to a duration" \
+grep -qE 'in [0-9]+' <<<"$out" && ok "status converts the next-run time to a duration" \
     || bad "status does not show when the next run is"
-printf '%s' "$out" | grep -q '2 lines' && ok "status reports how long the last report was" \
+grep -q '2 lines' <<<"$out" && ok "status reports how long the last report was" \
     || bad "status does not size the last report"
-printf '%s' "$out" | grep -qi 'never' && ok "status marks a task that has never run" \
+grep -qi 'never' <<<"$out" && ok "status marks a task that has never run" \
     || bad "status does not distinguish a task that never ran"
 grep -q 'def cmd_run' "$root/bin/maintainer" && ok "maintainer run wraps the deployed orchestrator" \
     || bad "no maintainer run subcommand"
@@ -1689,15 +2018,15 @@ mkdir -p "$two/.local/state/other-maint/runs" "$two/.local/state/other-maint/sta
 out=$(env -u MAINTAINER_STATE -u MAINTAINER_REPO -u MAINTAINER_SLUG -u MAINTAINER_TASKS \
       -u MAINTAINER_STATE_DIR HOME="$two" MAINTAINER_PROFILE=other \
       python3 "$root/bin/maintainer" status 2>&1)
-printf '%s' "$out" | grep -q 'someone/otherrepo' && ok "status reports the second profile's slug" \
+grep -q 'someone/otherrepo' <<<"$out" && ok "status reports the second profile's slug" \
     || bad "status did not read the second profile's slug"
-printf '%s' "$out" | grep -q 'src/otherrepo' && ok "status reports the second profile's repository" \
+grep -q 'src/otherrepo' <<<"$out" && ok "status reports the second profile's repository" \
     || bad "status showed the wrong repository for a second profile"
-printf '%s' "$out" | grep -q 'triage' && ok "status reports the second profile's task list" \
+grep -q 'triage' <<<"$out" && ok "status reports the second profile's task list" \
     || bad "status showed the wrong task list for a second profile"
-printf '%s' "$out" | grep -qi 'lacs\|sysknife' && bad "the first profile's data leaked into the second profile's status" \
+grep -qi 'lacs\|sysknife' <<<"$out" && bad "the first profile's data leaked into the second profile's status" \
     || ok "no first-profile data leaks into a second profile"
-printf '%s' "$out" | grep -qi 'OFF, rehearsal' && ok "status reads POST from the deployed profile" \
+grep -qi 'OFF, rehearsal' <<<"$out" && ok "status reads POST from the deployed profile" \
     || bad "status did not read POST"
 
 echo "== the screen decides what may execute on this host =="
@@ -1721,8 +2050,11 @@ J
 # about how the screen classifies files, so they pin the profile.
 screen_run() { PATH="$stub_dir:$PATH" MAINTAINER_PROFILE=sysknife MAINTAINER_REPO="$stub_dir" python3 "$root/bin/maintainer" screen 1 2>&1; }
 screen_case() {  # $1 label, $2 expected substring
+    # `--` before the pattern: an expected substring that begins with a dash is
+    # read by grep as an option, and the case then fails with a usage message
+    # rather than a verdict about the screen.
     out="$(screen_run)"
-    if printf '%s' "$out" | grep -qF "$2"; then ok "$1"
+    if grep -qF -- "$2" <<<"$out"; then ok "$1"
     else bad "$1 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100))"; fi
 }
 
@@ -1740,6 +2072,42 @@ screen_case "a workflow change warns against approving its run" "Do NOT approve 
 
 screen_stub '[{"path":"scripts/x.sh"}]' 1 ''
 screen_case "a shell script is DO NOT EXECUTE (the gates run it)" "VERDICT: DO NOT EXECUTE"
+
+# What DO NOT EXECUTE actually forbids, and what it does not.
+#
+# The verdict used to end with "In an unattended run there is no fallback: do
+# not build, do not test ... Interactively, you can execute it in podman". That
+# sentence was measured on 2026-09-02, when every hardening directive on the
+# systemd unit blocked rootless podman with `newuidmap: write to uid_map failed`
+# and only an unhardened unit could start a container.
+#
+# It is no longer true. A `podman-userns-warmup.service` the unit orders itself
+# after establishes the user namespace, and the hardened unit reuses it. The
+# 2026-09-07 11:27 `ci` run, a real timer run under NoNewPrivileges,
+# RestrictSUIDSGID, LockPersonality and RestrictRealtime, started
+# postgres:17-alpine and read PostgreSQL 17.10 out of it.
+#
+# Leaving the stale sentence in place cost more than a wrong fact: the reviews
+# were already running mutation proofs in podman on PRs screened DO NOT EXECUTE,
+# so the doctrine contradicted the practice, and a doctrine nobody follows
+# teaches an agent that doctrine is optional. The invariant is unchanged and is
+# now stated as the invariant: never on this host.
+screen_stub '[{"path":"crates/x/src/lib.rs"}]' 1 ''
+screen_case "the verdict forbids the host, which is what it has always meant" "Never on this host"
+screen_case "and it says a container is available to an unattended run" "unattended"
+screen_case "and names the probe that answers whether it is" "--network=none docker.io/library/busybox"
+screen_case "and keeps the read-only, no-network shape for the proof itself" "/repo:ro"
+out="$(screen_run)"
+grep -q 'Interactively, you can execute' <<<"$out" \
+    && bad "the screen still says a container is available only to a human" \
+    || ok "the screen no longer calls the container interactive-only"
+grep -q 'there is no fallback' <<<"$out" \
+    && bad "the screen still claims an unattended run has no sandbox" \
+    || ok "and no longer claims an unattended run has no sandbox"
+# The one thing that is NOT about local execution and must survive untouched.
+screen_stub '[{"path":".github/workflows/ci.yml"}]' 1 ''
+screen_case "a workflow change still forbids approving its queued run" "Do NOT approve its queued workflow"
+
 
 # A dependency line moved inside Cargo.toml: new third-party code would be built.
 screen_stub '[{"path":"Cargo.toml"}]' 1 'diff --git a/Cargo.toml b/Cargo.toml
@@ -1773,7 +2141,7 @@ screen_case "an unclassifiable file fails closed" "failing closed"
 # And if gh cannot answer at all, the screen must refuse rather than guess.
 make_stub gh 'exit 1'
 out="$(screen_run)"
-if printf '%s' "$out" | grep -q 'READ-ONLY'; then ok "an unreachable gh fails closed"
+if grep -q 'READ-ONLY' <<<"$out"; then ok "an unreachable gh fails closed"
 else bad "the screen produced a verdict with no data (got: $(printf '%s' "$out" | head -1))"; fi
 
 echo "== a run cannot start inside another run, and the override does not travel =="
@@ -1784,7 +2152,7 @@ echo "== a run cannot start inside another run, and the override does not travel
 # have launched a full run of a posting profile.
 out=$(MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
       bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
-if [ "$rc" = 78 ] && printf '%s' "$out" | grep -q "already inside the run 'other/review'"; then
+if [ "$rc" = 78 ] && grep -q "already inside the run 'other/review'" <<<"$out"; then
     ok "a nested run is refused, naming the run it is inside"
 else
     bad "a nested run was not refused (rc=$rc)"
@@ -1912,7 +2280,7 @@ rm -f "$stub_dir/INJECTED"
 out=$(HOME="$inj" MAINTAINER_PROFILE="$evil" python3 "$root/bin/maintainer" status 2>&1); rc=$?
 if [ -e "$stub_dir/INJECTED" ]; then
     bad "a profile name reached the shell: the injection ran"
-elif [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'not a plain word'; then
+elif [ "$rc" != 0 ] && grep -q 'not a plain word' <<<"$out"; then
     ok "a profile name that is not a plain word is refused"
 else
     bad "the injection did not run, but nothing refused it either (rc=$rc)"
@@ -1936,10 +2304,10 @@ out=$(PATH="$nosysd" HOME="$ok2" MAINTAINER_PROFILE=plain \
       python3 "$root/bin/maintainer" status 2>&1); rc=$?
 [ "$rc" = 0 ] && ok "status runs on a host with no systemctl" \
     || bad "status died without a scheduler (rc=$rc)"
-printf '%s' "$out" | grep -q 'Traceback' \
+grep -q 'Traceback' <<<"$out" \
     && bad "status printed a Python traceback at the user" \
     || ok "and it does so without a traceback"
-printf '%s' "$out" | grep -q 'task .*next' \
+grep -q 'task .*next' <<<"$out" \
     && ok "and still prints the task table, with no next-run column to fill" \
     || bad "status stopped before the task table"
 
@@ -1986,9 +2354,9 @@ for f in "$root"/bin/* "$root"/lib/*.sh "$root"/install.sh "$root"/new-profile.s
     # Executable lines only. The files explain the defaults they used to have,
     # and a check that reads its own rationale is the vacuous kind.
     code=$(sed 's/#.*//' "$f")
-    if printf '%s' "$code" | grep -qF "$needle_repo"; then
+    if grep -qF "$needle_repo" <<<"$code"; then
         bad "$(basename "$f") still defaults to a specific repository"
-    elif printf '%s' "$code" | grep -qF "$needle_user"; then
+    elif grep -qF "$needle_user" <<<"$code"; then
         bad "$(basename "$f") still names a specific GitHub account"
     else
         ok "$(basename "$f") names no repository or account in code"
@@ -1999,7 +2367,7 @@ nohome="$stub_dir/noprofile"; mkdir -p "$nohome"
 for tool in maintainer-repo maintainer-merge; do
     out=$(env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_PROFILE -u MAINTAINER_STATE \
               -u MAINTAINER_ACCOUNT HOME="$nohome" bash "$root/bin/$tool" prune 2>&1); rc=$?
-    if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'no profile is deployed'; then
+    if [ "$rc" != 0 ] && grep -q 'no profile is deployed' <<<"$out"; then
         ok "$tool refuses when no profile says which repository"
     else
         bad "$tool ran without knowing which repository (rc=$rc)"
@@ -2015,7 +2383,7 @@ done
 cp "$root/lib/profile.sh" "$two/.local/share/maintainer/profile.sh"
 out=$(env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_PROFILE -u MAINTAINER_STATE \
           -u MAINTAINER_ACCOUNT HOME="$two" bash "$root/bin/maintainer-repo" release-check 2>&1)
-printf '%s' "$out" | grep -q '2 profiles are deployed' \
+grep -q '2 profiles are deployed' <<<"$out" \
     && ok "two deployed profiles must be disambiguated, not guessed" \
     || bad "a tool picked a profile on its own"
 
@@ -2036,12 +2404,62 @@ if [ -z "$unpinned" ]; then ok "every action is pinned by SHA"; else
 # is TRUE needs the network, so scripts/verify-action-pins.sh does that in CI.
 missing=0
 while read -r line; do
-    printf '%s' "$line" | grep -qE '# *\S' || { bad "a SHA pin carries no version comment: $line"; missing=1; }
+    grep -qE '# *\S' <<<"$line" || { bad "a SHA pin carries no version comment: $line"; missing=1; }
 done < <(grep -hE 'uses: [^ ]+@[0-9a-f]{40}' "$root"/.github/workflows/*.yml)
 [ "$missing" = 0 ] && ok "every SHA pin says which version it claims to be"
 [ -x "$root/scripts/verify-action-pins.sh" ] \
     && ok "a script exists that checks those claims against the API" \
     || bad "nothing verifies that a pin is the tag it claims"
+
+echo "== the pin verifier fails on a uses: line it cannot parse =="
+# Issue #31. The script's own second line says "Every `uses:` in
+# .github/workflows must be pinned to a SHA", and its extraction was
+#   grep -hoE 'uses: [^@ ]+@[0-9a-f]{40} *# *\S+'
+# which requires a line to be pinned already. A floating tag, a short SHA or a
+# pin with no comment never entered the loop, `fail` stayed 0, and the all-clear
+# printed. A loop cannot fail on a line it never saw.
+vp="$root/scripts/verify-action-pins.sh"
+pinroot="$stub_dir/pinroot"; rm -rf "$pinroot"; mkdir -p "$pinroot/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/deploy-pages@v5\n' \
+    > "$pinroot/.github/workflows/x.yml"
+out="$(bash "$vp" "$pinroot" 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ok "an unpinned uses: line fails the verifier" \
+    || bad "a floating tag passes the guard that exists to forbid it (rc=$rc)"
+grep -q 'actions/deploy-pages@v5' <<<"$out" \
+    && ok "and the line it could not parse is named" \
+    || bad "the refusal does not say which line: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+# A short SHA is the same defect wearing a different length.
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@3d3c42e  # v7\n' \
+    > "$pinroot/.github/workflows/x.yml"
+bash "$vp" "$pinroot" >/dev/null 2>&1 \
+    && bad "a short SHA passes as a pin" \
+    || ok "a short SHA fails too"
+# A pin with no version comment: the half the script DID check is meaningless
+# without knowing the claim.
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n' \
+    > "$pinroot/.github/workflows/x.yml"
+bash "$vp" "$pinroot" >/dev/null 2>&1 \
+    && bad "a SHA pin with no version comment passes" \
+    || ok "a SHA pin with no version comment fails"
+# Structural twin, no network: a workflow with no uses: at all is not an error.
+printf 'jobs:\n  a:\n    steps:\n      - run: echo hi\n' \
+    > "$pinroot/.github/workflows/x.yml"
+bash "$vp" "$pinroot" >/dev/null 2>&1 \
+    && ok "a workflow with no actions is not reported as unpinned" \
+    || bad "the new count check rejects a workflow that uses no actions"
+# Behavioural twin, gh stubbed: a correctly pinned line still passes end to end,
+# or the check is just rejecting everything.
+printf 'jobs:\n  a:\n    steps:\n      - uses: acme/act@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  # v1\n' \
+    > "$pinroot/.github/workflows/x.yml"
+make_stub gh "case \"\$*\" in
+      *git/ref/tags*object.type*) echo commit;;
+      *git/ref/tags*object.sha*) echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa;;
+    esac"
+out="$(PATH="$stub_dir:$PATH" bash "$vp" "$pinroot" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ok "a correctly pinned line whose comment is true still passes" \
+    || bad "the verifier now fails a good pin: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+rm -f "$stub_dir/gh"
+
 # CI must run the gates rather than merely exist.
 for gate in "tests/run-tests.sh" "evals/run-evals.sh" "scripts/check_claims.sh" "shellcheck"; do
     grep -q "$gate" "$root/.github/workflows/ci.yml" \
@@ -2098,7 +2516,7 @@ urc=$?
 [ "$urc" != 0 ] \
     && ok "an uncovered path is refused, not guessed at" \
     || bad "verify fell back to a suite that does not run the changed code (returned '$uncov')"
-printf '%s' "$uncov" | grep -q 'weird\.xyz' \
+grep -q 'weird\.xyz' <<<"$uncov" \
     && ok "and the refusal names the path it could not place" \
     || bad "the refusal does not say which path had no suite"
 # The receipt has to say which suite proved it.
@@ -2132,7 +2550,7 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate" MAINTAINER_ACCOUNT=testuser \
           MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
           bash "$mg" verify 42 "$verify_head" check.sh 's/GUARD=on/GUARD=off/' shell 2>&1)
-    if printf '%s' "$out" | grep -q 'receipt recorded\|observed'; then
+    if grep -q 'receipt recorded\|observed' <<<"$out"; then
         ok "the shell suite produced an observed receipt"
     else
         bad "shell verify failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
@@ -2141,7 +2559,7 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate2" MAINTAINER_ACCOUNT=testuser \
           MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
           bash "$mg" verify 42 "$verify_head" check.sh 's/NOTHING/MATCHES/' shell 2>&1)
-    printf '%s' "$out" | grep -q 'THE GUARD DOES NOT BITE' \
+    grep -q 'THE GUARD DOES NOT BITE' <<<"$out" \
         && ok "a mutation that changes nothing is refused" \
         || bad "a no-op mutation produced a receipt"
 else
@@ -2200,10 +2618,10 @@ session() { printf '%s\n' "$@" | python3 "$mcp" 2>/dev/null; }
 out=$(session '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
               '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
               '{"jsonrpc":"2.0","id":3,"method":"resources/list"}')
-printf '%s' "$out" | grep -q '"protocolVersion"' && ok "initialize answers with a protocol version" \
+grep -q '"protocolVersion"' <<<"$out" && ok "initialize answers with a protocol version" \
     || bad "initialize did not answer"
-printf '%s' "$out" | grep -q '"tools"' && ok "tools/list answers" || bad "tools/list did not answer"
-printf '%s' "$out" | grep -q '"resources"' && ok "resources/list answers" || bad "resources/list did not answer"
+grep -q '"tools"' <<<"$out" && ok "tools/list answers" || bad "tools/list did not answer"
+grep -q '"resources"' <<<"$out" && ok "resources/list answers" || bad "resources/list did not answer"
 
 # The refusals must survive the change of interface. An MCP client is driven by
 # a model, so anything exposed here is exposed to a model.
@@ -2231,13 +2649,13 @@ printf ' %s ' "$tools" | grep -q ' maintainer_verify ' \
     || bad "verify is missing, so a receipt can never be earned over MCP"
 # A model supplies these arguments. They are validated, not interpolated.
 out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_merge","arguments":{"pr":"7; rm -rf /"}}}')
-printf '%s' "$out" | grep -q 'positive integer' && ok "a non-integer pull request number is refused" \
+grep -q 'positive integer' <<<"$out" && ok "a non-integer pull request number is refused" \
     || bad "MCP accepted a non-integer pr"
 out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"maintainer_status","arguments":{"profile":"../../etc"}}}')
-printf '%s' "$out" | grep -q 'plain name' && ok "a profile name that is a path is refused" \
+grep -q 'plain name' <<<"$out" && ok "a profile name that is a path is refused" \
     || bad "MCP accepted a path as a profile name"
 out=$(session '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"nope","arguments":{}}}')
-printf '%s' "$out" | grep -q 'no tool named' && ok "an unknown tool is refused" || bad "unknown tool not refused"
+grep -q 'no tool named' <<<"$out" && ok "an unknown tool is refused" || bad "unknown tool not refused"
 # prune over MCP is always a dry run: deleting is a decision.
 grep -q '"prune", "--dry-run"' "$mcp" && ok "prune over MCP is always a dry run" \
     || bad "MCP could delete branches"
@@ -2263,7 +2681,7 @@ grep -q 'PROD_GLOBS:-' "$root/bin/maintainer-merge" \
 out=$(env -u PROD_GLOBS PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/state" \
       MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
       bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'declares no PROD_GLOBS'; then
+if [ "$rc" != 0 ] && grep -q 'declares no PROD_GLOBS' <<<"$out"; then
     ok "a profile with no globs is refused a merge, not given a default"
 else
     bad "the gate merged, or failed for another reason, with no production paths declared (rc=$rc)"
@@ -2298,7 +2716,7 @@ pg_case() {  # $1 pr, $2 head, $3 expected substring, $4 label
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/pgstate" MAINTAINER_ACCOUNT=testuser \
           MAINTAINER_SLUG=o/r MAINTAINER_REPO="$pg" PROD_GLOBS="bin/*" MAINTAINER_POST=off \
           bash "$mg" merge "$1" 2>&1)
-    printf '%s' "$out" | grep -q "$3" && ok "$4" \
+    grep -q "$3" <<<"$out" && ok "$4" \
         || bad "$4 (got: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90))"
 }
 pg_case 21 "$pg_docs" "receipt still applies" "a docs-only move keeps the receipt"
@@ -2318,7 +2736,7 @@ printf '{"pr":1,"head":"abcdef1234567890","kind":"observed","proof":"written by 
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
       MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
       bash "$mg" merge 1 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'carries no signature'; then
+if [ "$rc" != 0 ] && grep -q 'carries no signature' <<<"$out"; then
     ok "a hand-written receipt is refused"
 else
     bad "a hand-written receipt merged or failed for another reason (rc=$rc)"
@@ -2329,7 +2747,7 @@ printf '{"pr":2,"head":"abcdef1234567890","kind":"observed","proof":"edited","si
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_RECEIPT_KEY="$rk" MAINTAINER_STATE="$forge" \
       MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
       bash "$mg" merge 2 2>&1)
-printf '%s' "$out" | grep -q 'does not match its signature' \
+grep -q 'does not match its signature' <<<"$out" \
     && ok "a receipt edited after signing is refused" \
     || bad "an edited receipt was accepted"
 
@@ -2342,7 +2760,7 @@ echo "== an unattended run cannot assert; it can only observe =="
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
       MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       bash "$mg" receipt 3 abcdef1234567890 'I promise' 2>&1); rc=$?
-if [ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'may not assert a receipt'; then
+if [ "$rc" != 0 ] && grep -q 'may not assert a receipt' <<<"$out"; then
     ok "a run is refused the receipt command"
 else
     bad "a run wrote an asserted receipt (rc=$rc)"
@@ -2369,7 +2787,7 @@ if [ -f "$forge/receipts/4.json" ]; then
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="sysknife/review" MAINTAINER_STATE="$forge" \
           MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp PROD_GLOBS="bin/*" \
           bash "$mg" merge 4 2>&1)
-    printf '%s' "$out" | grep -q "is 'asserted', not 'observed'" \
+    grep -q "is 'asserted', not 'observed'" <<<"$out" \
         && ok "a run may not merge on an asserted receipt" \
         || bad "a run merged on a claim nothing checked"
 else
@@ -2461,7 +2879,7 @@ done
 out=$(PATH="$noshell" bash "$sw" 2>&1); rc=$?
 [ "$rc" = 127 ] && ok "with no shellcheck on PATH the sweep exits 127" \
     || bad "the sweep reported rc=$rc with no linter installed"
-printf '%s' "$out" | grep -q 'inspected nothing' \
+grep -q 'inspected nothing' <<<"$out" \
     && ok "and it says the gate inspected nothing" \
     || bad "the sweep failed silently: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
 
@@ -2575,20 +2993,20 @@ cp "$tw/r.usage.json" "$dg/logs/2026-01-01T00-00-review.usage.json"
 dgrun() { MAINTAINER_STATE="$dg" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
     MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=dg python3 "$root/bin/maintainer" digest "$@" 2>&1; }
 out="$(dgrun 2026-01-01T00-00-review --compact)"
-printf '%s' "$out" | grep -q '3 commands run' \
+grep -q '3 commands run' <<<"$out" \
     && ok "the digest counts this run's commands" \
     || bad "the digest read the wrong commands file: $(printf '%s' "$out" | tr '\n' ' ')"
-printf '%s' "$out" | grep -q '4.49' \
+grep -q '4.49' <<<"$out" \
     && ok "and reports the run's cost estimate" || bad "the cost is missing from the digest"
-printf '%s' "$out" | grep -qE 'cache read 9.9M' \
+grep -qE 'cache read 9.9M' <<<"$out" \
     && ok "in units a person reads, not 9852000" || bad "raw token counts reached the digest"
 # A run with no usage record must say unknown, never zero.
 printf '# r\n' > "$dg/runs/2026-02-02T00-00-review.md"
 out="$(dgrun 2026-02-02T00-00-review --compact)"
-printf '%s' "$out" | grep -q 'spend unknown' \
+grep -q 'spend unknown' <<<"$out" \
     && ok "a run with no usage record reports unknown, not zero" \
     || bad "an unrecorded cost was printed as a number: $(printf '%s' "$out" | tr '\n' ' ')"
-printf '%s' "$out" | grep -q 'command record missing' \
+grep -q 'command record missing' <<<"$out" \
     && ok "and says its command record is missing rather than borrowing one" \
     || bad "the digest borrowed another run's command count"
 
@@ -2644,29 +3062,29 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -q 'OVER-OFFERED: 2 unanswered' \
+grep -q 'OVER-OFFERED: 2 unanswered' <<<"$out" \
     && ok "two unanswered offers to one person is reported as a violation" \
     || bad "the one-offer rule is still unenforced: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
-printf '%s' "$out" | grep -qE 'busy .*working on #12' \
+grep -qE 'busy .*working on #12' <<<"$out" \
     && ok "an ANSWERED open issue counts as a full queue, not as availability" \
     || bad "somebody mid-task reads as eligible for another"
-printf '%s' "$out" | grep -qE '[0-9]+ issue\(s\) free to offer' \
+grep -qE '[0-9]+ issue\(s\) free to offer' <<<"$out" \
     && ok "a reserved issue is not counted as free" \
     || bad "twir-listed or maintainer-only issues were offered as free"
-printf '%s' "$out" | grep -q 'holds nothing does not' \
+grep -q 'holds nothing does not' <<<"$out" \
     && ok "and it says what an eligible person looks like" \
     || bad "an empty list of blocked people reads as nobody being available"
 # A release and an offer are the same sentence shape to the same person. Reading
 # any @mention as an offer made a claim released minutes earlier read as
 # "working on #272" and held the issue out of the free pool. Found by running
 # this against a release posted an hour after the tool shipped.
-printf '%s' "$out" | grep -q '^gone ' \
+grep -q '^gone ' <<<"$out" \
     && bad "a released claim still reads as held" \
     || ok "a released claim frees the person"
 # #14 is the only free one: #10 and #11 hold unanswered offers, #12 is answered
 # and in progress, #13 is reserved. It is free only because its mentions carry
 # the release marker, so this number IS the assertion.
-printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+grep -q '1 issue(s) free to offer' <<<"$out" \
     && ok "and puts the issue back in the free pool" \
     || bad "the released issue is still counted as spoken for: $(printf '%s' "$out" | head -1)"
 
@@ -2691,13 +3109,13 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -qE '^be-student ' \
+grep -qE '^be-student ' <<<"$out" \
     && ok "a real @mention beside the pins is still read" \
     || bad "the real handle was lost: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
-printf '%s' "$out" | grep -qiE '^stable |^a1d282|^05a583' \
-    && bad "an action pin or git ref was counted as a person: $(printf '%s' "$out" | grep -iE 'stable|a1d282|05a583' | head -1)" \
+grep -qiE '^stable |^a1d282|^05a583' <<<"$out" \
+    && bad "an action pin or git ref was counted as a person: $(grep -iE 'stable|a1d282|05a583' <<<"$out" | head -1)" \
     || ok "action pins and git refs do not become phantom people"
-printf '%s' "$out" | grep -q '1 issue(s) free to offer' \
+grep -q '1 issue(s) free to offer' <<<"$out" \
     && bad "the issue is free, but a phantom mention held it out of the pool" \
     || ok "the issue with one real unanswered offer is not counted free"
 
@@ -2720,13 +3138,13 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -qE 'free to offer:.*#30' \
+grep -qE 'free to offer:.*#30' <<<"$out" \
     && ok "the free issue is named, so a campaign can pick from the output" \
     || bad "offers still prints only a count, so nothing can choose from it"
-printf '%s' "$out" | grep -q 'DOUBLE-BOOKED' \
+grep -q 'DOUBLE-BOOKED' <<<"$out" \
     && ok "one issue offered to two people is reported as a collision" \
     || bad "#31 is pointed at two people and offers reports no collision"
-printf '%s' "$out" | grep -qE 'DOUBLE-BOOKED.*#31' \
+grep -qE 'DOUBLE-BOOKED.*#31' <<<"$out" \
     && ok "and the collision names the issue" \
     || bad "the collision does not name which issue is double-booked"
 
@@ -2751,18 +3169,18 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#40' \
+grep -qE 'free to offer:[^\n]*#40' <<<"$out" \
     && bad "an issue an open PR closes is offered to somebody else" \
     || ok "an issue an open PR closes is kept out of the free list"
-printf '%s' "$out" | grep -qE '#40.*(PR|#88)' \
+grep -qE '#40.*(PR|#88)' <<<"$out" \
     && ok "and it says which pull request took it, rather than dropping it silently" \
     || bad "the issue vanishes from the count with no reason given"
 # The negative twin. A PR that merely mentions an issue closes nothing, so #41
 # stays offerable; treating a mention as a claim would starve the free pool.
-printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#41' \
+grep -qE 'free to offer:[^\n]*#41' <<<"$out" \
     && ok "an issue a PR only mentions stays free" \
     || bad "a bare mention removed an issue from the free pool"
-printf '%s' "$out" | grep -qE 'free to offer:[^\n]*#42' \
+grep -qE 'free to offer:[^\n]*#42' <<<"$out" \
     && ok "an issue with no pull request at all stays free" \
     || bad "the free pool collapsed"
 # Could not ask is not an answer. With the listing unreadable the free list must
@@ -2779,7 +3197,7 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+grep -q 'could not read the open pull requests' <<<"$out" \
     && ok "an unreadable PR listing is said out loud before anything is offered" \
     || bad "offers claims a free list it could not verify"
 rm -f "$stub_dir/gh"
@@ -2806,13 +3224,13 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -qE 'CONTENDED.*#40' \
+grep -qE 'CONTENDED.*#40' <<<"$out" \
     && ok "an issue whose holder is working it flags a second person turning up" \
     || bad "a second contributor on a live issue goes unreported (this cost #252)"
-printf '%s' "$out" | grep -qE 'CONTENDED.*#40.*bruno|CONTENDED.*#40[^\n]*bruno' \
+grep -qE 'CONTENDED.*#40.*bruno|CONTENDED.*#40[^\n]*bruno' <<<"$out" \
     && ok "and it names who turned up" \
     || bad "the contention does not name the second person"
-printf '%s' "$out" | grep -qE 'CONTENDED.*#41' \
+grep -qE 'CONTENDED.*#41' <<<"$out" \
     && bad "an issue with only its holder posting was reported as contended" \
     || ok "the holder posting on their own issue is not contention"
 # A person the maintainer mentioned and then RELEASED is a resolved case, not
@@ -2837,7 +3255,7 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
       python3 "$root/bin/maintainer" offers 2>&1)
-printf '%s' "$out" | grep -qE 'CONTENDED.*#42' \
+grep -qE 'CONTENDED.*#42' <<<"$out" \
     && bad "a released earlier claimant reads as contention on a reassigned issue" \
     || ok "a released claimant is a resolved case, not a second party"
 
@@ -2881,18 +3299,18 @@ out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAIN
 # updatedAt on BOTH rows is today, because assigning them moved it. Idle must
 # come from the claimant's own last comment or the check is blind to exactly
 # the claims it exists to find.
-printf '%s' "$out" | grep -qE '#272 +atanishka308 +1[0-9]d' \
+grep -qE '#272 +atanishka308 +1[0-9]d' <<<"$out" \
     && ok "idle is measured from the claimant, not from updatedAt" \
     || bad "the maintainer touching an issue resets its staleness: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
-printf '%s' "$out" | grep -q 'stale, a check-in is due' \
+grep -q 'stale, a check-in is due' <<<"$out" \
     && ok "and an old claim is called stale" || bad "a stale claim is reported as active"
-printf '%s' "$out" | grep -q 'NOT assigned' \
+grep -q 'NOT assigned' <<<"$out" \
     && ok "a claim with no assignee is named as invisible to their dashboard" \
     || bad "a label-only claim looks the same as an assigned one"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=cv CLAIM_LABEL="" \
       python3 "$root/bin/maintainer" claims 2>&1)
-printf '%s' "$out" | grep -q 'declares no CLAIM_LABEL' \
+grep -q 'declares no CLAIM_LABEL' <<<"$out" \
     && ok "a profile that tracks no claims says so" || bad "claims assumes every project uses a label"
 
 
@@ -2925,22 +3343,22 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
       python3 "$root/bin/maintainer" claims 2>&1)
-printf '%s' "$out" | grep -qE '#390.*never answered' \
+grep -qE '#390.*never answered' <<<"$out" \
     && bad "an offer answered by a pull request is still reported as unanswered" \
     || ok "an offer answered by a pull request is not reported as unanswered"
-printf '%s' "$out" | grep -qE '#390.*#389' \
+grep -qE '#390.*#389' <<<"$out" \
     && ok "and the pull request that answered it is named" \
     || bad "the answer is accepted without saying where it came from"
-printf '%s' "$out" | grep -q 'maintainer assign 390 georgefifth' \
+grep -q 'maintainer assign 390 georgefifth' <<<"$out" \
     && ok "and the assignment is recommended, because they did answer" \
     || bad "somebody who answered with a PR gets no assignment suggestion"
 # The negative twin, and it is the whole point: a bare mention of the issue is
 # not a closing reference. #401 says "see #391", which GitHub would not act on
 # either, so neither does this.
-printf '%s' "$out" | grep -qE '#391.*never answered' \
+grep -qE '#391.*never answered' <<<"$out" \
     && ok "a PR that merely mentions an issue does not answer the offer" \
     || bad "any mention of the number counts as a claim, which is worse than the bug"
-printf '%s' "$out" | grep -q 'maintainer assign 391' \
+grep -q 'maintainer assign 391' <<<"$out" \
     && bad "a drive-by mention produced an assignment recommendation" \
     || ok "and it recommends no assignment for a mere mention"
 # Could not ask is not an answer of "nobody". A failed PR listing must leave the
@@ -2960,10 +3378,10 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cp2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=maint MAINTAINER_PROFILE=cp CLAIM_LABEL=claimed \
       python3 "$root/bin/maintainer" claims 2>&1)
-printf '%s' "$out" | grep -q 'could not read the open pull requests' \
+grep -q 'could not read the open pull requests' <<<"$out" \
     && ok "a failed PR listing is reported rather than read as 'nobody answered'" \
     || bad "an unreadable PR list is indistinguishable from an empty one"
-printf '%s' "$out" | grep -q 'maintainer assign 390' \
+grep -q 'maintainer assign 390' <<<"$out" \
     && bad "an unreadable PR list still produced an assignment recommendation" \
     || ok "and it recommends no assignment it could not justify"
 rm -f "$stub_dir/gh"
@@ -3028,10 +3446,10 @@ PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
 
 # Claimed by someone else, and this author never posted on it.
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q "closes #355, which carries the 'claimed' label" \
+grep -q "closes #355, which carries the 'claimed' label" <<<"$out" \
     && ok "a PR closing another person's claimed issue is refused" \
     || bad "the gate merged over a claim: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
-printf '%s' "$out" | grep -q 'takes their work away' \
+grep -q 'takes their work away' <<<"$out" \
     && ok "and says why, rather than naming a rule" || bad "the refusal does not say what it protects"
 # The three cases below are about the claim guard LETTING a merge through, so
 # they assert its refusal text is absent rather than that the whole merge
@@ -3086,13 +3504,13 @@ chmod +x "$stub_dir/gh"
 out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$clm" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
       MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of CLAIM_LABEL=claimed \
       python3 "$root/bin/maintainer" claims 2>&1)
-printf '%s' "$out" | grep -qE '#50.*(unanswered|never answered|no reply)' \
+grep -qE '#50.*(unanswered|never answered|no reply)' <<<"$out" \
     && ok "an unanswered offer is reported as an offer, not as a claim" \
-    || bad "claims still calls an unanswered offer a claim: $(printf '%s' "$out" | grep '#50' | cut -c1-70)"
-printf '%s' "$out" | grep -q 'gh issue edit N --repo <slug> --add-assignee' \
+    || bad "claims still calls an unanswered offer a claim: $(grep '#50' <<<"$out" | cut -c1-70)"
+grep -q 'gh issue edit N --repo <slug> --add-assignee' <<<"$out" \
     && bad "claims still recommends the command that 404s for a non-collaborator" \
     || ok "claims no longer recommends gh issue edit --add-assignee"
-printf '%s' "$out" | grep -q 'maintainer assign' \
+grep -q 'maintainer assign' <<<"$out" \
     && ok "claims points at the verb that verifies the assignment took" \
     || bad "claims does not mention maintainer assign"
 
@@ -3146,31 +3564,31 @@ GHEOF
 # Somebody else was pointed at it, and no label was ever applied.
 thread_gh '[{"u":"testuser","b":"@holder this one is yours"}]'
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q 'was pointed at #355' \
+grep -q 'was pointed at #355' <<<"$out" \
     && ok "the gate refuses a PR closing an issue pointed at somebody else" \
     || bad "an unlabelled issue somebody was pointed at is merged out from under them"
-printf '%s' "$out" | grep -q 'holder' \
+grep -q 'holder' <<<"$out" \
     && ok "and it names who was pointed there" \
     || bad "the refusal does not name the person who was promised the issue"
 
 # The author is the person who was pointed there.
 thread_gh '[{"u":"testuser","b":"@newcomer this one is yours"}]'
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q 'was pointed at #355' \
+grep -q 'was pointed at #355' <<<"$out" \
     && bad "a contributor is refused the issue the maintainer gave them" \
     || ok "the author being the person pointed there is not blocked"
 
 # Pointed there, then released out loud.
 thread_gh '[{"u":"testuser","b":"@holder yours"},{"u":"testuser","b":"@holder releasing <!-- maintainer: claim-released -->"}]'
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q 'was pointed at #355' \
+grep -q 'was pointed at #355' <<<"$out" \
     && bad "a released claim still blocks a merge" \
     || ok "a released holder does not block anybody"
 
 # Nobody was ever pointed at it.
 thread_gh '[{"u":"someone","b":"is this still open?"}]'
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q 'was pointed at #355' \
+grep -q 'was pointed at #355' <<<"$out" \
     && bad "the thread check fires when there is no holder" \
     || ok "an issue nobody was pointed at is not blocked"
 
@@ -3202,12 +3620,12 @@ GHEOF
 }
 assigned_gh someone-else
 out="$(cl_merge)"
-printf '%s' "$out" | grep -qE 'assigned to|is assigned' \
+grep -qE 'assigned to|is assigned' <<<"$out" \
     && ok "a labelled issue assigned to somebody else refuses another author's PR" \
     || bad "posting on a claimed issue still clears a claim held by its assignee"
 assigned_gh newcomer
 out="$(cl_merge)"
-printf '%s' "$out" | grep -qE 'assigned to|is assigned' \
+grep -qE 'assigned to|is assigned' <<<"$out" \
     && bad "the assignee is refused their own assigned issue" \
     || ok "the assignee of a claimed issue is not blocked"
 
@@ -3234,9 +3652,95 @@ GHEOF
 }
 thread_gh_broken
 out="$(cl_merge)"
-printf '%s' "$out" | grep -q 'could not read who was pointed at it' \
+grep -q 'could not read who was pointed at it' <<<"$out" \
     && ok "an unreadable thread refuses the merge instead of assuming nobody" \
     || bad "the holder check fails OPEN when it cannot read the issue"
+
+
+echo "== every read the claim check depends on fails closed, not only the innermost one =="
+# Issue #29. The innermost check (`maintainer holders`) was hardened to fail
+# closed and its comment says so. The reads that decide whether it runs at all
+# were not. Each of these swallowed its error into an empty string, and empty
+# read as permission:
+#
+#   closingIssuesReferences   -> `for iss in $closes` runs zero times
+#   the missing-helper break  -> leaves the loop before rc is ever set
+#   issue view --json labels  -> `|| continue` skips the whole claim branch
+#   issue view --json assignees -> reads as "nobody is assigned"
+#   issue view --json comments  -> reads as "nobody else spoke"
+#   pr view --json author       -> an empty author, compared with grep -qxF
+#
+# `maintainer holders` reads REST and these read GraphQL, so a partial outage on
+# one and not the other left the claim protection off with nothing printed.
+cl_gh_broken() {  # $1 = the case pattern whose gh call must fail
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  $1) echo "gh: could not reach api.github.com" >&2; exit 1;;
+  *'auth switch'*) exit 0;;
+  *'api user'*) echo testuser;;
+  *reviewDecision*) echo APPROVED;;
+  *closingIssuesReferences*) echo 355;;
+  *'pr view'*author*) echo newcomer;;
+  *issues/355/comments*) echo '[]';;
+  *'issue view'*labels*) echo 0;;
+  *'issue view'*assignees*) echo "";;
+  *'issue view'*comments*) printf '%s\n' claimant;;
+  *headRefOid*) echo $clsha;;
+  *mergeStateStatus*) echo CLEAN;;
+  *'pr checks'*) echo '[{"name":"x","bucket":"pass"}]';;
+  *'pr merge'*) echo MERGED_STUB;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+# Asserted on the refusal TEXT, not on the exit code. The gate refuses this
+# fixture later for an unrelated reason (the receipt is asserted rather than
+# observed), so a non-zero exit proves nothing about the claim reads; the
+# existing `claim_allowed` helper above is written the same way and for the same
+# reason. Every new refusal below says "could not read", so that phrase is the
+# observable.
+broken_read_refuses() {  # $1 = case pattern, $2 = what it is
+    cl_gh_broken "$1"
+    local o; o="$(cl_merge)"
+    if grep -q 'could not read' <<<"$o"; then
+        ok "an unreadable $2 refuses the merge"
+    else
+        bad "an unreadable $2 let the claim check run on nothing: $(printf '%s' "$o" | tr '\n' ' ' | cut -c1-80)"
+    fi
+}
+broken_read_refuses "*closingIssuesReferences*"   "list of issues the PR closes"
+broken_read_refuses "*'pr view'*author*"          "pull request author"
+broken_read_refuses "*'issue view'*labels*"       "claim label"
+broken_read_refuses "*'issue view'*assignees*"    "assignee list"
+broken_read_refuses "*'issue view'*comments*"     "comment list"
+# The helper that answers the thread question. Absent, the loop used to `break`
+# before `rc` was ever set, so the fail-closed branch below it never ran.
+# A whole little tree, because maintainer-merge sources ../lib/profile.sh
+# relative to itself and falls back to the deployed copy under HOME. CI runs
+# this job with no deployed tree on purpose, so a copy sitting next to no lib/
+# died at line 15 and the case reported the gate as having merged. What must be
+# absent here is `maintainer`, not everything.
+nohelp="$stub_dir/nohelperroot"; rm -rf "$nohelp"; mkdir -p "$nohelp/bin" "$nohelp/lib"
+cp "$mg" "$nohelp/bin/maintainer-merge"
+cp "$root/lib/profile.sh" "$nohelp/lib/profile.sh"
+cl_gh 0 claimant
+out="$(PATH="$stub_dir:/usr/bin:/bin" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
+    MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$nohelp/bin/maintainer-merge" merge 1 2>&1)"; rc=$?
+grep -q 'could not read' <<<"$out" \
+    && ok "a missing holders helper refuses the merge" \
+    || bad "with no helper on PATH the gate merged without asking who holds the issue: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
+grep -q 'maintainer' <<<"$out" \
+    && ok "and the refusal names the helper it could not run" \
+    || bad "the refusal does not say what was missing: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
+# The twin, and it is the one that matters: with every read answering, an
+# unclaimed issue still merges. A guard that refuses everything protects nothing
+# because it gets turned off.
+cl_gh null claimant
+printf '%s' "$(cl_merge)" | claim_allowed \
+    && ok "with every read answering, an unclaimed issue is not blocked" \
+    || bad "the hardened reads now block a merge they should allow"
 
 echo "== the agent cannot uninstall the thing that runs it =="
 # On 2026-09-04 an unattended run of the magent profile, reviewing THIS
@@ -3255,7 +3759,7 @@ make_stub systemctl 'case "$*" in
 out=$(PATH="$stub_dir:$PATH" HOME="$uh" bash "$root/install.sh" --uninstall 2>&1); rc=$?
 [ "$rc" = 3 ] && ok "uninstall refuses while timers are enabled" \
     || bad "uninstall proceeded against a live deployment (rc=$rc)"
-printf '%s' "$out" | grep -q 'maintains a repository other than this one' \
+grep -q 'maintains a repository other than this one' <<<"$out" \
     && ok "and says it would stop another project's profile too" \
     || bad "the refusal does not say what else it would stop"
 out=$(PATH="$stub_dir:$PATH" HOME="$uh" MAINTAINER_UNINSTALL_YES=1 \
@@ -3294,7 +3798,7 @@ trrun() { MAINTAINER_STATE="$tr1" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
 printf '# 2026-01-01T00-00-review\n\nbaseline promotion test\n' \
     > "$tr1/runs/2026-01-01T00-00-review.md"
 out="$(trrun finish 2026-01-01T00-00-review)"; rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'fixture rather than a report' \
+[ "$rc" != 0 ] && grep -q 'fixture rather than a report' <<<"$out" \
     && ok "a three-line fixture is refused rather than indexed" \
     || bad "a fixture was indexed as a run (rc=$rc)"
 grep -q '2026-01-01T00-00-review' "$tr1/index.md" 2>/dev/null \
@@ -3362,10 +3866,10 @@ printf '# r\n\n```\n$ gh pr list --state open\n$ cargo nextest run --workspace\n
     > "$au/runs/2026-01-01T00-00-review.md"
 printf '$ gh pr list --state open\n' > "$au/logs/2026-01-01T00-00-review.commands"
 out="$(aurun 2026-01-01T00-00-review)"
-printf '%s' "$out" | grep -q '1 of 2 quoted command' \
+grep -q '1 of 2 quoted command' <<<"$out" \
     && ok "a command the report quotes and the record lacks is named" \
     || bad "the audit did not notice a quoted command that never ran: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
-printf '%s' "$out" | grep -q 'cargo nextest run --workspace' \
+grep -q 'cargo nextest run --workspace' <<<"$out" \
     && ok "and it prints which one" || bad "the audit says a count and not which command"
 # Commands the report RECOMMENDS are not claims. Only `$ ` inside a fence is.
 printf '# r\n\nRun `gh pr merge 7` yourself.\n\n```\n$ gh pr list --state open\n```\n' \
@@ -3393,10 +3897,10 @@ aurun 2026-01-01T00-00-review | grep -q '^?' \
 # report, one of them the 2026-09-04T08:14 alert, and no command ever said so.
 printf '=== run.sh au/review 2026-01-03T00:00:00Z ===\n' > "$au/logs/2026-01-03T00-00-review.log"
 out="$(aurun --all)"
-printf '%s' "$out" | grep -q '2026-01-03T00-00-review' \
+grep -q '2026-01-03T00-00-review' <<<"$out" \
     && ok "a run that started and never reported is named by the audit" \
     || bad "a dead run is invisible to --all, so a gap reads as a quiet week"
-printf '%s' "$out" | grep -qi 'never reported\|no report' \
+grep -qi 'never reported\|no report' <<<"$out" \
     && ok "and the audit says what happened to it" \
     || bad "the dead run is listed with no verdict"
 # Auditing one named run must not drag in every orphan.
@@ -3410,10 +3914,10 @@ aurun 2026-01-01T00-00-review | grep -q '2026-01-03T00-00-review' \
 printf '=== run.sh au/review 2026-01-04T00:00:00Z ===\nmaintainer=v1 backend=claude model=opus log=x\nbackend claude unusable: missing settings.json\n' \
     > "$au/logs/2026-01-04T00-00-review.log"
 out="$(aurun --all)"
-printf '%s' "$out" | grep -q 'backend claude unusable' \
+grep -q 'backend claude unusable' <<<"$out" \
     && ok "an orphan carries the reason its log recorded" \
     || bad "the audit names a dead run and drops the reason sitting in its log"
-printf '%s' "$out" | grep -q '2026-01-03T00-00-review.*no reason' \
+grep -q '2026-01-03T00-00-review.*no reason' <<<"$out" \
     && ok "and an orphan whose log says nothing is marked as unexplained" \
     || bad "a log with a reason and a log with none read the same"
 
@@ -3438,13 +3942,13 @@ esac"
 
 # POST unset -> rehearsal: it says what it would file and posts nothing.
 out=$(firun --title 'A guard exits 1 with no output' --body 'body text')
-printf '%s' "$out" | grep -qi 'would file' \
+grep -qi 'would file' <<<"$out" \
     && ok "with POST off, file-issue rehearses rather than posting" \
     || bad "file-issue posted or errored at POST=off: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
 
 # POST=on, empty tracker -> it creates the issue and prints the URL.
 out=$(MAINTAINER_POST=on firun --title 'A guard exits 1 with no output' --body 'body text')
-printf '%s' "$out" | grep -q 'issues/1' \
+grep -q 'issues/1' <<<"$out" \
     && ok "with POST on, a new finding is filed and its URL returned" \
     || bad "file-issue did not create the issue: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
 
@@ -3460,7 +3964,7 @@ esac"
 
 # Same title again -> deduped by fingerprint, even at POST=on, even worded anew.
 out=$(MAINTAINER_POST=on firun --title 'A guard exits 1 with no output' --body 'reworded body')
-if printf '%s' "$out" | grep -q 'already filed as #7' && ! printf '%s' "$out" | grep -q 'issues/99'; then
+if grep -q 'already filed as #7' <<<"$out" && ! grep -q 'issues/99' <<<"$out"; then
     ok "a finding already on the tracker is not filed twice (the #342/#343 case)"
 else
     bad "file-issue filed a duplicate: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
@@ -3476,19 +3980,19 @@ make_stub gh "case \"\$*\" in
   *'auth switch'*) exit 0;;
 esac"
 out=$(MAINTAINER_POST=on firun --title 'a completely different wording' --fingerprint the-defect --body 'b')
-printf '%s' "$out" | grep -q 'already filed as #8 (closed)' \
+grep -q 'already filed as #8 (closed)' <<<"$out" \
     && ok "an explicit fingerprint dedups across different titles, and reports the closed one" \
     || bad "the explicit-fingerprint dedup did not fire: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-90)"
 
 # A missing body is refused rather than filing a titled-but-empty issue.
 out=$(MAINTAINER_POST=on firun --title 'x'); rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -qi 'body' \
+[ "$rc" != 0 ] && grep -qi 'body' <<<"$out" \
     && ok "a finding with no body is refused" || bad "file-issue filed an issue with no body"
 
 # Wrong identity refuses rather than filing under the wrong name.
 make_stub gh "case \"\$*\" in *'issue list'*) echo '[]';; *'api user'*) echo somebodyelse;; *'auth switch'*) exit 0;; esac"
 out=$(MAINTAINER_POST=on firun --title 'y' --body 'b'); rc=$?
-[ "$rc" != 0 ] && printf '%s' "$out" | grep -q 'refusing to file' \
+[ "$rc" != 0 ] && grep -q 'refusing to file' <<<"$out" \
     && ok "file-issue refuses to post under the wrong gh identity" \
     || bad "file-issue filed under an unverified identity: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-80)"
 
@@ -3563,12 +4067,45 @@ out=$(bash -c '
     backend_run /dev/null opus /dev/null /tmp >/dev/null 2>&1
     echo "MAX_THINKING_TOKENS=$MAX_THINKING_TOKENS"
     echo "CLAUDE_CODE_SUBAGENT_MODEL=$CLAUDE_CODE_SUBAGENT_MODEL"' 2>&1)
-printf '%s' "$out" | grep -q 'CLAUDE_CODE_SUBAGENT_MODEL=sonnet' \
+grep -q 'CLAUDE_CODE_SUBAGENT_MODEL=sonnet' <<<"$out" \
     && ok "SUBAGENT_MODEL_review reaches the process as sonnet" \
     || bad "the subagent model never reached the environment: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
-printf '%s' "$out" | grep -q 'MAX_THINKING_TOKENS=31999' \
+grep -q 'MAX_THINKING_TOKENS=31999' <<<"$out" \
     && ok "and the main loop keeps its own budget" \
     || bad "the thinking budget was lost"
+
+echo "== published text is written AS the maintainer, not about them =="
+# 2026-09-09. Five sysknife pull request reviews posted under vladimirrott went
+# out in the first person and then referred to Vladimir in the THIRD person in
+# the same paragraph: "so it needs a person. Vladimir approves it.", "Vladimir
+# has the report and the exact commands.", "Vladimir has to run four commands".
+# Read from a contributor's side that says the account is being written by
+# somebody who is not its owner, which is the disclosure the rule above forbids,
+# arrived at sideways.
+#
+# The preamble said whose name is on the comment. It never said to write as
+# them. Reviews go out through `gh pr review --body-file` and never pass through
+# this tool, so the control is the doctrine and the review skill; there is no
+# wall that can see a pronoun.
+pc2="$root/lib/preamble-core.md"
+grep -qi 'first person' "$pc2" \
+    && ok "the doctrine says published text is written in the first person" \
+    || bad "nothing tells the agent to write as the maintainer rather than about them"
+grep -qi 'third person' "$pc2" \
+    && ok "and names the third-person slip it is forbidding" \
+    || bad "the rule does not name the mistake it prevents"
+# Driven through the real assembly, so a rule that never reaches a prompt fails.
+pv_settings="$stub_dir/personvoice.json"
+printf '{"permissions":{"deny":[]}}\n' > "$pv_settings"
+pv="$(MAINTAINER_SETTINGS="$pv_settings" bash "$root/lib/run.sh" --show-prompt sysknife review 2>&1)"
+grep -qi 'first person' <<<"$pv" \
+    && ok "and the rule reaches the assembled prompt" \
+    || bad "the voice rule is in a file the prompt never carries"
+# The substitution must not hand the agent its own maintainer's name as the
+# thing to write, which is how the third person got there in the first place.
+grep -q '__MAINTAINER__' "$pc2" \
+    && ok "the doctrine still uses the placeholder rather than a hardcoded name" \
+    || bad "a maintainer's name is hardcoded into the shared doctrine"
 
 echo "== a subagent finding is a lead, and the doctrine says so =="
 # The env var alone would make the agent WORSE: fan-out produces findings that
@@ -3637,7 +4174,7 @@ probe="$stub_dir/skipprobe.sh"
   printf 'noenv "a deliberate skip"\n'
   sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' "$root/tests/run-tests.sh"; } > "$probe"
 out=$(bash "$probe" 2>&1)
-printf '%s' "$out" | grep -qE '0 passed, 0 failed, 1 skipped' \
+grep -qE '0 passed, 0 failed, 1 skipped' <<<"$out" \
     && ok "and the summary line names the skipped count" \
     || bad "a skipped case left no trace in the summary: $(printf '%s' "$out" | tail -1)"
 
@@ -3670,7 +4207,7 @@ out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$forge" MAINTAINER_ACCOUNT=testus
       bash "$mg" merge 9 2>&1); rc=$?
 [ "$rc" != 0 ] && ok "an unreadable check list refuses the merge" \
     || bad "the gate merged on a check list it could not read"
-printf '%s' "$out" | grep -qE 'could not read the check list|not a number' \
+grep -qE 'could not read the check list|not a number' <<<"$out" \
     && ok "and it names the check list rather than reporting a blank count" \
     || bad "the refusal blamed something else: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
 
