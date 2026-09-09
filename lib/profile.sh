@@ -63,6 +63,70 @@ maintainer_load_profile() {
 
 # Find lib/profile.sh from a tool in bin/, whether running from a checkout or
 # from the deployed tree.
+# Remove a literal secret from every text file under the given paths.
+#
+# run.sh exports the pinned token for the whole run on purpose: it is what makes
+# every gh call in the run, the agent's included, act as one account. The token
+# being REACHABLE is the design. The token OUTLIVING the run is the defect, and
+# on 2026-09-09 it did, twice. The magent issues run wrote
+#
+#     echo "GH_TOKEN set? ${GH_TOKEN:+yes}${GH_TOKEN:-no}"
+#
+# and the `:-` arm expands to the value when the variable is set, so the live
+# PAT printed into the session transcript and stayed on disk. Its own report
+# caught it. No deny rule can enumerate the commands that print an environment
+# variable, so the guard is on the way out rather than on the way in.
+#
+# The secret travels in the environment, never in argv, because argv is readable
+# from /proc by anything running as this user.
+maintainer_scrub_secret() {
+    local secret="${1:-}"
+    shift 2>/dev/null || true
+    # A short or empty needle matches nearly everywhere, and a scrubber that
+    # accepts one rewrites every file it walks. That is a worse day than the
+    # leak it was meant to clean up, so refuse rather than guess.
+    [ "${#secret}" -ge 16 ] || return 1
+    [ "$#" -gt 0 ] || return 1
+    MAINTAINER_SCRUB_NEEDLE="$secret" python3 - "$@" <<'SCRUBPY'
+import os, sys
+needle = os.environ.get("MAINTAINER_SCRUB_NEEDLE", "")
+if len(needle) < 16:
+    sys.exit(1)
+raw = needle.encode()
+mask = b"REDACTED_BY_MAINTAINER_ROTATE_THIS_SECRET"
+changed = []
+def scrub(path):
+    try:
+        data = open(path, "rb").read()
+    except OSError:
+        return
+    if raw not in data:
+        return
+    # A NUL byte means a disk image or an object file, and a byte-length change
+    # there corrupts the container. Report it and leave it alone: the fix for
+    # those is rotating the secret, not editing the file.
+    if b"\x00" in data:
+        changed.append(f"{path}  BINARY, not modified: rotate the secret")
+        return
+    try:
+        open(path, "wb").write(data.replace(raw, mask))
+    except OSError:
+        return
+    changed.append(path)
+for target in sys.argv[1:]:
+    if os.path.isfile(target):
+        scrub(target)
+        continue
+    for root, dirs, files in os.walk(target):
+        dirs[:] = [d for d in dirs if d not in (".git", "node_modules", "target", "ctargets")]
+        for name in files:
+            scrub(os.path.join(root, name))
+for c in changed:
+    print(f"scrubbed the pinned token from {c}")
+sys.exit(0 if changed else 0)
+SCRUBPY
+}
+
 # Which backend failures fix themselves, and which do not.
 #
 # 2026-09-07T20-34-issues stopped on "You've hit your session limit, resets

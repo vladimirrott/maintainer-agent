@@ -1989,3 +1989,44 @@ is deliberately absent from that list, because no retry pays an invoice, and so
 is an unreadable log. A classifier that calls everything transient silences the
 alerts it exists to raise, which is a worse failure than the popups it removes.
 Seven tests, four of them proving it stays silent.
+
+## 70. `${GH_TOKEN:-no}` prints the token
+
+The magent issues run of 2026-09-09 checked whether it had inherited a token:
+
+```sh
+echo "GH_TOKEN set? ${GH_TOKEN:+yes}${GH_TOKEN:-no}"
+```
+
+`:+` is the one that substitutes a fixed word. `:-` substitutes the **value**
+when the variable is set and non-empty, so the second half printed the live
+personal access token. The run caught it in its own report, and the value had
+already reached the session transcript on disk. A sweep found it in two of them,
+from two separate runs, and in three VM overlay images, all local and all
+untracked.
+
+The comment above the pinning block in `lib/run.sh` said the token "stays in
+this process's environment and is never written to disk". That was a claim about
+how the agent would behave, sitting where a property of the design should be. No
+deny rule can enumerate the commands that print an environment variable, and the
+run was doing something reasonable: asking whether a variable was set.
+
+**Guard:** `maintainer_scrub_secret` in `lib/profile.sh` removes a literal secret
+from every text file under the paths it is given, and `run.sh` installs it as an
+`EXIT` trap the moment the token is pinned. Every exit path passes through it,
+the refusals and the transient 75 included. It scrubs the state directory and
+the CLI's session directory, which the Claude CLI names after the working
+directory with each `/` and `.` turned into `-`.
+
+Three refusals in it are the part worth keeping. A secret shorter than sixteen
+characters is refused, because a short needle matches nearly everywhere and a
+scrubber that rewrites every file it walks is a worse day than the leak. A file
+containing a NUL byte is reported and left alone, since editing a disk image to
+remove a credential corrupts the image and rotating the credential does not. And
+the secret reaches the helper through the environment rather than argv, which
+anything running as this user can read out of `/proc`.
+
+`maintainer-doctor` looks for the same thing from the other end and goes red
+naming the file, because a trap that stops firing is invisible otherwise. Proved
+both directions: planting the live token in `logs/` turns the check red, the
+scrubber names the file it cleaned, and the next run is green.

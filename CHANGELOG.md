@@ -19,6 +19,18 @@ middle digit.
   The roster is derived from merged pull requests minus everyone holding
   something, bots and the maintainer dropped, with days since each last merge.
 
+### Security
+
+- **The pinned token no longer outlives the run that used it.** On 2026-09-09 a
+  run wrote `echo "GH_TOKEN set? ${GH_TOKEN:+yes}${GH_TOKEN:-no}"`, and the `:-`
+  arm expands to the value, so the live PAT printed and stayed in the session
+  transcript on disk. `maintainer_scrub_secret` removes a literal secret from
+  every text file under the paths it is given, and `run.sh` installs it as an
+  `EXIT` trap the moment the token is pinned, so every exit path passes through
+  it. It refuses a secret under sixteen characters, and it reports a file
+  containing a NUL byte rather than rewriting it. `maintainer-doctor` goes red
+  naming any file where a token was left behind.
+
 ### Fixed
 
 - **A backend that stopped on a model usage window no longer raises three
