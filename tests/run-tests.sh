@@ -3183,6 +3183,125 @@ grep -qE 'free to offer:[^\n]*#41' <<<"$out" \
 grep -qE 'free to offer:[^\n]*#42' <<<"$out" \
     && ok "an issue with no pull request at all stays free" \
     || bad "the free pool collapsed"
+
+
+echo "== somebody who claimed an issue themselves is holding it =="
+# The person side of the #371 bug. `offers` derived "who holds something" from
+# maintainer @mentions alone, so a contributor who wrote "I'll take this",
+# received the claim label and the assignment, and opened a pull request, never
+# appeared in the table at all. The table's own footer says an absent person is
+# an eligible one, so the tool positively recommended double-booking the person
+# it had just correctly refused to double-book on the issue side.
+#
+# Measured on sysknife 2026-09-09: @sonalisrisivani held #371 by assignment and
+# by open PR #379, and `maintainer offers` printed seventeen people, none of
+# them her.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo '[{"author":{"login":"carla"}},{"author":{"login":"carla"}},{"author":{"login":"veteran"}},{"author":{"login":"veteran"}},{"author":{"login":"owner"}},{"author":{"login":"app/dependabot"}}]';;
+  *'pr list'*) echo '[{"number":88,"author":{"login":"carla"},"title":"fix","body":"Closes #40"}]';;
+  *'issue list'*) echo '[{"number":40,"labels":[{"name":"claimed"}],"assignees":[{"login":"carla"}]},{"number":43,"labels":[],"assignees":[{"login":"selfclaim"}]},{"number":44,"labels":[],"assignees":[]}]';;
+  *issues/40/comments*) echo '[{"u":"carla","b":"I will take this one"}]';;
+  *issues/43/comments*) echo '[{"u":"selfclaim","b":"mine"}]';;
+  *issues/44/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -qE '^carla ' <<<"$out" \
+    && ok "a contributor holding an issue by their own pull request is listed as holding it" \
+    || bad "somebody with an open PR against an issue reads as eligible: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+grep -qE '^carla .*#40' <<<"$out" \
+    && ok "and the table names the issue they are on" \
+    || bad "carla is listed with no issue against her name"
+grep -qE '^selfclaim ' <<<"$out" \
+    && ok "an assignee with no maintainer mention is holding it too" \
+    || bad "a self-claimed assignment leaves the person invisible"
+grep -qE 'free to offer:[^\n]*#43' <<<"$out" \
+    && bad "an assigned issue was offered to somebody else" \
+    || ok "an assigned issue is not free"
+grep -qE 'free to offer:[^\n]*#44' <<<"$out" \
+    && ok "an issue nobody holds is still free" \
+    || bad "the free pool collapsed once assignees were counted"
+
+echo "== the table names who IS eligible, not only who is not =="
+# Absence is not an answer a reader can act on. On 2026-09-09 this table listed
+# seventeen blocked people and was read, by me, as "zero eligible contributors",
+# and that went to the user as a finding. @Georgefifth had five merged pull
+# requests, the most recent merged the previous day, and held nothing at all. He
+# was eligible and warm, and the only evidence of it was a name that was not
+# printed.
+grep -qE '^(eligible|[0-9]+ (person|people) (are|is) free)' <<<"$out" \
+    && ok "offers names the people who can take one" \
+    || bad "the tool still asks the reader to notice an absence"
+grep -qE 'veteran' <<<"$out" \
+    && ok "a past contributor holding nothing is named" \
+    || bad "veteran has two merged PRs and holds nothing, and is not named"
+grep -qE '^owner |eligible.*owner' <<<"$out" \
+    && bad "the maintainer's own account is offered work" \
+    || ok "the maintainer is not in their own eligible list"
+grep -qE 'dependabot' <<<"$out" \
+    && bad "a bot is listed as an eligible contributor" \
+    || ok "bots are not people"
+
+echo "== an unreadable merged listing refuses rather than reporting nobody =="
+# MISTAKES rule 6. "I could not ask" and "nobody is eligible" are the same empty
+# list, and the second is the one that reads as permission to stop looking.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo 'gh: rate limited' >&2; exit 1;;
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":50,"labels":[],"assignees":[]}]';;
+  *issues/50/comments*) echo '[]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -qiE 'could not read the merged' <<<"$out" \
+    && ok "an unreadable merged listing says so instead of printing an empty roster" \
+    || bad "a rate limit reads as nobody having ever contributed"
+
+echo "== an assignment to somebody else retires an older mention =="
+# sysknife #331, live on 2026-09-09. @ITSMERNB was offered it on 09-01 and
+# answered "I will verify the gate wiring path first". On 09-06 it was offered
+# to @be-student, who took it, got the assignment and opened PR #377. `offers`
+# still printed "ITSMERNB  no: working on #331", so a contributor with five
+# merged pull requests was held out of the eligible pool by an issue that had
+# been handed to somebody else four days earlier.
+#
+# GitHub's assignee is the tiebreak, because it is the field the project uses to
+# say out loud who has it.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo '[{"author":{"login":"first"},"mergedAt":"2026-09-08T00:00:00Z"}]';;
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":60,"labels":[{"name":"claimed"}],"assignees":[{"login":"second"}]}]';;
+  *issues/60/comments*) echo '[{"u":"owner","b":"@first this one is yours"},{"u":"first","b":"looking"},{"u":"owner","b":"@second holding this for you"},{"u":"second","b":"taking it"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -qE '^second .*#60' <<<"$out" \
+    && ok "the assignee is reported as holding the issue" \
+    || bad "the person GitHub says owns it is not listed"
+grep -qE '^first ' <<<"$out" \
+    && bad "an earlier mention still holds an issue assigned to somebody else: $(grep -E '^first ' <<<"$out")" \
+    || ok "an earlier mention is retired by a later assignment to somebody else"
+grep -qE 'free to take one' <<<"$out" \
+    && ok "and the person it freed is offered back to the reader" \
+    || bad "freeing the person did not put them in the eligible list"
+grep -qE '#60 .*(superseded|reassigned|assigned to)' <<<"$out" \
+    && ok "the retirement is stated, not silent" \
+    || bad "a hold disappeared with no line saying why"
 # Could not ask is not an answer. With the listing unreadable the free list must
 # say it is unverified rather than silently claim every issue is offerable.
 cat > "$stub_dir/gh" <<'GHEOF'

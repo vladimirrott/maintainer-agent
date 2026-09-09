@@ -1913,3 +1913,43 @@ things that were not under test. The suite now exports `MAINTAINER_REPO_ORIGIN`
 pointing at a bare repository it creates, so a case added later cannot
 reintroduce it by forgetting. Suite wall clock went from about four minutes to
 29 seconds.
+
+## 68. A table of who is blocked is not a list of who is free
+
+`maintainer offers` printed seventeen people, each beside the issue that blocks
+them, under a footer saying somebody who holds nothing does not appear at all. I
+read that as zero eligible contributors and reported it.
+
+@Georgefifth had five merged pull requests, the most recent merged the previous
+day, and held nothing. He was the warmest name on the tracker, and the only
+evidence of it was a name the tool never printed.
+
+Absence carried two meanings at once. @sonalisrisivani held #371 by assignment
+and by open pull request #379, and she was just as absent, because `offers`
+derived every hold from maintainer `@mentions` alone. The same blank meant
+"free" for one person and "invisible" for the other. On the issue side the tool
+already knew better: it kept #371 out of the free list because a pull request
+closes it, then showed the author of that pull request as available. Half the
+fix had landed a week earlier and the other half was never written.
+
+A third case sat between them. @ITSMERNB was offered #331 on 09-01 and answered
+it. On 09-06 the issue went to @be-student, who took the assignment and opened
+PR #377. `offers` still printed `ITSMERNB  no: working on #331`, so somebody
+with five merged pull requests sat out of the pool for three days over an issue
+that was no longer his.
+
+**Guard:** a hold now comes from three places, and the assignee wins. The
+maintainer pointed you at it, GitHub says it is assigned to you, or you have a
+pull request open against it. An assignment to somebody else retires an older
+mention and prints the reason, because a hold that disappears with no line
+explaining it reads the same as a hold the tool failed to see. The roster of
+available people is derived rather than inferred: everyone with a merged pull
+request, minus everyone holding something, minus bots and the maintainer, each
+with days since their last merge, because an offer to somebody quiet for five
+days has converted 0 for 5 here. An unreadable merged listing refuses instead of
+printing an empty roster. Fourteen tests, seven of which failed against the
+shipped version.
+
+An issue assigned to the maintainer stopped being offered as free in the same
+change. sysknife #392, a release checklist with the owner's own name on it, was
+in the free-to-offer list every time this ran.

@@ -10,6 +10,33 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`maintainer offers` names who is free.** It listed only blocked people under
+  a footer saying an absent name is an available one, and on 2026-09-09 that read
+  as "zero eligible contributors" to the person running it. @Georgefifth had five
+  merged pull requests, the most recent merged the day before, and held nothing.
+  The roster is derived from merged pull requests minus everyone holding
+  something, bots and the maintainer dropped, with days since each last merge.
+
+### Fixed
+
+- **A hold is read from three places, not one.** `offers` derived every hold from
+  maintainer `@mentions`, so a contributor who claimed an issue themselves was
+  invisible. @sonalisrisivani held sysknife #371 by assignment and by open PR
+  #379 and appeared nowhere in a seventeen-name table, while the same tool
+  correctly kept #371 out of the free list. GitHub's assignee and an open pull
+  request now count as well.
+- **An assignment to somebody else retires an older mention**, and the line
+  saying so is printed. @ITSMERNB was offered sysknife #331, answered, and four
+  days later it was handed to @be-student, who took the assignment and opened the
+  pull request. `offers` kept reporting ITSMERNB as working on it for three days.
+- **An issue assigned to the maintainer is no longer offered as free.** sysknife
+  #392 is a release checklist carrying the owner's own name and it was in the
+  free-to-offer list on every run.
+- **An unreadable merged listing refuses** rather than printing an empty roster,
+  which would read as nobody having ever contributed.
+
 ## [0.5.0] — 2026-09-07
 
 Most of this release came from using the agent rather than reading it. Four of
