@@ -3418,7 +3418,9 @@ case "\$*" in
   # The gate asks \`maintainer holders\` before it looks at the label. These
   # cases measure the LABEL path, so the thread says nobody was pointed here.
   *issues/355/comments*) echo '[]';;
-  *'issue view'*labels*) echo $1;;
+  # gh --jq prints NOTHING for a JSON null, and an index when the label is
+  # present. Echoing the literal "null" is a shape gh never produces.
+  *'issue view'*labels*) [ "$1" = null ] || echo $1;;
   # The gate reads an assignee list and a list of commenter logins now. The old
   # stub answered both with an index, which modelled "is the author present"
   # and could not express WHO else was, which is the question that matters.
@@ -3709,6 +3711,21 @@ broken_read_refuses() {  # $1 = case pattern, $2 = what it is
         bad "an unreadable $2 let the claim check run on nothing: $(printf '%s' "$o" | tr '\n' ' ' | cut -c1-80)"
     fi
 }
+# The regression this pair exists to prevent. `gh --jq` prints NOTHING for a
+# JSON null, so "this issue does not carry the claim label" arrives as an empty
+# string with rc=0. Hardening the read to refuse on empty turned the ordinary
+# case into a hard refusal and blocked every merge whose closed issue is
+# unlabelled, which is most of them. Measured against the live tracker:
+# `[.labels[].name]|index("claimed")` gave [] for #396 and [3] for #336.
+cl_gh null claimant
+out="$(cl_merge)"
+grep -q 'could not read its labels' <<<"$out" \
+    && bad "an unlabelled issue is refused as unreadable, which blocks most merges" \
+    || ok "an issue without the claim label is not mistaken for an unreadable one"
+grep -q 'carries the .* label' <<<"$out" \
+    && bad "the claim branch ran on an issue that has no claim label" \
+    || ok "and the claim branch is skipped for it"
+
 broken_read_refuses "*closingIssuesReferences*"   "list of issues the PR closes"
 broken_read_refuses "*'pr view'*author*"          "pull request author"
 broken_read_refuses "*'issue view'*labels*"       "claim label"

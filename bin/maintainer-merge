@@ -660,7 +660,7 @@ PYEOF
             local lbl lrc=0
             lbl="$(gh issue view "$iss" --repo "$REPO_SLUG" --json labels \
                    --jq '[.labels[].name]|index("'"$claim_label"'")' 2>&1)" || lrc=$?
-            if [ "$lrc" -ne 0 ] || [ -z "$lbl" ]; then
+            if [ "$lrc" -ne 0 ]; then
                 die "#$pr closes #$iss and I could not read its labels:
 
   $lbl
@@ -668,7 +668,14 @@ PYEOF
   The '$claim_label' label is how this project records that somebody was
   promised an issue, so a merge decided without reading it is decided blind."
             fi
-            [ "$lbl" = null ] && continue
+            # An EMPTY answer here means the label is absent, not that the read
+            # failed. `gh --jq` prints nothing for a JSON null and an index when
+            # the label is present: measured against the live tracker,
+            # `[.labels[].name]|index("claimed")` gives "" for an unlabelled
+            # issue and "3" for a labelled one. Treating empty as unreadable
+            # refused every merge whose closed issue carries no claim label,
+            # which is most of them. rc is the only signal for "could not ask".
+            case "$lbl" in ""|null) continue ;; esac
             # An assignment is the strongest record of who was promised this,
             # so when one exists the author has to be in it. The check here used
             # to be "has the author ever posted on the issue", which let a
