@@ -430,8 +430,29 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
     local clean_log="$work/clean.log" mut_log="$work/mutated.log"
     say "running '$filter' unmutated"
     run_in_container "$clean_log"; local clean_rc=$?
-    [ "$clean_rc" = 0 ] || die "the test does not pass unmutated (rc=$clean_rc); nothing to prove yet
+    if [ "$clean_rc" != 0 ]; then
+        # Three times this gate could not run and reported the contributor as
+        # failing: an image with no python3, an image with no git, and /tmp
+        # mounted noexec. Each arrived as "the test does not pass unmutated",
+        # which reads as "your test is broken" to somebody who did nothing
+        # wrong, and is the most expensive sentence this tool can say.
+        #
+        # These shapes are the suite environment, never the pull request. A test
+        # that genuinely fails prints its own assertion; it does not report a
+        # missing interpreter.
+        if looks_environmental "$clean_log"; then
+            die "the unmutated test failed on my suite environment, not the pull request.
+
+$(tail -5 "$clean_log" | sed 's/^/    /')
+
+  That is a missing binary or an unexecutable path inside the verify
+  container, so it says nothing about #$pr. Fix the suite in
+  profiles/*/verify.d/ (suite_image, suite_needs, the mount flags) and run
+  this again. Do NOT report the contributor as failing their own test."
+        fi
+        die "the test does not pass unmutated (rc=$clean_rc); nothing to prove yet
 $(tail -5 "$clean_log" | sed 's/^/    /')"
+    fi
 
     # A filter that matches nothing "passes". Without this the gate can write a
     # receipt having executed zero tests: the clean run passes vacuously, and a
@@ -491,6 +512,17 @@ cmd_show() {
     return 0
 }
 
+# Does this log describe the gate's own environment rather than the code?
+#
+# Deliberately short and specific to the shapes observed, because a classifier
+# that calls everything environmental would excuse a real failure. A missing
+# interpreter, an unexecutable script and a wrong-architecture binary are the
+# three that have actually happened here.
+looks_environmental() {
+    grep -qaiE 'command not found|: not found$|permission denied|cannot execute|exec format error' \
+        "$1" 2>/dev/null
+}
+
 cmd_merge() {
     local pr="${1:?pr}"
     pr="$(pr_or_die "$pr")" || exit 1
@@ -498,6 +530,16 @@ cmd_merge() {
   whether production code moved since the receipt. Set it in profile.env, for example:
     PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
     identity
+
+    # One merge per pull request, enforced rather than remembered. On
+    # 2026-09-10 five background shells watched one merge and two of them would
+    # each have run this; GitHub serialised them by luck. MISTAKES rule 9 calls
+    # that luck rather than design, so this is the design.
+    mkdir -p "$RECEIPTS"
+    exec 200>"$RECEIPTS/.merge-$pr.lock" || die "cannot open the merge lock for #$pr"
+    flock -n 200 || die "another merge of #$pr is already running in this state directory.
+  One watcher per action. If you are sure nothing else is merging, remove
+  $RECEIPTS/.merge-$pr.lock and try again."
 
     local receipt="$RECEIPTS/$pr.json"
     [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
@@ -806,6 +848,13 @@ $(printf '%s' "$diff" | sed 's/^/    /')
     gh pr merge "$pr" --repo "$REPO_SLUG" --squash --delete-branch \
         --match-head-commit "$head" || die "merge failed"
     say "merged #$pr"
+    # Three pull requests on 2026-09-10 declared no closing keyword, so merging
+    # them landed the work and left the issue open. Nothing said so, and the
+    # issues were only closed because somebody happened to look.
+    if [ -z "$closes" ]; then
+        say "#$pr closes no issue, so nothing was closed by this merge."
+        say "  If it resolves one, close it by hand and say which commit did it."
+    fi
     rm -f "$receipt"
 }
 

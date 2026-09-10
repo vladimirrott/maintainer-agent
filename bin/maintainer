@@ -998,6 +998,9 @@ def cmd_offers() -> None:
     # evening against an issue already closed. The double-booked check could
     # not see it, because it only counts offers nobody has answered.
     contention_on: dict = {}
+    # Issues where one maintainer comment named several people and GitHub has no
+    # assignee to settle who actually holds it.
+    ambiguous_on: dict = {}
     # Mentions retired by a later assignment to somebody else. Named rather than
     # dropped: a hold that vanishes with no line saying why is indistinguishable
     # from a hold the tool failed to see.
@@ -1035,11 +1038,24 @@ def cmd_offers() -> None:
         # never misread. The last maintainer comment mentioning a person decides
         # their state on that issue.
         mentioned = {}
+        # One comment naming two people is prose, not two offers. Offering
+        # sysknife#406 to @ITSMERNB I wrote "I offered it to @be-student, who
+        # took it and opened #377", about a different issue, and both handles
+        # were recorded as holding #406. The assignee happened to settle it
+        # there; on an unassigned issue nothing would have, and the tool would
+        # have reported a double-booking that never existed.
+        #
+        # Intent is not parseable out of a sentence, so this says it cannot tell
+        # rather than guessing. Only when GitHub has no assignee to settle it.
+        crowded = 0
         for c in comments:
             if c["u"] != owner:
                 continue
             body = c["b"] or ""
-            for m in _gh_mentions(body):
+            here = _gh_mentions(body)
+            if len(here) > 1 and RELEASE_MARKER not in body:
+                crowded = max(crowded, len(here))
+            for m in here:
                 mentioned[m] = RELEASE_MARKER not in body
         # Everyone the maintainer ever pointed here, released or not. A person
         # who was released is a case somebody already resolved out loud, so
@@ -1071,6 +1087,8 @@ def cmd_offers() -> None:
         # request open against it.
         assigned = {a.get("login") for a in (i.get("assignees") or []) if a.get("login")}
         assigned.discard(owner)
+        if crowded > 1 and not assigned:
+            ambiguous_on[i["number"]] = crowded
         # An assignment to somebody else retires an older mention. sysknife #331
         # on 2026-09-09: @ITSMERNB was offered it on 09-01 and answered, it was
         # handed to @be-student on 09-06 who took the assignment and opened PR
@@ -1151,6 +1169,13 @@ def cmd_offers() -> None:
     # merged the day before, and held nothing; the only evidence of it was a
     # name that was not printed. A reader cannot notice the absence of a name
     # they have to already know.
+    if ambiguous_on:
+        print()
+        for n, k in sorted(ambiguous_on.items()):
+            print(f"AMBIGUOUS #{n}: one comment names {k} people and nobody is assigned, "
+                  "so who holds it cannot be read from the thread.")
+        print("Assign whoever has it, or say so in a comment naming only them.")
+
     if superseded_on:
         print()
         for n, (owners, gone) in sorted(superseded_on.items()):

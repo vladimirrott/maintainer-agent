@@ -2094,3 +2094,84 @@ so somebody re-hardening this later reads why before changing it.
 The pattern underneath all three: a sandbox tuned against the tests that existed
 when it was written. Every new test is a chance for it to be wrong, and the
 failure always looks like the contributor's fault.
+
+## 73. Say which side failed, because the gate has been wrong three times
+
+Lessons 62, 71 and 72 are the same failure with three different causes: an image
+with no python3, an image with no git, and `/tmp` mounted `noexec`. Every one of
+them reached the contributor as:
+
+```
+maintainer-merge: the test does not pass unmutated (rc=1); nothing to prove yet
+```
+
+That sentence reads as "your test is broken" to somebody who did nothing wrong,
+and it is the most expensive thing this tool can say. Three times is not bad
+luck, it is a missing distinction: nothing in the gate could tell "your code
+failed" from "my container could not run it".
+
+**Guard:** `looks_environmental` reads the clean-run log and, on a missing
+interpreter, an unexecutable path or a wrong-architecture binary, the refusal
+changes to *"the unmutated test failed on my suite environment, not the pull
+request"*, points at `profiles/*/verify.d/`, and says in words not to report the
+contributor as failing.
+
+The classifier is deliberately short. A version that called everything
+environmental would excuse a real failure, which is the worse error, so it lists
+only the shapes that have actually happened.
+
+Proved in a container rather than by reading: a fixture whose test invokes a
+binary the image does not carry now produces the environment message and does
+not produce the old one. Both directions are asserted, because the three
+previous versions all contained the right words somewhere and still said the
+wrong thing.
+
+## 74. The stub directory disarmed the lock I was testing
+
+Two background shells nearly merged one pull request twice on 2026-09-10, so the
+merge took a `flock`. The test reported **two merges of one pull request both
+proceeded** and I spent a while reading a lock that was working perfectly.
+
+`tests/run-tests.sh` line 50 is `make_stub flock 'exit 0'`. Every case that runs
+with `$stub_dir` on `PATH` gets a `flock` that takes nothing and returns success,
+so the gate's lock always looked free. The file already carried a comment saying
+this, on a different block, written the last time it bit.
+
+This is the permissive-stub shape from earlier in this project: a `podman` stub
+left in the shared directory made a real test two hundred cases later report a
+receipt it never earned. A shared stub directory is global state, and a stub
+that always succeeds is a mock of the thing you are trying to prove.
+
+**Guard:** the case symlinks the real `flock` into a directory ahead of
+`$stub_dir`, so the gh stub is still reached and the lock is real. Putting
+`/usr/bin` in front instead pulls in the real `gh` and the refusal becomes an
+identity error, which is a different test failing for a different reason and
+took another pass to see.
+
+Three assertions now, not one. The holder proves it actually took the lock
+before the second call runs, the second call is refused and names the concurrent
+merge, and the lock is free again once the holder releases. Without the first,
+the other two pass when nothing was ever held.
+
+The holder releases on a sentinel file rather than a timer, because killing a
+subshell that is sleeping leaves the `sleep` child holding the descriptor and
+the lock outlives the kill.
+
+## 75. Two things that merged and then went quiet
+
+**A merge that closes nothing said nothing.** Three pull requests on 2026-09-10
+declared no closing keyword, so merging them landed the work and left the issue
+open. Nothing reported it, and #238 was closed by hand only because somebody
+happened to look at the tracker afterwards. The gate already reads
+`closingIssuesReferences` for its claim check; it just never said the list was
+empty. It does now, at merge, naming what to do about it.
+
+**A receipt outlived its merge.** sysknife#399 was `BEHIND` and its fork forbade
+the branch update, so it merged outside the gate and the receipt was never
+consumed. It then sat in `receipts/` describing shipped work while
+`maintainer-doctor` counted it as open. Telling "still in flight" from "already
+landed" is the only thing a receipt exists to do, so doctor now asks GitHub for
+each receipt's pull request state and names any that already merged.
+
+Both are small. Both were found by using the tool for a day rather than by
+reading it, which is the only way either would have surfaced.
