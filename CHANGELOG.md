@@ -12,6 +12,25 @@ middle digit.
 
 ### Added
 
+- **The merge gate says which side failed.** A clean run that dies on a missing
+  interpreter, an unexecutable path or a wrong-architecture binary now reports
+  *"the unmutated test failed on my suite environment, not the pull request"*
+  and points at `profiles/*/verify.d/`. Three times the gate could not run and
+  told the contributor their test was broken: an image with no python3, an image
+  with no git, and `/tmp` mounted `noexec`.
+- **One merge per pull request, enforced by `flock`.** Five background shells
+  watched one merge on 2026-09-10 and two of them would each have run it.
+  GitHub serialised them by luck.
+- **A merge that closes no issue says so.** Three pull requests that day declared
+  no closing keyword, landed their work, and left the issue open with nothing
+  reporting it.
+- **`maintainer-doctor` names a receipt whose pull request already merged.** One
+  merged outside the gate and its receipt sat in `receipts/` describing shipped
+  work, counted as open.
+
+
+### Added
+
 - **`maintainer offers` names who is free.** It listed only blocked people under
   a footer saying an absent name is an available one, and on 2026-09-09 that read
   as "zero eligible contributors" to the person running it. @Georgefifth had five

@@ -268,6 +268,26 @@ if [ -z "$st" ]; then
     red "the profile names no STATE_DIR" "set it in profiles/$profile/profile.env"
 elif [ -d "$st" ]; then
     green "$(ls "$st/runs" 2>/dev/null | wc -l) run report(s), $(ls "$st/receipts" 2>/dev/null | wc -l) open receipt(s)"
+    # A receipt whose pull request already merged is not open, it is stale.
+    # sysknife#399 merged outside the gate, because it was BEHIND and its fork
+    # forbade the branch update, so `gh pr merge --admin` landed it and the gate
+    # never consumed the receipt. It then sat there describing shipped work,
+    # counted above as though something were still in flight. Telling those two
+    # apart is the only thing a receipt is for.
+    _stale=""
+    for _r in "$st"/receipts/*.json; do
+        [ -e "$_r" ] || continue
+        _rp="$(basename "$_r" .json)"
+        case "$_rp" in ''|*[!0-9]*) continue ;; esac
+        _state="$(gh pr view "$_rp" --repo "${REPO_SLUG:-}" --json state --jq .state 2>/dev/null)" || continue
+        case "$_state" in MERGED|CLOSED) _stale="$_stale $_rp ($_state)" ;; esac
+    done
+    if [ -n "$_stale" ]; then
+        yellow "receipt(s) for an already merged pull request:$_stale" \
+            "rm $st/receipts/<pr>.json once you have checked the work really landed"
+    else
+        green "no receipt outlives its pull request"
+    fi
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
     # A pinned token that outlived the run that used it. run.sh scrubs on exit,
     # so anything found here was written by a build older than that trap, by a

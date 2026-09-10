@@ -4525,6 +4525,185 @@ grep -qE 'could not read the check list|not a number' <<<"$out" \
     && ok "and it names the check list rather than reporting a blank count" \
     || bad "the refusal blamed something else: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
 
+echo "== a receipt for an already-merged pull request is stale, not open =="
+# sysknife#399 was merged outside the gate (BEHIND, and its fork forbade the
+# branch update), so `gh pr merge --admin` landed it and the gate never consumed
+# its receipt. The receipt then sat in receipts/ describing work that had already
+# shipped, and doctor counted it as open. I removed it by hand after noticing.
+# A receipt that outlives its merge is indistinguishable from one guarding work
+# still in flight, which is the only thing receipts exist to tell apart.
+grep -qE 'already merged|merged pull request|stale receipt' "$root/bin/maintainer-doctor" \
+    && ok "doctor can tell an open receipt from one whose pull request already merged" \
+    || bad "doctor counts a receipt for merged work as though the work were pending"
+
+echo "== a clean run that fails on the environment does not blame the pull request =="
+# Three times now the gate could not run and reported the contributor as failing:
+# an image with no python3 (sysknife#386), an image with no git (sysknife#410),
+# and /tmp mounted noexec (sysknife#410 again). Each surfaced as
+#   maintainer-merge: the test does not pass unmutated (rc=1)
+# which reads as "your test is broken" and is the most expensive sentence this
+# tool can say to somebody who did nothing wrong.
+envlog="$stub_dir/envfail"; mkdir -p "$envlog"
+printf 'running the suite\n/repo/check.sh: line 3: git: command not found\n' > "$envlog/a.log"
+printf 'bash: /tmp/tmp.XyZ/stub.sh: Permission denied\n' > "$envlog/b.log"
+printf 'FAIL: the guard did not fire\nassertion failed\n' > "$envlog/c.log"
+grep -q 'looks_environmental\|environment_hint' "$mg" \
+    && ok "maintainer-merge has a way to tell an environment failure from a test failure" \
+    || bad "nothing distinguishes 'your test failed' from 'my container lacks a binary'"
+# The message the contributor would read.
+grep -qE 'suite environment|not the pull request|my (container|image)' "$mg" \
+    && ok "and it says the failure is the gate's environment, not the contributor" \
+    || bad "the refusal still reads as though the pull request failed"
+# And behaviourally, in a real container, because the three times this happened
+# the grep-able words were all present and the message was still wrong.
+if [ -n "$rt" ]; then
+    er="$stub_dir/envrepo"; rm -rf "$er"; mkdir -p "$er"
+    git -C "$er" init -q -b main; git -C "$er" config user.email t@t; git -C "$er" config user.name t
+    # A test that invokes a binary the suite image does not carry. This is
+    # sysknife#410's `git init` fixture in miniature.
+    printf '#!/usr/bin/env bash\nset -e\ndefinitely-not-a-real-binary --version\necho "guard held"\n' \
+        > "$er/check.sh"
+    git -C "$er" add -A; git -C "$er" commit -qm base
+    ehead="$(git -C "$er" rev-parse HEAD)"
+    git -C "$er" update-ref "refs/pull/43/head" "$ehead"
+    git -C "$er" remote add origin "$er"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo check.sh;;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/estate" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$er" PROFILE_DIR="$root/profiles/sysknife" \
+          bash "$mg" verify 43 "$ehead" check.sh 's/guard held/guard gone/' shell 2>&1)
+    grep -qiE 'my suite environment|not the pull request' <<<"$out" \
+        && ok "a missing binary in the suite image is reported as the gate's problem" \
+        || bad "the gate blamed the contributor for its own missing binary: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-110)"
+    grep -qi 'does not pass unmutated' <<<"$out" \
+        && bad "it still leads with 'the test does not pass unmutated', which reads as the PR failing" \
+        || ok "and it does not lead with the sentence that reads as the contributor failing"
+    grep -qiE 'verify\.d|suite_image|suite_needs' <<<"$out" \
+        && ok "and it points at the suite definition, which is where the fix goes" \
+        || bad "the message does not say where to fix it"
+else
+    ok "no container runtime here, so the environment-failure case is not exercised (skipped)"
+fi
+
+echo "== the merge says when it closed no issue =="
+# Three of QinXi-ai's four pull requests on 2026-09-10 declared no closing
+# keyword, so merging them left #238 and #239 open with the work already landed.
+# I closed #238 by hand after noticing. The gate reads closingIssuesReferences
+# already; it just never said the list was empty.
+mnothing="$stub_dir/mnothing"; rm -rf "$mnothing"; mkdir -p "$mnothing"
+mnrepo="$stub_dir/mnrepo"; rm -rf "$mnrepo"; mkdir -p "$mnrepo"
+git -C "$mnrepo" init -q -b main
+git -C "$mnrepo" config user.email t@t; git -C "$mnrepo" config user.name t
+printf 'x\n' > "$mnrepo/thing.txt"; git -C "$mnrepo" add -A; git -C "$mnrepo" commit -qm base
+mnhead="$(git -C "$mnrepo" rev-parse HEAD)"
+git -C "$mnrepo" update-ref refs/pull/9/head "$mnhead"
+git -C "$mnrepo" remote add origin "$mnrepo"
+make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *closingIssuesReferences*) echo '';;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $mnhead;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) echo '[]';;
+      *'pr view'*'files'*) echo 'thing.txt';;
+      *'pr merge'*) exit 0;;
+    esac"
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$mnothing" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$mnrepo" \
+    bash "$mg" receipt 9 "$mnhead" 'proved' >/dev/null 2>&1
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$mnothing" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO="$mnrepo" PROD_GLOBS="bin/*" \
+      bash "$mg" merge 9 2>&1)
+grep -qiE 'closes no issue|closed no issue|no issue was closed' <<<"$out" \
+    && ok "a merge that closes nothing says so, so the issue is not left open by accident" \
+    || bad "the gate merged silently and nothing warned that no issue closes: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+
+echo "== two merges of one pull request cannot both run =="
+# On 2026-09-10 I left five background shells watching one merge and two of them
+# would each have run `maintainer-merge merge 415`. GitHub serialised the last
+# duplicate pair by luck, which MISTAKES rule 9 already calls luck rather than
+# design. One watcher per action is a habit; a lock is a mechanism.
+mlock="$stub_dir/mlock"; rm -rf "$mlock"; mkdir -p "$mlock"
+grep -qE 'flock' "$mg" \
+    && ok "the merge takes a lock rather than trusting one caller at a time" \
+    || bad "nothing stops two concurrent merges of the same pull request"
+# And behaviourally, because a grep for `flock` proves the word is present, not
+# that a second caller is stopped.
+#
+# This needs the REAL flock. $stub_dir carries `make_stub flock 'exit 0'` from
+# the top of this file, which returns success without taking anything, so the
+# gate's lock always appears free and the case cannot happen. The first version
+# of this test ran under that stub, reported "two merges both proceeded", and
+# the lock it was accusing was working perfectly. Same shape as the permissive
+# podman stub that once manufactured a receipt two hundred cases later.
+# One directory holding only the real flock, ahead of $stub_dir. Putting
+# /usr/bin ahead instead pulls in the real gh and the refusal becomes an
+# identity error, which is a different test failing for a different reason.
+lkbin="$stub_dir/lkbin"; rm -rf "$lkbin"; mkdir -p "$lkbin"
+ln -sf "$(PATH=/usr/local/bin:/usr/bin:/bin command -v flock)" "$lkbin/flock"
+lkrepo="$stub_dir/lkrepo"; rm -rf "$lkrepo"; mkdir -p "$lkrepo"
+git -C "$lkrepo" init -q -b main
+git -C "$lkrepo" config user.email t@t; git -C "$lkrepo" config user.name t
+printf 'x\n' > "$lkrepo/thing.txt"; git -C "$lkrepo" add -A; git -C "$lkrepo" commit -qm base
+lkhead="$(git -C "$lkrepo" rev-parse HEAD)"
+git -C "$lkrepo" update-ref refs/pull/9/head "$lkhead"
+git -C "$lkrepo" remote add origin "$lkrepo"
+make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *closingIssuesReferences*) echo '';;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo $lkhead;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) echo '[]';;
+      *'pr view'*'files'*) echo 'thing.txt';;
+      *'pr merge'*) exit 0;;
+    esac"
+PATH="$stub_dir:$PATH" MAINTAINER_STATE="$mlock" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$lkrepo" \
+    bash "$mg" receipt 9 "$lkhead" 'proved' >/dev/null 2>&1
+mkdir -p "$mlock/receipts"
+# Hold the lock the way a first merge would, then try a second. Waiting on the
+# condition rather than on a fixed sleep: the first version of this test slept
+# one second, the merge took longer than the holder's lifetime, and the test
+# reported the lock as broken when the lock was fine.
+# Releases on a sentinel rather than a timer: killing a subshell that is
+# sleeping leaves the sleep child holding the descriptor, so the lock outlives
+# the kill and the "it is free again" assertion fails for the wrong reason.
+( if flock -n 201 2>/dev/null; then
+      touch "$mlock/held"
+      while [ ! -e "$mlock/release" ]; do sleep 0.1; done
+  else touch "$mlock/nolock"; fi ) 201>"$mlock/receipts/.merge-9.lock" &
+lkpid=$!
+lkwait=0
+until [ -e "$mlock/held" ] || [ "$lkwait" -ge 100 ]; do sleep 0.1; lkwait=$((lkwait+1)); done
+until [ -e "$mlock/held" ] || [ -e "$mlock/nolock" ] || [ "$lkwait" -ge 100 ]; do sleep 0.1; lkwait=$((lkwait+1)); done
+[ -e "$mlock/held" ] && ok "the first holder really took the lock before the second call ran" \
+    || bad "the holder did not get the lock (nolock=$([ -e "$mlock/nolock" ] && echo yes || echo no)), so the next assertion would be vacuous"
+# /usr/bin ahead of $stub_dir so the real flock wins; the gh stub is still
+# reached because $stub_dir stays on the path behind it.
+out=$(PATH="$lkbin:$stub_dir:$PATH" MAINTAINER_STATE="$mlock" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO="$lkrepo" PROD_GLOBS="bin/*" \
+      bash "$mg" merge 9 2>&1); lrc=$?
+[ "$lrc" != 0 ] && ok "a second merge of the same pull request is refused while the first holds the lock" \
+    || bad "two merges of one pull request both proceeded"
+grep -qiE 'already running|merge lock' <<<"$out" \
+    && ok "and the refusal names the concurrent merge rather than something else" \
+    || bad "the refusal blamed something else: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
+touch "$mlock/release"; wait "$lkpid" 2>/dev/null
+# With the lock free again the same call gets past it, so the lock is what
+# stopped it rather than the stub.
+out=$(PATH="$lkbin:$stub_dir:$PATH" MAINTAINER_STATE="$mlock" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO="$lkrepo" PROD_GLOBS="bin/*" \
+      bash "$mg" merge 9 2>&1)
+grep -qiE 'already running' <<<"$out" \
+    && bad "the lock stayed held after the first caller exited" \
+    || ok "and once the first caller exits the lock is free again"
+
 echo "== the merge is pinned to the head that was checked =="
 grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
     || bad "a push landing mid-merge would be merged unchecked"
