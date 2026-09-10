@@ -31,6 +31,11 @@ while read -r d; do
     printf '%s  ALERT %s: %s\n' "$(date -Is)" "$instance" "$msg" >> "$d/logs/alerts.log"
 done < <(printf '%s\n' $dirs)
 
+# The trail above is written either way; only the popup is optional. A headless
+# host has nobody to show it to, and the same switch turns run.sh's notifier off,
+# so one setting covers both rather than one of them surprising somebody.
+if [ "${MAINTAINER_NOTIFY:-on}" = off ]; then exit 0; fi
+
 DISPLAY="${DISPLAY:-:1}" \
 DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
 notify-send -u critical -a maintainer "maintainer · ${instance} · FAILED" \

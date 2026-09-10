@@ -44,6 +44,11 @@ export MAINTAINER_RECEIPT_KEY="$stub_dir/receipt.key"
 head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$MAINTAINER_RECEIPT_KEY"
 trap 'rm -rf "$stub_dir"' EXIT
 make_stub() { printf '#!/usr/bin/env bash\n%s\n' "$2" > "$stub_dir/$1"; chmod +x "$stub_dir/$1"; }
+# No case may reach the real desktop. The notify-send stub below only helps a
+# case whose PATH includes $stub_dir, and two of them deliberately build a
+# minimal PATH without it, which is how this suite spent 2026-09-10 firing
+# critical popups about a gh stub at whoever was using the machine.
+export MAINTAINER_NOTIFY=off
 make_stub notify-send 'exit 0'
 make_stub claude 'echo "claude stub invoked" >&2; exit 0'
 make_stub codex  'echo "codex stub invoked" >&2; exit 0'
@@ -487,6 +492,62 @@ grep -q 'issues/5679' <<<"$out" \
 rm -f "$stub_dir/gh"
 
 
+echo "== the test suite cannot reach the real desktop notifier =="
+# Reported with a screenshot on 2026-09-10: a critical toast reading
+#   maintainer · sysknife review · FAILED
+#   gh is authenticated as 'someone-else', not vladimirrott; refusing to run.
+#   See /tmp/tmp.ZBwRBxn8fL/racehome/logs/2026-09-10T10-14-review.log
+# That is not a run. `someone-else` is this file's gh stub and `racehome` is a
+# fixture under $stub_dir, so every single execution of this suite fired a real
+# critical popup at whoever was sitting in front of the machine. Two blocks
+# build a minimal PATH ($rbin) that deliberately excludes $stub_dir, and the
+# notify-send stub lives in $stub_dir, so the real /usr/bin/notify-send won.
+#
+# A stub in $rbin would fix those two and the next minimal-PATH block would
+# bring it back. This is the second toast complaint in one session, so the
+# pattern changes rather than the site.
+grep -qE '^export MAINTAINER_NOTIFY=off' "$root/tests/run-tests.sh" \
+    && ok "the suite turns notifications off for the whole process" \
+    || bad "nothing stops a case with a minimal PATH from reaching the real notifier"
+grep -q 'MAINTAINER_NOTIFY' "$root/lib/run.sh" \
+    && ok "and run.sh honours it" \
+    || bad "run.sh notifies regardless of what the caller asked for"
+# systemd's OnFailure handler is a second notifier, and lesson 66 is that one
+# failure firing two popups is how somebody learns to dismiss both.
+grep -q 'MAINTAINER_NOTIFY' "$root/platform/linux/alert.sh" \
+    && ok "and so does the systemd OnFailure alert, so one setting covers both" \
+    || bad "alert.sh still pops a critical toast on a host that asked for none"
+# The audit trail is not optional. Turning the popup off must not turn off the
+# record of what failed.
+grep -q 'alerts.log' "$root/platform/linux/alert.sh" \
+    && ok "and the alert trail is written before the popup is even considered" \
+    || bad "the switch could silence the record as well as the desktop"
+
+# Behaviourally, in both directions, because a switch that silences everything
+# would be worse than the popups: the timers are supposed to notify.
+ntf="$stub_dir/notifyhome"; rm -rf "$ntf"; mkdir -p "$ntf/state"
+git init -q -b main "$ntf/repo"
+cat > "$stub_dir/notify-send" <<'NEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NOTIFY_LOG"
+NEOF
+chmod +x "$stub_dir/notify-send"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
+: > "$ntf/off.log"
+NOTIFY_LOG="$ntf/off.log" PATH="$stub_dir:$PATH" HOME="$ntf" MAINTAINER_NOTIFY=off \
+    MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$ntf/state" \
+    MAINTAINER_REPO_PATH="$ntf/repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+[ ! -s "$ntf/off.log" ] && ok "with notifications off a refusing run reaches no desktop" \
+    || bad "MAINTAINER_NOTIFY=off still fired: $(head -1 "$ntf/off.log")"
+: > "$ntf/on.log"
+NOTIFY_LOG="$ntf/on.log" PATH="$stub_dir:$PATH" HOME="$ntf" MAINTAINER_NOTIFY=on \
+    MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$ntf/state" \
+    MAINTAINER_REPO_PATH="$ntf/repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+[ -s "$ntf/on.log" ] && ok "and with it unset the same run still notifies, so the timers keep working" \
+    || bad "notifications are off by default now, which silences the unattended runs"
+
 echo "== a failure that retries itself does not raise a critical alert =="
 # Reported 2026-09-09: constant critical toasts from the magent timers. Six unit
 # failures on 2026-09-08 produced up to twelve, because each one alerts twice:
@@ -509,7 +570,7 @@ NEOF
 chmod +x "$stub_dir/notify-send"
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo 'error connecting to api.github.com' >&2; exit 1;; esac"
 : > "$tn/notify.log"
-out=$(NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+out=$(NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=on \
       MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
       MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
       bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
@@ -534,7 +595,7 @@ MEOF
 chmod +x "$tn/.local/bin/maintainer"
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo 'error connecting to api.github.com' >&2; exit 1;; esac"
 : > "$tn/marker.log"; : > "$tn/notify.log"
-MARKER_LOG="$tn/marker.log" NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+MARKER_LOG="$tn/marker.log" NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=on \
     MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
     MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
@@ -548,7 +609,7 @@ grep -q 'could not reach GitHub' "$tn/marker.log" \
 # somebody else's name on this account and no retry fixes it.
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo someone-else;; esac"
 : > "$tn/notify.log"
-NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" \
+NOTIFY_LOG="$tn/notify.log" PATH="$stub_dir:$PATH" HOME="$tn" MAINTAINER_NOTIFY=on \
     MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tn_state" \
     MAINTAINER_REPO_PATH="$tn_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
     bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
