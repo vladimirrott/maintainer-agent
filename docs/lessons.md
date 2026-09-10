@@ -2062,3 +2062,35 @@ resolves, so the declaration and the image cannot drift apart in silence.
 
 The declaration is still hand-written, and that is the part still open. Nothing
 derives "what these scripts invoke" from the scripts.
+
+## 72. The gate's own hardening reported the contributor as failing
+
+sysknife#410 writes an "echoing scanner" stub into `mktemp -d`, makes it
+executable and runs it, to prove the real scanner never prints the credential it
+found. The verify container mounted `/tmp` with `noexec`, so the stub could not
+run, the assertion never fired, and the gate said:
+
+```
+maintainer-merge: the test does not pass unmutated (rc=1); nothing to prove yet
+    FAIL: the no-echo mutation did not make the assertion fail
+```
+
+The same test, same image, same tree, passes with `/tmp` exec-capable. Third
+time this gate could not run and blamed the pull request. The first was an image
+with no python3, the second an image with no git, and this one is a mount flag.
+
+`noexec` bought nothing. There is no network to fetch a payload with, and the
+suite command is the pull request's own code by design, so the PR can already
+execute whatever it likes. What the flag removed was the ordinary
+write-a-stub-and-run-it pattern that this repository's own suite and sysknife's
+both use.
+
+**Guard:** `nosuid` stays, and so do `--cap-drop=ALL`, `--read-only`,
+`--security-opt=no-new-privileges`, `--network=none` and the pids, memory and
+CPU limits, which are the isolation that actually holds. The test suite asserts
+each of those is still passed and that `/tmp` is not `noexec`, naming the reason,
+so somebody re-hardening this later reads why before changing it.
+
+The pattern underneath all three: a sandbox tuned against the tests that existed
+when it was written. Every new test is a chance for it to be wrong, and the
+failure always looks like the contributor's fault.

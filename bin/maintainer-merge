@@ -399,6 +399,18 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
         # would have counted as having run, and it was the first line matching
         # the failure grep, so the receipt for sysknife#365 recorded a CNI
         # warning where the observed failure belongs.
+        # /tmp is writable and exec-capable on purpose. sysknife#410 writes an
+        # "echoing scanner" stub into `mktemp -d`, chmod +x's it and runs it to
+        # prove the real scanner never prints the credential it found. Under
+        # `noexec` the stub could not run, the assertion never fired, and the
+        # gate reported the contributor as failing their own test. That is the
+        # third time this gate could not run and blamed the pull request.
+        #
+        # noexec bought nothing: there is no network to fetch a payload with,
+        # and the suite command is the pull request's own code by design, so the
+        # PR can already execute whatever it likes. nosuid stays, as do
+        # --cap-drop=ALL, --read-only, --security-opt=no-new-privileges and
+        # --network=none, which are the isolation that actually holds.
         # shellcheck disable=SC2046
         "$rt" --log-level=error run --rm \
             --timeout "${MAINTAINER_VERIFY_TIMEOUT:-1800}" \
@@ -406,7 +418,7 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --read-only \
-            --tmpfs /tmp:rw,noexec,nosuid,size=256m \
+            --tmpfs /tmp:rw,nosuid,size=256m \
             --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
             --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
             --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \

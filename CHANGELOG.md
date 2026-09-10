@@ -33,6 +33,12 @@ middle digit.
 
 ### Fixed
 
+- **The verify container no longer mounts `/tmp` `noexec`.** sysknife#410 writes
+  an executable stub into `mktemp -d` and runs it; under `noexec` the stub could
+  not run and the gate reported the contributor as failing their own test. Third
+  time this gate could not run and blamed the pull request. `nosuid`,
+  `--cap-drop=ALL`, `--read-only`, `--security-opt=no-new-privileges` and
+  `--network=none` all stay, and the test suite asserts each of them.
 - **The sysknife shell suite runs in an image that has git.** It sat in
   `python:3.12-slim`, which carries bash and python3 and no git, and declared
   `bash python3`. sysknife#410 added a release test that builds a throwaway

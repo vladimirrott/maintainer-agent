@@ -2556,6 +2556,39 @@ if [ -f "$_sh" ]; then
         || ok "the shell suite image is not a -slim variant that drops git"
 fi
 
+echo "== the verify container can run a script the test itself wrote =="
+# sysknife#410's release test writes an "echoing scanner" stub into mktemp -d,
+# chmod +x's it, and runs it to prove the real scanner never prints the
+# credential it found. The gate mounted /tmp with `noexec`, so the stub could
+# not run, the assertion never fired, and the gate reported:
+#
+#   maintainer-merge: the test does not pass unmutated (rc=1)
+#       FAIL: the no-echo mutation did not make the assertion fail
+#
+# The same test passes in the same image with the same tree when /tmp is not
+# noexec. That is lesson 62 for the third time: the gate could not run, and it
+# reported the contributor as failing.
+#
+# noexec buys nothing here. The container has no network, so nothing can be
+# fetched, and the suite command is the pull request's own code by design, so
+# the PR can already execute whatever it likes. What noexec removes is the
+# ordinary write-a-stub-and-run-it pattern that both this repo's suite and
+# sysknife's use.
+grep -q 'tmpfs /tmp' "$root/bin/maintainer-merge" \
+    && ok "the verify container gives the suite a writable /tmp" \
+    || bad "no tmpfs for /tmp, so a test that needs scratch space cannot run"
+grep -qE 'tmpfs /tmp:[^"]*noexec' "$root/bin/maintainer-merge" \
+    && bad "/tmp is mounted noexec, so a test that writes and runs a stub reports the contributor as failing" \
+    || ok "/tmp is executable, so a stub the test wrote can run"
+grep -qE 'tmpfs /tmp:[^"]*nosuid' "$root/bin/maintainer-merge" \
+    && ok "and /tmp is still nosuid" \
+    || bad "nosuid was dropped along with noexec"
+for _f in --cap-drop=ALL --security-opt=no-new-privileges --read-only --network=none; do
+    grep -q -- "$_f" "$root/bin/maintainer-merge" \
+        && ok "the verify container still passes $_f" \
+        || bad "$_f was dropped from the verify container"
+done
+
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
 # real pull request proved only that a badly chosen mutation is refused.
