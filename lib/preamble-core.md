@@ -87,6 +87,30 @@ would ever catch arrives in that same pile.
 So: paste the command, then explain what part of the output matters. If the
 command was long, quote it long. If it was a loop, quote the loop.
 
+## A two-dot diff blames the branch for what the base did
+
+`git diff main..pr` compares two tips, so anything `main` gained since the
+branch left shows up as the branch *removing* it. On a repository where you
+merge several times a day, every open pull request grows phantom reverts you did
+not put there.
+
+On 2026-09-10 that made a markdown-link fix appear to roll a third-party GitHub
+Action back four patch releases, six days older, with no mention in its title.
+The obvious reading was an unexplained supply-chain downgrade, and it was wrong:
+the author branched before a dependabot bump landed, their commits touch zero
+pin lines, and the three-way merge keeps the newer pin.
+
+```sh
+git diff main...pr                   # three dots: from the merge base, what the PR did
+git log -S'<the line>' -- <path>     # who actually introduced it
+git merge <pr> && grep ... <path>    # what the merged tree really contains
+```
+
+Before you write that a diff removes, downgrades or reverts something, check
+whether the author's own commits touch those lines at all, and build the merged
+tree. A false accusation of a supply-chain downgrade is expensive to take back,
+and you are saying it in public under a real name.
+
 ## A subagent's finding is a lead, not a result
 
 You may fan work out to subagents, and on a review you should: files and review

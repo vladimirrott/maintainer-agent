@@ -3214,6 +3214,38 @@ grep -qE 'DOUBLE-BOOKED.*#31' <<<"$out" \
     || bad "the collision does not name which issue is double-booked"
 
 
+echo "== one comment naming two people on an unassigned issue is ambiguous, not two offers =="
+# My own prose caused this. Offering sysknife#406 to @ITSMERNB I wrote "On 6
+# September I offered it to @be-student, who took it and opened #377", talking
+# about a DIFFERENT issue. `offers` read both handles as holders of #406 and
+# would have reported a double-booking. The assignee rule happened to mask it,
+# which is luck: on an unassigned issue nothing would have.
+#
+# Prose cannot be parsed for intent. Saying "I cannot tell" is honest and cheap;
+# recording a hold nobody made is neither.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo '[{"author":{"login":"vet"},"mergedAt":"2026-09-09T00:00:00Z"}]';;
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":70,"labels":[],"assignees":[]},{"number":71,"labels":[],"assignees":[{"login":"clear"}]}]';;
+  *issues/70/comments*) echo '[{"u":"owner","b":"@newbie this one is yours. I offered the last one to @veteran, who took it."}]';;
+  *issues/71/comments*) echo '[{"u":"owner","b":"@clear yours, and I mentioned @someone else here too"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -qiE 'AMBIGUOUS #70|cannot tell.*#70|#70.*two people' <<<"$out" \
+    && ok "one comment naming two people on an unassigned issue is reported as ambiguous" \
+    || bad "the tool silently recorded two holders from one sentence: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+# The assigned twin. #71 names two people too, but GitHub says who has it, so
+# there is nothing to be unsure about and no noise is worth printing.
+grep -qiE 'AMBIGUOUS #71' <<<"$out" \
+    && bad "an assigned issue was called ambiguous, which makes the warning noise" \
+    || ok "an assigned issue is not ambiguous, because the assignee settles it"
+
 echo "== an issue with an open pull request closing it is not free to offer =="
 # The 2026-09-07 20:09 issues run reported it in its own process notes:
 # "`maintainer offers` cannot see pull request threads ... #371 was printed as
@@ -4535,6 +4567,24 @@ echo "== a receipt for an already-merged pull request is stale, not open =="
 grep -qE 'already merged|merged pull request|stale receipt' "$root/bin/maintainer-doctor" \
     && ok "doctor can tell an open receipt from one whose pull request already merged" \
     || bad "doctor counts a receipt for merged work as though the work were pending"
+
+echo "== the preamble warns that a two-dot diff blames the branch for the base =="
+# On 2026-09-10 `git diff main..399` showed a markdown-link fix rolling a third
+# party GitHub Action back four patch releases, six days older, unmentioned in
+# its title. The supply-chain reading was the obvious one and it was wrong: the
+# author branched before a dependabot bump landed, their commits touch zero pin
+# lines, and the three-way merge keeps main's newer pin. I came close to saying
+# it out loud to a contributor.
+_pc="$root/lib/preamble-core.md"
+grep -q 'main\.\.\.' "$_pc" \
+    && ok "the preamble names the three-dot form for reading what a branch did" \
+    || bad "nothing tells a review which diff range answers 'what did this PR change'"
+grep -qiE 'two-dot|\.\.pr|blames the (branch|pull request)' "$_pc" \
+    && ok "and it names the two-dot trap rather than only the remedy" \
+    || bad "the preamble gives the right command without saying what goes wrong"
+grep -qiE 'merge base|merged tree|log -S' "$_pc" \
+    && ok "and it says how to confirm who introduced a line before accusing anyone" \
+    || bad "nothing says to check authorship before calling a diff a revert"
 
 echo "== a clean run that fails on the environment does not blame the pull request =="
 # Three times now the gate could not run and reported the contributor as failing:

@@ -24,6 +24,16 @@ middle digit.
 - **A merge that closes no issue says so.** Three pull requests that day declared
   no closing keyword, landed their work, and left the issue open with nothing
   reporting it.
+- **The preamble warns that `git diff main..pr` blames the branch for what the
+  base did.** A markdown-link fix appeared to roll a GitHub Action back four
+  patch releases; the author had branched before a dependabot bump and their
+  commits touch zero pin lines. The three-dot form, `git log -S` and the merged
+  tree are named, along with the reason: a false accusation of a supply-chain
+  downgrade is expensive to take back and it is made in public under a real name.
+- **`maintainer offers` calls one comment naming several people ambiguous.**
+  Offering an issue to one person while mentioning another in the same sentence
+  recorded both as holders. It now says it cannot tell, and only when GitHub has
+  no assignee to settle it.
 - **`maintainer-doctor` names a receipt whose pull request already merged.** One
   merged outside the gate and its receipt sat in `receipts/` describing shipped
   work, counted as open.
