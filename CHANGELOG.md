@@ -12,6 +12,13 @@ middle digit.
 
 ### Added
 
+- **`MAINTAINER_NOTIFY=off` silences the desktop popup without silencing the
+  record.** Honoured by `lib/run.sh` and `platform/linux/alert.sh`, and exported
+  once by the test suite. Every execution of the offline suite had been raising
+  three real critical alerts reading *"gh is authenticated as 'someone-else'"*,
+  which is one of its own stubs: two cases build a minimal `PATH` that excludes
+  the `notify-send` stub, so the real notifier won. A headless host wants this
+  setting for its own sake; the alert trail is written before it is consulted.
 - **The merge gate says which side failed.** A clean run that dies on a missing
   interpreter, an unexecutable path or a wrong-architecture binary now reports
   *"the unmutated test failed on my suite environment, not the pull request"*

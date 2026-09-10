@@ -163,6 +163,13 @@ export PATH="$HOME/.local/bin:$HOME/.cargo/bin:$PATH"
 # its width on an absolute path. And there was no notification at all for a run
 # that SUCCEEDED, so the only time this agent spoke to its owner was to complain.
 notify() {  # $1 = urgency, $2 = title, $3.. = body lines
+    # A headless host has nobody to tell, and the test suite must never reach a
+    # real desktop. On 2026-09-10 every execution of tests/run-tests.sh fired a
+    # critical popup reading "gh is authenticated as 'someone-else'", which is a
+    # stub in that suite: two cases build a minimal PATH that excludes the
+    # notify-send stub, so /usr/bin/notify-send won. Fixing those two sites
+    # would leave the next minimal-PATH case free to do it again.
+    [ "${MAINTAINER_NOTIFY:-on}" = off ] && return 0
     local urgency="$1" title="$2"; shift 2
     local body; body="$(printf '%s\n' "$@")"
     DISPLAY="$(session_display)" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u)/bus" \

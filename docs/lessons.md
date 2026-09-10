@@ -2175,3 +2175,56 @@ each receipt's pull request state and names any that already merged.
 
 Both are small. Both were found by using the tool for a day rather than by
 reading it, which is the only way either would have surfaced.
+
+## 76. The test suite fired sixty critical popups at the person using the machine
+
+Reported with a screenshot:
+
+```
+maintainer · sysknife review · FAILED
+gh is authenticated as 'someone-else', not vladimirrott; refusing to run.
+See /tmp/tmp.ZBwRBxn8fL/racehome/logs/2026-09-10T10-14-review.log
+```
+
+That is not a run. `someone-else` is a gh stub in `tests/run-tests.sh` and
+`racehome` is a fixture directory under `$stub_dir`. Every execution of the
+offline suite reached the real `/usr/bin/notify-send` and raised three critical
+desktop alerts. I ran the suite about twenty times that day.
+
+The suite does stub `notify-send`, in `$stub_dir`. Two cases deliberately build
+a minimal `PATH` that excludes `$stub_dir`, for good reasons written in their own
+comments: one needs the real `flock`, and both want a run that reaches past the
+identity gate to fail locally rather than touch the network. The stub was never
+on their path, so the real notifier won.
+
+Adding a stub to those two directories would have fixed those two and left the
+next minimal-`PATH` case free to do it again. This was the second toast
+complaint in one session, and the first one I answered by looking at timers.
+
+**Guard:** `MAINTAINER_NOTIFY=off` is honoured by `lib/run.sh` and by
+`platform/linux/alert.sh`, and the suite exports it once for the whole process,
+where no later case can miss it. It is a real setting rather than a test
+backdoor: a headless host has nobody to show a popup to and wants exactly this.
+The alert trail is written before the switch is consulted, so turning off the
+desktop never turns off the record.
+
+Three cases assert on notifications and now opt back in with
+`MAINTAINER_NOTIFY=on`, which is the honest shape: a test about notifications
+should have to ask for them.
+
+Proved by mutation rather than by reading. A recorder placed ahead of the real
+notifier on `PATH`, across a whole suite run:
+
+```
+with the guard:     0 desktop notifications reached
+guard commented out: 3, the first reading
+  -u critical -a maintainer maintainer · sysknife review · FAILED
+  gh is authenticated as 'someone-else', not vladimirrott ...
+```
+
+byte for byte the toast in the screenshot.
+
+One of the assertions I wrote for this passed while the bug was still live,
+because it grepped for `MAINTAINER_NOTIFY=off` and matched its own test body.
+Lesson 5 in this file is "a check must not match its own source", and it caught
+me writing the check that lesson exists to prevent.
