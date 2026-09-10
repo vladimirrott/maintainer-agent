@@ -33,6 +33,15 @@ middle digit.
 
 ### Fixed
 
+- **The sysknife shell suite runs in an image that has git.** It sat in
+  `python:3.12-slim`, which carries bash and python3 and no git, and declared
+  `bash python3`. sysknife#410 added a release test that builds a throwaway
+  repository to prove the pre-commit secret scanner fails closed, and the gate
+  would have run it, watched git fail, and reported the contributor as failing
+  their own test. Second time this suite's image was picked for what the scripts
+  needed that day: `bash:5` carried no python3 when sysknife#386 started driving
+  a python script. The suite now declares `bash python3 git`, and the test suite
+  refuses a `-slim` image for it by name.
 - **A backend that stopped on a model usage window no longer raises three
   critical alerts.** `2026-09-07T20-34-issues` ended on "You've hit your session
   limit, resets 10:10pm": `run.sh` alerted for the backend exit, alerted again
