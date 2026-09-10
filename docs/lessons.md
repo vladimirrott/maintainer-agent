@@ -2030,3 +2030,35 @@ anything running as this user can read out of `/proc`.
 naming the file, because a trap that stops firing is invisible otherwise. Proved
 both directions: planting the live token in `logs/` turns the check red, the
 scrubber names the file it cleaned, and the next run is green.
+
+## 71. A verify image chosen for what the scripts needed that day
+
+sysknife#410 added a release test that runs `git init`, `git add` and
+`git update-index` to prove the pre-commit secret scanner fails closed. The
+shell suite's image was `python:3.12-slim`:
+
+```
+$ podman run --rm --network=none docker.io/library/python:3.12-slim \
+    sh -c 'for c in bash python3 git; do printf "%s=%s\n" "$c" "$(command -v $c || echo MISSING)"; done'
+bash=/usr/bin/bash
+python3=/usr/local/bin/python3
+git=MISSING
+```
+
+`suite_needs` said `bash python3`, so `maintainer-doctor` agreed the image was
+complete. The gate would have run the contributor's test, watched git fail, and
+reported the pull request as failing its own test. That is lesson 62 with a
+different missing binary.
+
+Twice now. `bash:5` carried no python3 when sysknife#386 made a release test
+drive a python script, and the fix then was to move to `python:3.12-slim`, which
+was chosen for what the scripts needed that day. A workaround applied twice
+means change the pattern.
+
+**Guard:** the suite declares `bash python3 git`, the image is `python:3.12`,
+and the test suite now refuses a `-slim` variant for this suite by name and says
+why. `maintainer-doctor` runs the image and checks each declared binary
+resolves, so the declaration and the image cannot drift apart in silence.
+
+The declaration is still hand-written, and that is the part still open. Nothing
+derives "what these scripts invoke" from the scripts.

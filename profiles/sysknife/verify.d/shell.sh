@@ -18,9 +18,17 @@ suite_covers() {
 # was also wrong on its own terms: bash:5 carries no git either, so the "bash,
 # git and nothing else" it claimed to provide was never provided.
 #
-# docs.sh in this directory already runs in python:3.12-slim, so this is the
-# same trust surface rather than a second one, and it carries bash 5.2.
-suite_image() { printf 'docker.io/library/python:3.12-slim'; }
+# The -slim variant carried bash and python3 and no git, and on 2026-09-10
+# sysknife#410 added a release test that does `git init`, `git add` and
+# `git update-index` to prove the pre-commit secret scanner fails closed. The
+# gate would have run that test, watched git fail, and reported the contributor
+# as failing their own test.
+#
+# That is the second time this suite's image was chosen for what the scripts
+# needed on the day it was written: bash:5 carried no python3 when sysknife#386
+# started driving a python script. python:3.12 carries bash 5.2, python3 and
+# git, and docs.sh shares the same base, so this is one trust surface, not two.
+suite_image() { printf 'docker.io/library/python:3.12'; }
 
 # What that image has to contain. maintainer-doctor runs the image and checks
 # each of these resolves, because nothing else ties the image to what the suite
@@ -30,8 +38,10 @@ suite_image() { printf 'docker.io/library/python:3.12-slim'; }
 # failing its own test rather than as itself being broken.
 #
 # bash for the scripts themselves, python3 because tests/e2e/story-metadata.test.sh
-# drives scripts/check_evidence_claims.py.
-suite_needs() { printf 'bash python3'; }
+# drives scripts/check_evidence_claims.py, git because tests/release/no-secrets.test.sh
+# builds a throwaway repository to exercise the --staged path the pre-commit
+# hook runs. maintainer-doctor runs the image and checks each one resolves.
+suite_needs() { printf 'bash python3 git'; }
 
 suite_mutate_glob() { printf '*.sh'; }
 

@@ -2524,6 +2524,38 @@ grep -q '"suite": suite' "$root/bin/maintainer-merge" \
     && ok "the receipt records which suite produced it" \
     || bad "a receipt does not say what verified it"
 
+echo "== a suite declares every binary the scripts it runs actually invoke =="
+# sysknife#410 added a test that does `git init`, `git add` and `git update-index`
+# to prove the pre-commit secret scanner fails closed. The shell suite's image is
+# python:3.12-slim, which carries bash and python3 and NO git, and suite_needs
+# said so: `bash python3`. The gate would have run the contributor's test,
+# watched git fail, and reported the pull request as failing its own test.
+#
+# That is lesson 62 exactly, and it has now happened twice: bash:5 carried no
+# python3 when sysknife#386 started driving a python script. The pattern is a
+# suite whose image is chosen for what the scripts needed on the day it was
+# written.
+for _s in "$root"/profiles/*/verify.d/*.sh; do
+    _p="$(basename "$(dirname "$(dirname "$_s")")")"
+    _n="$(basename "$_s" .sh)"
+    grep -q '^suite_needs()' "$_s" \
+        && ok "$_p/$_n declares what its image must contain" \
+        || bad "$_p/$_n has no suite_needs, so nothing ties the image to what it runs"
+done
+# The specific regression. The sysknife shell suite runs tests/release/*.test.sh
+# and .githooks/*, and those drive git.
+_sh="$root/profiles/sysknife/verify.d/shell.sh"
+if [ -f "$_sh" ]; then
+    _needs="$(sed -n 's/^suite_needs() *{ *printf *.\([^\x27"]*\).*/\1/p' "$_sh")"
+    grep -qw git <<<"$_needs" \
+        && ok "the sysknife shell suite declares git, which its release tests drive" \
+        || bad "shell suite needs '$_needs' and no git, while tests/release drive git"
+    _img="$(sed -n 's/^suite_image() *{ *printf *.\([^\x27"]*\).*/\1/p' "$_sh")"
+    grep -q 'slim' <<<"$_img" \
+        && bad "the shell suite image is $_img, and every -slim python image ships without git" \
+        || ok "the shell suite image is not a -slim variant that drops git"
+fi
+
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
 # real pull request proved only that a badly chosen mutation is refused.
