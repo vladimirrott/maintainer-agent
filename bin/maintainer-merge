@@ -591,9 +591,29 @@ cmd_show() {
 # that calls everything environmental would excuse a real failure. A missing
 # interpreter, an unexecutable script and a wrong-architecture binary are the
 # three that have actually happened here.
+# Did the clean run fail because of the suite environment rather than the pull
+# request? Three shapes, all of them observed:
+#
+#   - the command is missing or unrunnable (python:3.12-slim had no git;
+#     /tmp was mounted noexec)
+#   - a dependency's build script cannot find a system library or tool
+#     (rust:1-slim has no pkg-config and no glib, so every workspace build that
+#     reaches the Tauri crate dies before a single test runs)
+#   - the toolchain cannot link at all
+#
+# Getting this wrong is expensive in a specific direction: the gate reports a
+# contributor as failing their own test, under my name, in public. That has
+# happened twice.
 looks_environmental() {
-    grep -qaiE 'command not found|: not found$|permission denied|cannot execute|exec format error' \
-        "$1" 2>/dev/null
+    # Built by concatenation. A backslash-newline inside single quotes is
+    # literal, so writing this as one wrapped string silently turns the
+    # alternation into a pattern that matches nothing.
+    local shapes='command not found|: not found$|permission denied'
+    shapes="$shapes|cannot execute|exec format error"
+    shapes="$shapes|could not find system library|pkg-config"
+    shapes="$shapes|failed to run custom build command"
+    shapes="$shapes|linker .?cc.? not found|error while loading shared libraries"
+    grep -qaiE "$shapes" "$1" 2>/dev/null
 }
 
 cmd_merge() {

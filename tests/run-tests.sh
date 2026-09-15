@@ -2650,6 +2650,45 @@ for _f in --cap-drop=ALL --security-opt=no-new-privileges --read-only --network=
         || bad "$_f was dropped from the verify container"
 done
 
+echo "== a clean run that dies on the environment is not the pull request's fault =="
+# Twice the gate has reported a contributor as failing their own test, in public
+# and under a real name, when the truth was that the verify image lacked
+# something: python:3.12-slim had no git, /tmp was mounted noexec. The third
+# instance was a dependency's build script, which the old pattern missed
+# entirely: rust:1-slim has no pkg-config and no glib, so a --workspace build
+# reaching the Tauri crate dies before a test runs.
+envlog="$stub_dir/envfail.log"
+cat > "$envlog" <<'LOG'
+The system library `glib-2.0` required by crate `glib-sys` was not found.
+The file `glib-2.0.pc` needs to be installed and the PKG_CONFIG_PATH environment
+variable must contain its parent directory.
+error: failed to run custom build command for `glib-sys v0.18.1`
+warning: build failed, waiting for other jobs to finish...
+LOG
+# shellcheck disable=SC1090
+( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
+    && ok "a missing system library reads as the suite environment" \
+    || bad "a dependency build failure is reported as the pull request failing its own test"
+for _shape in 'bash: git: command not found' \
+              '/tmp/x.sh: Permission denied' \
+              'error while loading shared libraries: libssl.so.3'; do
+    printf '%s\n' "$_shape" > "$envlog"
+    # shellcheck disable=SC1090
+    ( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
+        && ok "and so does: $_shape" \
+        || bad "an environmental failure was read as the pull request's: $_shape"
+done
+# The other direction matters more. A real failing assertion must stay the pull
+# request's, or the gate excuses every red run it cannot parse.
+cat > "$envlog" <<'LOG'
+test result: FAILED. 1 passed; 1 failed
+assertion `left == right` failed: GetAptPins: Ubuntu-only description must match
+LOG
+# shellcheck disable=SC1090
+( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
+    && bad "a failing assertion was excused as an environment problem" \
+    || ok "and a failing assertion is still the pull request's"
+
 echo "== coverage is required of production paths, which is what a receipt binds =="
 # Issue #19. Six of seven merges on 2026-09-10 fell back to an asserted receipt
 # for the same reason: the pull request touched .rs and .md, no single suite runs
