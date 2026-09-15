@@ -2321,3 +2321,47 @@ hour'` and asserts the exact figure, `14d`. The hour of margin is the point:
 without it, `floor(14d - ε)` is 13 whenever the two timestamps land on either
 side of a second, and a gate that fails at random teaches everyone to re-run
 until green.
+
+## 79. The suite image was the thing that failed, for the third time
+
+`maintainer-merge verify` runs the suite twice inside a container. When the
+clean run fails there is nothing to prove, and the gate has to decide whose
+fault that is. Getting it wrong is expensive in one specific direction: it
+reports a contributor as failing their own test, in public, under a real name.
+
+`looks_environmental` knew two shapes, both from earlier instances of this: a
+missing binary (`python:3.12-slim` had no `git`) and an unexecutable path
+(`/tmp` mounted `noexec`). The third shape is a dependency that cannot find what
+it links against, and the pattern missed it completely:
+
+```
+The system library `glib-2.0` required by crate `glib-sys` was not found.
+error: failed to run custom build command for `glib-sys v0.18.1`
+warning: build failed, waiting for other jobs to finish...
+
+maintainer-merge: the test does not pass unmutated (rc=101); nothing to prove yet
+```
+
+Nothing in that run touched the pull request's code. `cargo test --offline`
+builds every workspace member, sysknife's workspace includes the Tauri app, and
+`rust:1-slim` carries neither `pkg-config` nor `glib`.
+
+**Guard, in two parts.** `looks_environmental` now also matches
+`could not find system library`, `pkg-config`, `failed to run custom build
+command`, `linker cc not found` and `error while loading shared libraries`. Both
+directions are tested: four environmental shapes are caught, and a real
+`assertion left == right failed` is still the pull request's, because a gate
+that excuses every red run it cannot parse is worse than one that never
+excuses anything.
+
+The second part is the suite itself. Adding GTK to the image to compile a paused
+desktop app that nobody is changing is the wrong trade, so the sysknife rust
+suite excludes `sysknife-shell` and says in the file that a receipt from it
+proves nothing about that crate. CI still builds it, on a runner that has the
+libraries.
+
+Writing the pattern was its own small lesson. The first version wrapped the
+alternation across lines with a backslash inside single quotes, where a
+backslash-newline is **literal**, not a continuation. `bash -n` and `shellcheck`
+both passed and the regex matched nothing. It is built by concatenation now,
+and the test that proves it fires is what caught it.

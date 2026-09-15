@@ -33,6 +33,16 @@ middle digit.
 
 ### Fixed
 
+- **A clean run that dies on a missing system library is no longer the
+  contributor's fault.** `looks_environmental` knew about a missing binary and
+  an unexecutable path, and nothing about a dependency whose build script cannot
+  find what it links against. `rust:1-slim` carries neither `pkg-config` nor
+  `glib`, so a `--workspace` build reaching the Tauri crate died with
+  *"failed to run custom build command for `glib-sys`"* and the gate reported
+  *"the test does not pass unmutated"*, which reads as the pull request failing
+  its own test. Third instance of the suite image being the thing that failed.
+  The sysknife rust suite now excludes `sysknife-shell`, the paused desktop app
+  that pulls in glib, so the receipt covers the crates a contributor touches.
 - **The claims fixture no longer expires.** It wrote a comment date of
   `2026-08-24` and asserted the idle column matched `1[0-9]d`, so it passed for
   nine days and then failed on every machine, accusing `claims` of the bug it

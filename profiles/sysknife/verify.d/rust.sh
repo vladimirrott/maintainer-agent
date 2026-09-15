@@ -55,7 +55,25 @@ suite_podman_args() {
 }
 
 # $1 = the filter the caller passed.
-suite_command() { printf 'cargo test --offline %s\n' "$1"; }
+#
+# sysknife-shell is excluded. It is the Tauri app, its dependency tree reaches
+# glib-sys, and rust:1-slim carries neither pkg-config nor glib, so a plain
+# --workspace build dies in a build script before a single test runs:
+#
+#   The system library `glib-2.0` required by crate `glib-sys` was not found.
+#   error: failed to run custom build command for `glib-sys v0.18.1`
+#
+# That is the third time this suite's image has been the thing that failed, and
+# adding GTK to the image to compile a paused desktop app nobody is changing is
+# the wrong trade. GUI development is paused and apps/sysknife-shell is out of
+# scope for contributions; CI still builds it on a runner that has the
+# libraries. A receipt from this suite says nothing about that crate.
+#
+# The cost is worth stating: sysknife-shell is the sole consumer of several
+# items that look dead elsewhere in the workspace, so a pull request deleting
+# one of them can earn a receipt here and still break that crate. CI catches it;
+# the receipt does not. Read a deletion, do not merge it on the receipt alone.
+suite_command() { printf 'cargo test --offline --workspace --exclude sysknife-shell %s\n' "$1"; }
 
 # Print how many tests executed. Anything less than 1 refuses the receipt.
 suite_ran() {  # $1 = the clean log
