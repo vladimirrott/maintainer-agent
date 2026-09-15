@@ -2775,11 +2775,55 @@ out="$(u9run "packaging/*" packaging/thing README.md)"; rc=$?
     && ok "and an uncovered production path is refused" \
     || bad "a receipt was issued for production code nothing ran (returned '$out')"
 
-# With nothing production in the diff there is no narrower scope to fall back to.
+# A diff with NOTHING production in it is the same rule with the other sign.
+# sysknife#422 changes one test file, the evidence artifact the test count lives
+# in, and the three prose figures that have to move with it. No path is in
+# PROD_GLOBS, the rust suite runs the .rs and the json, the docs suite runs the
+# .md, and the gate refused to write any receipt at all:
+#
+#   no single suite covers every changed path:
+#       crates/sysknife-daemon/tests/action_reference_doc.rs   rust
+#       README.md                                              docs
+#
+# Issue #19's lesson is that the tool must not refuse to prove something on the
+# grounds that it cannot prove something it does not need. With zero production
+# paths that applies harder, not less: cmd_merge re-checks PROD_GLOBS and this
+# diff touches none of it, so there is nothing a narrower receipt fails to
+# speak for. The old `${#prod[@]} -gt 0` precondition switched the narrowing
+# off in exactly the case that needs it most.
+out="$(u9named rust "$pg" crates/x/tests/helper.rs README.md)"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = rust ] \
+    && ok "a named suite narrows a diff that touches no production path at all" \
+    || bad "pick_suite refused a named suite on a diff with no production path (rc=$rc, stdout='$out')"
+u9tail="$(sed -n '/not covered by the receipt/,$p' "$u9err")"
+grep -q 'README\.md' <<<"$u9tail" \
+    && ok "and still names the paths that receipt does not speak for" \
+    || bad "a narrower receipt was written with nothing saying it is narrower"
+
+# Inference stays refused here, on purpose. With a production path there is one
+# right answer: the suite that runs it. With none, rust covers the test file and
+# docs covers the prose, both qualify, and picking for the caller would write a
+# receipt about the claim screen when the change under review is test code.
+# Refusing and naming the candidates is the honest answer.
+out="$(u9run "$pg" crates/x/tests/helper.rs README.md)"; rc=$?
+[ "$rc" != 0 ] && grep -qE 'docs|rust' "$u9err" \
+    && ok "and an ambiguous diff refuses to guess a suite, naming the candidates" \
+    || bad "pick_suite guessed a suite with nothing to anchor the choice (returned '$out')"
+
+# The orphan rule is what stops that becoming a way through. This is the case
+# the assertion below used to cover by accident: it passed because nothing was
+# production, and it has to pass because notes.rst is a file no suite runs.
 out="$(u9run "$pg" README.md notes.rst)"; rc=$?
 [ "$rc" != 0 ] \
-    && ok "and a diff with no production path falls back to nothing" \
+    && ok "and a diff with no production path is still refused when a path is covered by nothing" \
     || bad "pick_suite invented a scope for a diff it cannot narrow (returned '$out')"
+
+# Narrowing must not become "any suite will do". The chosen suite has to run
+# something, or the receipt is about a file the pull request did not change.
+out="$(u9named docs "$pg" crates/x/tests/helper.rs)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and a suite that runs none of the changed paths is refused even with no production path" \
+    || bad "a suite bought a receipt for a diff it does not touch (returned '$out')"
 
 echo "== a receipt may be earned by several suites when no single one covers production =="
 # sysknife#429 changed crates/*/src/*.rs, packaging/*, Makefile and

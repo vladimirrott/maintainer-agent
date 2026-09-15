@@ -320,6 +320,65 @@ covers_production() {  # $1 = suite file, $2 = suite dir, $3... = changed paths
     return 0
 }
 
+# The same narrowing for a diff with NO production path in it at all.
+#
+# covers_production above needs at least one production path, because that is
+# what it narrows to. sysknife#422 has none: one test file, the evidence
+# artifact the test count lives in, and the three prose figures that must move
+# with it. The rust suite runs the .rs and the json, the docs suite runs the
+# .md, and the gate refused to write any receipt.
+#
+# Issue #19's lesson is not to refuse to prove something because of something
+# else it does not need, and with zero production paths that binds harder.
+# cmd_merge re-checks PROD_GLOBS and nothing in this diff is in it, so there is
+# no path a narrower receipt fails to speak for.
+#
+# Only for a suite the caller NAMED. With a production path there is one right
+# answer, the suite that runs it. With none there is no anchor: here rust runs
+# two of the paths and docs runs three, both would qualify, and choosing for the
+# caller would write a receipt about the claim screen when the change under
+# review is test code. pick_suite keeps refusing to guess and names the
+# candidates instead.
+covers_when_no_production() {  # $1 = suite file, $2 = suite dir, $3... = changed paths
+    local suite="$1" dir="$2"; shift 2
+    [ "${#PROD_GLOBS[@]}" -gt 0 ] || return 1
+    local p
+    # Strictly the no-production case. Anything production goes to
+    # covers_production, which holds the suite to every one of them.
+    for p in "$@"; do is_production "$p" && return 1; done
+    # An incomplete PROD_GLOBS must not become a way to smuggle an unknown file
+    # past the gate, so a path no suite covers at all still refuses. Same rule
+    # as covers_production, and the reason this is not simply "anything goes
+    # when nothing is production".
+    local q t any
+    for q in "$@"; do
+        any=0
+        for t in "$dir"/*.sh; do
+            [ -e "$t" ] || continue
+            # shellcheck disable=SC1090
+            ( . "$t"; suite_covers "$q" ) && { any=1; break; }
+        done
+        [ "$any" = 1 ] || return 1
+    done
+    local runs=0 unproven=() total=$#
+    for p in "$@"; do
+        # shellcheck disable=SC1090
+        if ( . "$suite"; suite_covers "$p" ); then runs=$((runs+1)); else unproven+=("$p"); fi
+    done
+    # The suite has to run something the pull request actually changed, or the
+    # receipt is about a file the diff never touched.
+    [ "$runs" -ge 1 ] || return 1
+    if [ "${#unproven[@]}" -gt 0 ]; then
+        printf '  nothing in this diff is in PROD_GLOBS, so no path here can invalidate\n' >&2
+        printf '  the receipt at merge. The %s suite runs %d of %d changed path(s); the\n' \
+            "$(basename "$suite" .sh)" "$runs" "$total" >&2
+        printf '  rest are not covered by the receipt and it proves nothing about them:\n' >&2
+        printf '    %s\n' "${unproven[@]}" >&2
+        printf '  CI still gates them.\n' >&2
+    fi
+    return 0
+}
+
 # Does the UNION of several suites cover every production path in a diff?
 #
 # covers_production above answers a narrower question: may THIS one suite write
@@ -442,6 +501,7 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
         # shellcheck disable=SC1090
         ( . "$dir/$named.sh"; for p in "$@"; do suite_covers "$p" || exit 1; done ) \
             || covers_production "$dir/$named.sh" "$dir" "$@" \
+            || covers_when_no_production "$dir/$named.sh" "$dir" "$@" \
             || die "the '$named' suite does not cover every changed path:
 $(coverage_map "$dir" "$@")
   A receipt from a suite that does not run the changed code proves nothing."
