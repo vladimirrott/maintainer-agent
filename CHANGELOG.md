@@ -33,6 +33,12 @@ middle digit.
 
 ### Fixed
 
+- **A verify run no longer takes the machine down with it.** Unbounded, cargo
+  takes one rustc per core, each holding around a gigabyte while it links. Two
+  verify runs of the sysknife workspace on one 12-core host went far enough into
+  swap that the supervisor killed both mid-build, so neither proved anything and
+  both left a multi-gigabyte target directory behind. `CARGO_BUILD_JOBS` is now
+  bounded at 4, overridable with `MAINTAINER_CARGO_JOBS`.
 - **A clean run that dies on a missing system library is no longer the
   contributor's fault.** `looks_environmental` knew about a missing binary and
   an unexecutable path, and nothing about a dependency whose build script cannot

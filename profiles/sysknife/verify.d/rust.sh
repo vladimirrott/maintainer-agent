@@ -48,10 +48,17 @@ suite_mutate_glob() { printf '*.rs'; }
 
 # Extra podman arguments. The cargo cache is mounted with :O so writes stay in
 # an overlay and never reach the host's ~/.cargo.
+# CARGO_BUILD_JOBS is bounded on purpose. Unbounded, cargo takes one rustc per
+# core, each holding around a gigabyte while it links, and two verify runs of
+# this workspace on one 16-core host put it far enough into swap that the
+# supervisor killed both mid-build. A verify that takes the machine down with it
+# proves nothing and costs the whole run. Raise it with MAINTAINER_CARGO_JOBS on
+# a bigger machine; CI is unaffected, this is the local gate only.
 suite_podman_args() {
     printf '%s\n' -v "$HOME/.cargo:/cargo:O" \
         -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
-        -e CARGO_NET_OFFLINE=true
+        -e CARGO_NET_OFFLINE=true \
+        -e "CARGO_BUILD_JOBS=${MAINTAINER_CARGO_JOBS:-4}"
 }
 
 # $1 = the filter the caller passed.
