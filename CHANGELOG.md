@@ -33,6 +33,12 @@ middle digit.
 
 ### Fixed
 
+- **One verify per pull request, the way one merge per pull request already
+  worked.** A hand-run `verify 426` and the unattended review timer's
+  `verify 426` ran side by side on one host: two full cargo builds of the same
+  workspace against two extracted trees. `cmd_merge` took a lock for this on
+  2026-09-10; `cmd_verify`, which builds twice and is the expensive half, did
+  not.
 - **A verify run no longer takes the machine down with it.** Unbounded, cargo
   takes one rustc per core, each holding around a gigabyte while it links. Two
   verify runs of the sysknife workspace on one 12-core host went far enough into
