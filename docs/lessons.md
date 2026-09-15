@@ -2404,3 +2404,91 @@ when the lock is taken out.
 
 A lock on the cheap half and none on the expensive half is worth saying out
 loud: the guard went where the bug had been, not where the cost was.
+
+## 81. Three suites covered three suffixes, and every refusal came from a fourth
+
+Four pull requests were refused by the gate on one night, each with a different
+message, all from one cause. The suites covered `*.rs` and `Cargo.*`, `*.md`,
+and `*.sh` and `.githooks/*`. Nothing covered `*.py`, `packaging/*` or
+`Makefile`, and `packaging/*` is in `PROD_GLOBS`, which means the repository's
+own declaration said those paths invalidate a receipt while no suite could earn
+one for them.
+
+sysknife#401 was the sharpest case. Its production change is a one-word regex in
+`scripts/check_evidence_claims.py`:
+
+```
+maintainer-merge: the 'shell' suite does not cover every changed path:
+    scripts/check_evidence_claims.py	no suite covers this
+```
+
+and even with coverage it could not have been proved, because
+`suite_mutate_glob` printed a single `*.sh`, so the sed could never reach the
+line the pull request exists to change. A receipt would have measured the four
+story scripts beside it and said nothing about the regex.
+
+sysknife#425 failed differently and for a related reason. Its clean run died:
+
+```
+fatal: not a git repository (or any parent up to mount point /)
+FAIL: git could not enumerate tracked files
+```
+
+`cmd_verify` extracts the tree with `git archive`, which hands over the files and
+not the repository. #425's new arm turns a failed `git ls-files` into a named
+failure instead of an empty list quietly scanning nothing, so its own guard
+fired on the gate rather than on the pull request. The guard was right and the
+gate was wrong.
+
+**Guard, three parts.**
+
+The shell suite covers `*.py`, `packaging/*` and `Makefile`, with the couplings
+written next to the case arm and checkable one by one:
+`scripts/check_evidence_claims.py` is driven by `tests/release/public-claims.test.sh`,
+`packaging/sysknife-*-edit` by `tests/release/*-edit.test.sh`, `Makefile` by
+`tests/release/install-paths.test.sh`. `suite_mutate_glob` may now print several
+globs, one per line, and prints `*.sh`, `*.py`, `sysknife-*` and `Makefile`. The
+extensionless entry is the point: every privileged helper in `packaging/` is a
+python script with no suffix, so the trust boundary this repository calls
+non-negotiable was the one place a single `-name '*.py'` could not reach. And
+`cmd_verify` seeds an index in the extracted tree, forced, so `git ls-files`
+answers with exactly what the archive contained.
+
+**One wide suite rather than a fourth narrow one**, which is what the run report
+suggested. `pick_suite` returns one suite. Splitting shell and python into two
+would have recreated the union problem lesson 77 had just fixed, for every pull
+request touching both a `.sh` and a `.py` file, and the two would have shared a
+command and an image anyway. A distinction with no difference, bought at the
+price of the bug I had removed that morning.
+
+**A wide coverage list is safe here for a specific reason**, and it is worth
+naming rather than trusting. If the suite claims a path the named filter does
+not actually exercise, the mutation lands on that file, the test passes anyway,
+and the gate refuses with `THE GUARD DOES NOT BITE`. A wrong coverage claim
+cannot buy a receipt; it can only waste a run.
+
+The workflows are covered too, and I went back and forth on that one. Leaving
+them out keeps a receipt from ever reading as "the workflow diff was judged",
+which a human still has to do. Leaving them out also means every pull request
+touching `.github/` has to be merged around the gate, and on this queue that was
+three of the twelve. A gate a whole class routes around is decorative, which is
+MISTAKES rule 7 in a different costume. Four release tests read those files and
+assert properties of their contents, so the mutation backstop applies there as
+much as anywhere. The human read stays; it was never the receipt's job.
+
+The other half of the same refusal was `PROD_GLOBS`. sysknife's list named
+`packaging/*` and `.github/*` and not `scripts/*`, so #401, whose only
+production change is a regex in `scripts/check_evidence_claims.py`, had no
+production path at all and the narrowing had nothing to narrow to. `scripts/*`
+and `Makefile` are in the list now. A declaration that is missing an entry does
+not fail loudly; it quietly makes a different rule refuse, three steps away.
+
+**The test that broke was the grep.** A case asserted the mutation touches
+regular files only by looking for the literal `find . -type f -name` in the
+source. Widening to several globs changed that line, the case went red, and the
+property it guards had not moved at all. That is the failure mode in both
+directions: red on a refactor, green on a regression. The mutation step is now a
+function, `apply_mutation`, and the case drives it against a tree holding a
+`.sh`, a `.py`, an extensionless `sysknife-*`, an `.md` that must not change,
+and a symlink pointing outside the tree that must be neither followed nor
+replaced.

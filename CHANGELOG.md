@@ -33,6 +33,27 @@ middle digit.
 
 ### Fixed
 
+- **The gate can prove a python or packaging change.** The three suites covered
+  `*.rs`, `*.md` and `*.sh`; nothing covered `*.py`, `packaging/*` or `Makefile`,
+  and `packaging/*` is in `PROD_GLOBS`. sysknife#401's production change is one
+  regex in a `.py` file that no suite claimed and no mutate glob could reach. The
+  shell suite now covers all three, with the release test that drives each one
+  named beside the case arm, and `suite_mutate_glob` may print several globs so
+  the extensionless `packaging/sysknife-*` helpers are reachable at all. The
+  workflows are covered too, by four release tests that read and assert on their
+  contents; a receipt does not replace the human read of a workflow diff, and
+  leaving them uncovered would have sent every workflow-touching pull request
+  around the gate instead.
+- **`scripts/*` and `Makefile` joined sysknife's `PROD_GLOBS`.** They gate every
+  published claim and every install path, and their absence had a cost:
+  sysknife#401's only production change is a one-word regex in
+  `scripts/check_evidence_claims.py`, so with no production path in the diff the
+  gate had nothing to narrow to and refused outright.
+- **A test that asks git what is tracked runs on the extracted tree.**
+  `cmd_verify` extracts with `git archive`, which hands over files and not a
+  repository, so sysknife#425's clean run died on `fatal: not a git repository`
+  and its own fail-closed guard fired on the gate. The extracted tree now
+  carries a forced index listing exactly what the archive contained.
 - **One verify per pull request, the way one merge per pull request already
   worked.** A hand-run `verify 426` and the unattended review timer's
   `verify 426` ran side by side on one host: two full cargo builds of the same

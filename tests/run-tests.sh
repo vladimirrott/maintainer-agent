@@ -2812,6 +2812,38 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     else
         bad "shell verify failed: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
     fi
+    # A python helper and a test that needs the repository, because both were
+    # gaps the gate had in anger on 2026-09-14: sysknife#401's production change
+    # is one regex in a .py file that no suite covered and no mutate glob could
+    # reach, and sysknife#425's clean run died on `fatal: not a git repository`
+    # because the tree arrives through `git archive` with no index.
+    printf 'GUARD = "on"\nimport sys\nif GUARD == "on":\n    print("guard held"); sys.exit(0)\nprint("guard gone"); sys.exit(1)\n' \
+        > "$vr/helper.py"
+    printf '#!/usr/bin/env bash\ngit ls-files >/dev/null 2>&1 || { echo "git could not enumerate tracked files"; exit 1; }\npython3 helper.py\n' \
+        > "$vr/pycheck.sh"
+    git -C "$vr" add -A; git -C "$vr" commit -qm python
+    verify_head2="$(git -C "$vr" rev-parse HEAD)"
+    git -C "$vr" update-ref "refs/pull/43/head" "$verify_head2"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) printf 'pycheck.sh\nhelper.py\n';;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate3" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          bash "$mg" verify 43 "$verify_head2" pycheck.sh 's/GUARD = "on"/GUARD = "off"/' shell 2>&1)
+    grep -q 'not a git repository\|could not enumerate tracked files' <<<"$out" \
+        && bad "the extracted tree has no git index, so a test that asks git what is tracked fails on the gate" \
+        || ok "a test that asks git what is tracked runs on the extracted tree"
+    grep -q 'receipt recorded\|observed' <<<"$out" \
+        && ok "a mutation reaches a python file, so a .py production change can be proved" \
+        || bad "the python mutation earned no receipt: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+    # Restore the stub the cases below expect.
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo check.sh;;
+    esac"
     # And the same run must refuse when the mutation changes nothing.
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate2" MAINTAINER_ACCOUNT=testuser \
           MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
@@ -2825,6 +2857,8 @@ else
     # the total differ by one between this laptop and a container, and
     # scripts/check_claims.sh compares that total against the README.
     noenv "the shell suite produced an observed receipt (needs podman or docker)"
+    noenv "a test that asks git what is tracked runs on the extracted tree (needs podman or docker)"
+    noenv "a mutation reaches a python file, so a .py production change can be proved (needs podman or docker)"
     noenv "a mutation that changes nothing is refused (needs podman or docker)"
 fi
 grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
@@ -3101,8 +3135,33 @@ printf '%s' "$(esc "$tr1")" | grep -q 'trav.sh' \
 rm -f "$tr1/docs/images/trav.sh"
 [ -z "$(esc "$tr1")" ] && ok "and the tree reads clean once it is removed" \
     || bad "the scan reports an escape that is no longer there"
-grep -q 'find . -type f -name' "$mg" && ok "the mutation touches regular files only" \
-    || bad "the mutation step would still follow a symlink"
+# Driven, not grepped. The grep this replaces matched the literal string
+# `find . -type f -name`, so widening the mutation to several globs broke the
+# test while the property it guards was untouched: a check that reads the source
+# instead of the behaviour fails on a refactor and passes on a regression.
+mt="$stub_dir/mutatetree"; rm -rf "$mt"; mkdir -p "$mt/sub"
+printf 'GUARD=on\n' > "$mt/real.sh"
+printf 'GUARD=on\n' > "$mt/helper.py"
+printf 'GUARD=on\n' > "$mt/sysknife-thing"
+printf 'GUARD=on\n' > "$mt/untouched.md"
+printf 'GUARD=on\n' > "$stub_dir/mutate-target-outside"
+ln -sf "$stub_dir/mutate-target-outside" "$mt/link.sh"
+( # shellcheck disable=SC1090
+  . "$mg" 2>/dev/null
+  suite_mutate_glob() { printf '%s\n' '*.sh' '*.py' 'sysknife-*'; }
+  apply_mutation "$mt" 's/GUARD=on/GUARD=off/' ) >/dev/null 2>&1
+grep -q 'GUARD=off' "$mt/real.sh" \
+    && ok "the mutation reaches a file matching the first glob" \
+    || bad "the mutation did not apply at all"
+grep -q 'GUARD=off' "$mt/helper.py" && grep -q 'GUARD=off' "$mt/sysknife-thing" \
+    && ok "and files matching the second and third globs, so one suffix is not assumed" \
+    || bad "only the first glob was applied; a multi-glob suite mutates nothing else"
+grep -q 'GUARD=on' "$mt/untouched.md" \
+    && ok "and nothing outside the declared globs is touched" \
+    || bad "the mutation reached a file no glob names"
+[ -L "$mt/link.sh" ] && grep -q 'GUARD=on' "$stub_dir/mutate-target-outside" \
+    && ok "and a symlink is neither followed nor replaced with its content" \
+    || bad "the mutation step wrote through a symlink, out of the tree"
 # Demonstrated: sed -i through a symlink materialises the target.
 sl="$stub_dir/symlinkdemo"; mkdir -p "$sl"; secret="$stub_dir/fake-key"
 printf 'CANARY-KEY-MATERIAL\n' > "$secret"; ln -sf "$secret" "$sl/evil.sh"

@@ -282,6 +282,40 @@ covers_production() {  # $1 = suite file, $2 = suite dir, $3... = changed paths
     return 0
 }
 
+# Apply the sed expression to the files this suite is allowed to mutate.
+#
+# suite_mutate_glob may print more than one glob, one per line, because a
+# suite's production files do not always share a suffix: every privileged helper
+# in sysknife's packaging/ is a python script with no extension, so a single
+# -name '*.py' could not reach the trust boundary at all. The globs are OR-ed
+# into one find expression; a suite printing one line behaves exactly as before.
+#
+# -type f, and never -L: `sed -i` on a symlink replaces the link with the
+# dereferenced content, which would write through a link the tree only points
+# at. tree_escapes refuses a link leaving the tree before this runs; -type f is
+# the second half of that pair.
+#
+# --sandbox: the expression is agent-supplied and reaches host sed. GNU sed's
+# e/w/r commands run shell and read and write arbitrary files, so `s/x/id/e`
+# would be host code execution. --sandbox refuses e/w/r, leaving sed a pure text
+# transform.
+apply_mutation() {  # $1 = extracted tree, $2 = sed expression
+    local work="$1" mutation="$2"
+    local -a mglobs=() mfind=()
+    mapfile -t mglobs < <(suite_mutate_glob)
+    local g first=1
+    for g in "${mglobs[@]}"; do
+        [ -n "$g" ] || continue
+        if [ "$first" = 1 ]; then mfind+=(\( -name "$g"); first=0
+        else mfind+=(-o -name "$g"); fi
+    done
+    [ "$first" = 0 ] || { printf 'this suite declares no mutate glob\n' >&2; return 1; }
+    mfind+=(\))
+    ( cd "$work" && find . -type f "${mfind[@]}" \
+        -not -path './.container-target/*' -not -path './.git/*' -print0 \
+        | xargs -0 sed --sandbox -i "$mutation" )
+}
+
 pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local named="$1"; shift
     local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
@@ -453,6 +487,25 @@ cmd_verify() {
 $(printf '%s\n' "$links" | sed 's/^/    /')
   Refusing. Review this by reading."
     fi
+    # Seed an index in the extracted tree. `git archive` hands over the files
+    # and not the repository, so anything asking git what is tracked gets
+    # `fatal: not a git repository` and the gate reports the contributor as
+    # failing their own test. sysknife#425 is exactly that: its new arm turns a
+    # failed `git ls-files` into a named failure instead of an empty list
+    # quietly scanning nothing, and that guard fired on the gate rather than on
+    # the pull request. The index lists precisely what the archive contained,
+    # which is what `git ls-files` should answer here.
+    #
+    # No commit, no identity, no network. -c overrides so a host hook path or a
+    # global template cannot reach into the extracted tree. -f because the index
+    # must list exactly what the archive contained: a .gitignore inside the tree
+    # would otherwise quietly drop a force-added file from `git ls-files`, and a
+    # scanner reading that list would skip it without saying so.
+    git -c init.defaultBranch=main -c core.hooksPath=/dev/null \
+        -c init.templateDir= init -q "$work" 2>/dev/null \
+        && git -C "$work" -c core.hooksPath=/dev/null add -A -f 2>/dev/null \
+        || say "note: could not seed a git index in the extracted tree; a test that
+  asks git what is tracked will fail for that reason and not for the code's."
     mkdir -p "$work/.container-target"
 
     # Every control here is measured by tests/containment-probe.sh with a real
@@ -560,9 +613,8 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     # text transform. Confirmed on this host by tests/run-tests.sh.
     # -type f as well as the refusal above: `sed -i` on a symlink replaces it
     # with the dereferenced content, so this must never see one.
-    ( cd "$work" && find . -type f -name "$(suite_mutate_glob)" \
-        -not -path './.container-target/*' -print0 \
-        | xargs -0 sed --sandbox -i "$mutation" ) || die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
+    apply_mutation "$work" "$mutation" \
+        || die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
     run_in_container "$mut_log"; local mut_rc=$?
 
     if [ "$mut_rc" = 0 ]; then

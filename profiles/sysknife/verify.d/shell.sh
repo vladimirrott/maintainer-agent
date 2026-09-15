@@ -8,6 +8,35 @@
 suite_covers() {
     case "$1" in
         *.sh|.githooks/*) return 0 ;;
+        # Python, packaging helpers and the Makefile, because the release tests
+        # this suite runs are what drive them. Named, so the claim can be
+        # checked rather than believed:
+        #
+        #   scripts/check_evidence_claims.py  <- tests/release/public-claims.test.sh,
+        #                                        tests/e2e/story-metadata.test.sh
+        #   scripts/record_test_baseline.py   <- tests/release/test-baseline-provenance.test.sh
+        #   scripts/record_story_run.py       <- tests/e2e/story-runner-verdicts.test.sh
+        #   packaging/sysknife-*-edit         <- tests/release/{grub-kargs,log,mount}-edit.test.sh
+        #   packaging/*.service, sysknife-sudoers
+        #                                     <- tests/release/systemd-directory-modes.test.sh
+        #   Makefile                          <- tests/release/install-paths.test.sh
+        #
+        # A coverage claim that is wrong for a particular filter cannot buy a
+        # receipt: the mutation lands on the file, the named test does not
+        # exercise it, the mutated run passes, and the gate refuses with THE
+        # GUARD DOES NOT BITE. That backstop is why this list can be this wide.
+        #   .github/workflows/*.yml           <- tests/release/postgres-contract-guard.test.sh,
+        #                                        release-rehearsal.test.sh,
+        #                                        markdown-link-files.test.sh, node-eol.test.sh
+        #
+        # The workflows are covered, and a receipt is not a substitute for
+        # reading a workflow diff. Those are separate controls and the doctrine's
+        # human read is unchanged. Leaving them uncovered was the other option
+        # and it is worse: every workflow-touching pull request would then have
+        # to be merged around the gate, and a gate a whole class routes around
+        # is decorative. The tests above read those files and assert properties
+        # of their contents, so a mutation to a workflow does flip them.
+        *.py|packaging/*|Makefile|.github/*) return 0 ;;
     esac
     return 1
 }
@@ -43,7 +72,11 @@ suite_image() { printf 'docker.io/library/python:3.12'; }
 # hook runs. maintainer-doctor runs the image and checks each one resolves.
 suite_needs() { printf 'bash python3 git'; }
 
-suite_mutate_glob() { printf '*.sh'; }
+# One glob per line. The extensionless entry is the point: every privileged
+# helper in packaging/ is a python script with no .py suffix, so a single
+# `-name '*.py'` could not reach the trust boundary this repository calls
+# non-negotiable.
+suite_mutate_glob() { printf '%s\n' '*.sh' '*.py' 'sysknife-*' 'Makefile' '*.yml'; }
 
 suite_podman_args() { printf '%s\n' -e "BASH_ENV=/dev/null"; }
 
