@@ -117,6 +117,44 @@ except (OSError, ValueError):
 PYEOF
 }
 
+# Is this receipt's signature the one the gate would write over its bytes?
+#
+# 0 = yes, 1 = the file is not readable JSON, 2 = it carries no signature at
+# all, 3 = it carries one that does not match. cmd_merge tells those apart in
+# what it says, and cmd_verify's part mode refuses to fold a new proof into a
+# receipt that fails any of them. One implementation, because a second copy of
+# a security check is a copy that goes stale: the reason sysknife's own review
+# doctrine refuses a guard proved by a parallel copy of its own logic.
+receipt_suites() {  # $1 = receipt path -> space-separated suite names
+    python3 - "$1" <<'PYEOF'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except (OSError, ValueError):
+    sys.exit(0)
+# A receipt written before multi-suite verify carries one `suite` and no
+# `proofs`. Its union is that one suite, which is what it always meant.
+names = [p.get("suite", "") for p in d.get("proofs", [])] or [d.get("suite", "")]
+print(" ".join(dict.fromkeys(n for n in names if n)))
+PYEOF
+}
+
+receipt_signature_ok() {  # $1 = receipt path
+    local payload sig want
+    payload="$(python3 - "$1" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+d.pop("signature", None)
+json.dump(d, sys.stdout, indent=2)
+PYEOF
+)" || return 1
+    sig="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('signature',''))" "$1" 2>/dev/null)"
+    [ -n "$sig" ] || return 2
+    want="$(printf '%s' "$payload" | receipt_sign)" || return 1
+    [ "$sig" = "$want" ] || return 3
+    return 0
+}
+
 identity() {
     gh auth switch --hostname github.com --user "$ACCOUNT" >/dev/null 2>&1
     local who; who="$(gh api user --jq .login 2>/dev/null)"
@@ -282,6 +320,82 @@ covers_production() {  # $1 = suite file, $2 = suite dir, $3... = changed paths
     return 0
 }
 
+# Does the UNION of several suites cover every production path in a diff?
+#
+# covers_production above answers a narrower question: may THIS one suite write
+# a receipt for this diff. Issue #19 taught it to ignore non-production paths it
+# does not run. sysknife#429 is the other half of the same shape, and pick_suite
+# cannot answer it at all because it returns one suite: the pull request changed
+# crates/*/src/*.rs, packaging/*, Makefile and .github/workflows/ci.yml, the rust
+# suite runs the first three (helper_install_coverage.rs reads the Makefile and
+# every file in packaging/, sudoers_grants_match_argv.rs reads the sudoers), and
+# nothing in rust reads a workflow. The shell suite's release tests do. Every
+# production path was covered by some suite, no suite covered them all, and the
+# gate refused to write any receipt.
+#
+# Widening a suite's suite_covers to close the gap would have been a lie, and
+# the mutation-bite backstop would have caught it: a suite that does not read a
+# workflow still passes when the workflow is mutated, and the gate refuses with
+# THE GUARD DOES NOT BITE.
+#
+# So the union is proved in parts, one verify per suite, and checked here, at
+# merge, where the receipt is consumed. That is the right place for it. A verify
+# proves one part and cannot know what the other parts will be; merge is the
+# step that has to know they add up.
+suites_cover_production() {  # $1 = space-separated suite names, $2... = changed paths
+    local names="$1"; shift
+    # Refusing without saying why is the shape this file keeps getting wrong: a
+    # guard that answers when it could not ask reads as though it looked.
+    # cmd_merge dies on an empty PROD_GLOBS before it reaches here, so this is
+    # only for a direct caller, and a direct caller deserves the reason too.
+    if [ "${#PROD_GLOBS[@]}" -eq 0 ]; then
+        printf '  this profile declares no PROD_GLOBS, so nothing here can say which
+' >&2
+        printf '  paths a receipt has to cover. Refusing rather than answering.
+' >&2
+        return 1
+    fi
+    local -a suites=(); read -r -a suites <<< "$names"
+    if [ "${#suites[@]}" -eq 0 ]; then
+        printf '  the receipt names no suite, so it speaks for nothing.\n' >&2
+        return 1
+    fi
+    local dir; dir="$(suite_dir)" || return 1
+    local s
+    # Fail closed on a name with no file. Every suite below is sourced in a
+    # subshell for the same reason: sourcing a file that is not there leaves the
+    # PREVIOUS suite's suite_covers defined, so one typo in a receipt would
+    # inherit another suite's coverage and read as an answer.
+    for s in "${suites[@]}"; do
+        [ -f "$dir/$s.sh" ] || {
+            printf '  the receipt names a suite that is not on disk: %s\n' "$s" >&2
+            return 1
+        }
+    done
+    local -a prod=()
+    local p
+    for p in "$@"; do is_production "$p" && prod+=("$p"); done
+    # Nothing production in the diff, so there is nothing for the union to
+    # cover. cmd_merge re-checks PROD_GLOBS and nothing else, so this is the
+    # same question it asks.
+    [ "${#prod[@]}" -gt 0 ] || return 0
+    local -a uncovered=()
+    local any
+    for p in "${prod[@]}"; do
+        any=0
+        for s in "${suites[@]}"; do
+            # shellcheck disable=SC1090
+            ( . "$dir/$s.sh"; suite_covers "$p" ) && { any=1; break; }
+        done
+        [ "$any" = 1 ] || uncovered+=("$p")
+    done
+    [ "${#uncovered[@]}" -eq 0 ] && return 0
+    printf '  no suite this receipt was earned by runs these production path(s):\n' >&2
+    printf '    %s\n' "${uncovered[@]}" >&2
+    printf '  Naming more suites does not help unless one of them runs the file.\n' >&2
+    return 1
+}
+
 # Apply the sed expression to the files this suite is allowed to mutate.
 #
 # suite_mutate_glob may print more than one glob, one per line, because a
@@ -378,7 +492,10 @@ container_runtime() {
 # not have to declare an empty function, and the docs suite did not, so every
 # container run printed `suite_podman_args: command not found` to the log that is
 # then read as evidence.
-suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args; }
+# The runtime is passed in rather than read out of cmd_verify's locals, because
+# a suite reaching into its caller's scope works until somebody renames the
+# variable. A suite that ignores the argument behaves exactly as before.
+suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args "$1"; }
 
 # Symlinks that leave the tree, listed.
 #
@@ -460,8 +577,33 @@ cmd_verify() {
     local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
     [ -n "$paths" ] || die "could not read the changed files for #$pr"
     local -a path_list; mapfile -t path_list <<< "$paths"
-    local suite; suite="$(pick_suite "$named" "${path_list[@]}")" || exit 1
-    local dir; dir="$(suite_dir)"
+    local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
+    local suite
+    if [ -n "${VERIFY_PART:-}" ]; then
+        # A part cannot be inferred. pick_suite exists to choose the one suite
+        # that covers a diff, and part mode is for the diff where no such suite
+        # exists, so the caller says which part this is.
+        [ -n "$named" ] || die "verify-part needs the suite named, because a part cannot be inferred:
+    maintainer-merge verify-part $pr <sha> <test> <mutation> <suite>
+  Suites here: $(cd "$dir" && printf '%s ' *.sh | sed 's/\.sh//g')"
+        [ -f "$dir/$named.sh" ] || die "no suite '$named' in $dir"
+        suite="$named"
+        # A part that runs no production code at all proves nothing cmd_merge
+        # re-checks, and would only pad the receipt's suite list. The union
+        # check at merge counts suites; this stops one being added for free.
+        local covered_any=0 pp
+        for pp in "${path_list[@]}"; do
+            if is_production "$pp"; then
+                # shellcheck disable=SC1090
+                ( . "$dir/$suite.sh"; suite_covers "$pp" ) && { covered_any=1; break; }
+            fi
+        done
+        [ "$covered_any" = 1 ] || die "the '$suite' suite runs none of the production paths #$pr changes, so
+  proving it bites here adds nothing a merge re-checks. Name the suite that
+  runs the code you mean to prove."
+    else
+        suite="$(pick_suite "$named" "${path_list[@]}")" || exit 1
+    fi
     # shellcheck disable=SC1090
     . "$dir/$suite.sh"
     # A suite may need a runtime feature the other lacks, and saying so beats a
@@ -562,7 +704,7 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
             --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
             --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
             --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
-            -v "$work:/repo:z" $(suite_extra_args) \
+            -v "$work:/repo:z" $(suite_extra_args "$rt") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
@@ -623,17 +765,68 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     fi
 
     mkdir -p "$RECEIPTS"
+    # Fold this proof into a receipt already earned at this head, or start one.
+    # Only in part mode: a plain `verify` covers the whole diff by construction
+    # and replacing the file is what it has always meant.
+    #
+    # The prior receipt's signature is checked BEFORE anything is folded into
+    # it. Without that, a hand-written receipt naming suites nobody ran would be
+    # picked up here and re-sealed with a real signature, and the seal is the
+    # only reason cmd_merge believes any of it.
+    local fold=0
+    if [ -n "${VERIFY_PART:-}" ] && [ -f "$RECEIPTS/$pr.json" ]; then
+        local prior_pr prior_head psig=0
+        prior_pr="$(receipt_field "$RECEIPTS/$pr.json" pr '')"
+        prior_head="$(receipt_field "$RECEIPTS/$pr.json" head '')"
+        if [ "$prior_pr" = "$pr" ] && [ "$prior_head" = "$real_head" ]; then
+            receipt_signature_ok "$RECEIPTS/$pr.json" || psig=$?
+            [ "$psig" = 0 ] || die "a receipt for #$pr already exists at this head and its signature does
+  not check out (code $psig). Refusing to fold a new proof into it and re-seal
+  it, because the seal is the only reason merge believes what it says. Delete
+  $RECEIPTS/$pr.json and prove each part again."
+            fold=1
+        else
+            say "the receipt on disk is for #${prior_pr:-?} at ${prior_head:0:8}, not this head; starting a new one"
+        fi
+    fi
     python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$filter" "$mutation" "$mut_rc" \
         "$(first_failure_line "$mut_log")" \
-        "$suite" "$ran" <<'PYEOF'
+        "$suite" "$ran" "$fold" "${VERIFY_PART:-0}" <<'PYEOF'
 import json, sys, datetime, getpass
 out, pr, head, filt, mut, rc, msg = sys.argv[1:8]
-suite, ran = sys.argv[8], sys.argv[9]
+suite, ran, fold, PARTIAL = sys.argv[8], sys.argv[9], sys.argv[10], sys.argv[11]
+
+proofs = []
+if fold == "1":
+    try:
+        proofs = json.load(open(out)).get("proofs", [])
+    except (OSError, ValueError):
+        proofs = []
+# Re-proving a suite replaces that part rather than recording it twice, so a
+# second run of the same suite cannot inflate what the receipt appears to cover.
+proofs = [p for p in proofs if p.get("suite") != suite]
+proofs.append({
+    "suite": suite, "units_run": ran, "filter": filt, "mutation": mut,
+    "proof": f"`{filt}` passes clean and fails under `{mut}` (rc={rc})",
+    "observed_failure": msg,
+})
+proofs.sort(key=lambda p: p["suite"])
+
+# The flat fields describe the whole receipt, not the last part proved. With one
+# proof they carry exactly what they always did.
+single = len(proofs) == 1
 json.dump({
     "pr": int(pr), "head": head, "kind": "observed",
-    "suite": suite, "units_run": ran,
-    "proof": f"`{filt}` passes clean and fails under `{mut}` (rc={rc})",
+    # Proved part by part, so no single verify ever checked that the parts
+    # cover the whole diff. cmd_merge asks that question only for these; a
+    # receipt from a plain `verify` had it answered before it was written.
+    "partial": fold == "1" or PARTIAL == "1",
+    "suite": " ".join(p["suite"] for p in proofs),
+    "units_run": proofs[0]["units_run"] if single
+                 else ", ".join(f'{p["suite"]}:{p["units_run"]}' for p in proofs),
+    "proof": " AND ".join(p["proof"] for p in proofs),
     "mutation": mut, "filter": filt, "observed_failure": msg,
+    "proofs": proofs,
     "recorded_at": datetime.datetime.now().astimezone().isoformat(),
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
@@ -679,6 +872,13 @@ looks_environmental() {
     shapes="$shapes|could not find system library|pkg-config"
     shapes="$shapes|failed to run custom build command"
     shapes="$shapes|linker .?cc.? not found|error while loading shared libraries"
+    # EPERM out of a container that dropped every capability. sysknife#429's
+    # credential-drop case chowns a fixture and gets `[Errno 1] Operation not
+    # permitted` when the suite runs as root under --cap-drop=ALL. Narrow on
+    # purpose: errno 1 specifically, not every permission complaint. Both
+    # branches die either way, so the only thing this decides is whether the
+    # gate blames its own container or the contributor.
+    shapes="$shapes|\\[Errno 1\\] Operation not permitted"
     grep -qaiE "$shapes" "$1" 2>/dev/null
 }
 
@@ -704,21 +904,16 @@ cmd_merge() {
     [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
     # Recompute the signature over the payload with the signature removed. An
     # unsigned or hand-edited receipt is refused here, which is the whole point.
-    local payload sig want
-    payload="$(python3 - "$receipt" <<'PYEOF'
-import json, sys
-d = json.load(open(sys.argv[1]))
-d.pop("signature", None)
-json.dump(d, sys.stdout, indent=2)
-PYEOF
-)" || die "receipt for #$pr is not readable JSON"
-    sig="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1])).get('signature',''))" "$receipt")"
-    [ -n "$sig" ] || die "the receipt for #$pr carries no signature, so it was not written by
+    local sig_rc=0
+    receipt_signature_ok "$receipt" || sig_rc=$?
+    case "$sig_rc" in
+        1) die "receipt for #$pr is not readable JSON" ;;
+        2) die "the receipt for #$pr carries no signature, so it was not written by
   \`maintainer-merge verify\`. A receipt that anything can write proves nothing.
-  Run: maintainer-merge verify $pr <head> <test> <mutation>"
-    want="$(printf '%s' "$payload" | receipt_sign)"
-    [ "$sig" = "$want" ] || die "the receipt for #$pr does not match its signature: it was edited
-  after it was written, or written by something other than the gate."
+  Run: maintainer-merge verify $pr <head> <test> <mutation>" ;;
+        3) die "the receipt for #$pr does not match its signature: it was edited
+  after it was written, or written by something other than the gate." ;;
+    esac
     local verified_head kind receipt_pr
     verified_head="$(receipt_field "$receipt" head '')"
     kind="$(receipt_field "$receipt" kind '')"
@@ -749,6 +944,32 @@ PYEOF
     fi
     [ "$kind" = observed ] || say "the receipt is ASSERTED, not observed: it records a claim a
      human made, and nothing here checked it"
+
+    # Does what the receipt was earned by reach every production path being
+    # merged? Until sysknife#429 nothing asked here, because cmd_verify refused
+    # to write a receipt at all unless one suite covered everything, so the
+    # answer was yes by construction. Proving the union in parts removes that
+    # guarantee, so the question moves to where the receipt is spent.
+    #
+    # A single-suite receipt, and every receipt written before this existed,
+    # passes exactly as it did: receipt_suites reads one name out of `suite`
+    # when there are no `proofs`, and one suite covering everything is a union
+    # of one.
+    local rec_paths rec_suites rec_partial=
+    case "$(receipt_field "$receipt" partial false)" in True|true) ;; *) rec_partial=0 ;; esac
+    if [ "${rec_partial:-1}" = 1 ]; then
+    rec_paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')" \
+        || die "#$pr: I could not read the changed files, so I cannot tell whether the
+  receipt covers them. Refusing rather than merging on a question I did not ask."
+    [ -n "$rec_paths" ] || die "#$pr: the changed file list came back empty, which is not an answer."
+    rec_suites="$(receipt_suites "$receipt")"
+    local -a rec_path_list; mapfile -t rec_path_list <<< "$rec_paths"
+    suites_cover_production "$rec_suites" "${rec_path_list[@]}" \
+        || die "the receipt for #$pr was earned by: ${rec_suites:-<none>}
+  Those suites do not run all of the production code this merge would land, so
+  the receipt proves less than the merge claims. Prove the rest:
+    maintainer-merge verify-part $pr $verified_head <test> <mutation> <suite>"
+    fi
 
     local head state review
     head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
@@ -1021,7 +1242,10 @@ _executed || return 0
 case "${1:-}" in
     receipt) shift; cmd_receipt "$@" ;;
     verify)  shift; cmd_verify "$@" ;;
+    # One part of a diff no single suite covers. Each part is observed the same
+    # way a whole verify is; merge is what checks the parts add up.
+    verify-part) shift; VERIFY_PART=1 cmd_verify "$@" ;;
     merge)   shift; cmd_merge "$@" ;;
     show)    shift; cmd_show "$@" ;;
-    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [crate]|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
+    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [suite]|verify-part <pr> <sha> <test-filter> <sed-mutation> <suite>|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
 esac

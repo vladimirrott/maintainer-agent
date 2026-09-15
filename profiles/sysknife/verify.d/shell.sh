@@ -78,7 +78,43 @@ suite_needs() { printf 'bash python3 git'; }
 # non-negotiable.
 suite_mutate_glob() { printf '%s\n' '*.sh' '*.py' 'sysknife-*' 'Makefile' '*.yml'; }
 
-suite_podman_args() { printf '%s\n' -e "BASH_ENV=/dev/null"; }
+# Run the pull request's scripts as a normal uid, not as root.
+#
+# The verify container defaulted to uid 0 because the image does. Two things
+# were wrong with that. Running untrusted pull-request code as root inside a
+# container is a worse posture than running it as nobody, for no benefit: these
+# scripts install nothing and own nothing.
+#
+# And it broke a real proof. sysknife#429 adds a release test whose credential
+# drop case carries `skipUnless(os.geteuid() == 0)`. As root that case stops
+# skipping and runs for real, its chown wants CAP_CHOWN, --cap-drop=ALL has
+# taken it, and the run dies with `PermissionError: [Errno 1] Operation not
+# permitted`. The gate then reported that as the pull request failing its own
+# test. That is the fourth time this suite's container has failed and been
+# described as the contributor's fault: an image with no python3, an image with
+# no git, /tmp mounted noexec, and now this.
+#
+# As uid 1000 the skip fires, which is exactly what the test does on a
+# developer's machine and in CI's unprivileged jobs, and the other ten
+# assertions still run and still bite. CI runs the root case separately, under
+# sudo, which is where a real credential drop belongs.
+#
+# 1000 rather than `nobody`: the extracted tree on the host belongs to the uid
+# running the gate, so the scripts have to be able to read it.
+# How to stop being uid 0 differs by runtime, and getting it wrong locks the
+# suite out of its own checkout. Under ROOTLESS podman container uid 0 is
+# already the host user, so `--user 1000` maps into the subuid range instead and
+# the mounted tree becomes unreadable: measured, `bash: tests/release/
+# action-steps.test.sh: Permission denied`. `--userns=keep-id` keeps uid 1000
+# mapped to uid 1000, which is what the extracted tree belongs to. Under docker
+# the container really is root and `--user` is the flag that means this.
+suite_podman_args() {  # $1 = the container runtime
+    printf '%s\n' -e "BASH_ENV=/dev/null"
+    case "${1:-podman}" in
+        *podman*) printf '%s\n' --userns=keep-id ;;
+        *)        printf '%s\n' --user "$(id -u):$(id -g)" ;;
+    esac
+}
 
 suite_command() { printf 'bash %s\n' "$1"; }
 
