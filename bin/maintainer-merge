@@ -939,6 +939,12 @@ looks_environmental() {
     # branches die either way, so the only thing this decides is whether the
     # gate blames its own container or the contributor.
     shapes="$shapes|\\[Errno 1\\] Operation not permitted"
+    # A repository's own preflight saying a tool it needs is absent. sysknife's
+    # release-rehearsal test runs scripts/release_rehearsal.sh, whose preflight
+    # prints `ERROR: required tool is missing: cargo`, and the shell suite's
+    # image carries bash, python3 and git. Fifth time this gate could not run
+    # and described it as the pull request failing its own test.
+    shapes="$shapes|required tool is missing"
     grep -qaiE "$shapes" "$1" 2>/dev/null
 }
 

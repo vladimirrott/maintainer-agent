@@ -2671,7 +2671,9 @@ LOG
     || bad "a dependency build failure is reported as the pull request failing its own test"
 for _shape in 'bash: git: command not found' \
               '/tmp/x.sh: Permission denied' \
-              'error while loading shared libraries: libssl.so.3'; do
+              'error while loading shared libraries: libssl.so.3' \
+              'PermissionError: [Errno 1] Operation not permitted' \
+              'ERROR: required tool is missing: cargo'; do
     printf '%s\n' "$_shape" > "$envlog"
     # shellcheck disable=SC1090
     ( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
@@ -2680,6 +2682,19 @@ for _shape in 'bash: git: command not found' \
 done
 # The other direction matters more. A real failing assertion must stay the pull
 # request's, or the gate excuses every red run it cannot parse.
+cat > "$envlog" <<'LOG'
+test result: FAILED. 1 passed; 1 failed
+assertion `left == right` failed: GetAptPins: Ubuntu-only description must match
+LOG
+# shellcheck disable=SC1090
+( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
+    && bad "a failing assertion mentioning nothing environmental was excused" \
+    || ok "and a plain assertion failure is not excused"
+printf 'FAIL: docs.yml action is not pinned to a 40-hex SHA\n' > "$envlog"
+# shellcheck disable=SC1090
+( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
+    && bad "a real pin failure was excused as an environment problem" \
+    || ok "and a real supply-chain failure is still the pull request's"
 cat > "$envlog" <<'LOG'
 test result: FAILED. 1 passed; 1 failed
 assertion `left == right` failed: GetAptPins: Ubuntu-only description must match
