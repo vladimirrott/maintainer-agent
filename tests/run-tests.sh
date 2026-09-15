@@ -2781,6 +2781,88 @@ out="$(u9run "$pg" README.md notes.rst)"; rc=$?
     && ok "and a diff with no production path falls back to nothing" \
     || bad "pick_suite invented a scope for a diff it cannot narrow (returned '$out')"
 
+echo "== a receipt may be earned by several suites when no single one covers production =="
+# sysknife#429 changed crates/*/src/*.rs, packaging/*, Makefile and
+# .github/workflows/ci.yml in one pull request. The rust suite runs the .rs and,
+# through helper_install_coverage.rs, the packaging helpers and the Makefile.
+# Nothing in rust reads a workflow; the shell suite's release tests do. So every
+# production path was covered by SOME suite and no single suite covered them
+# all, and pick_suite refused, exactly as it refused the .rs + .md union before
+# issue #19. That fix taught one suite to ignore paths it does not need. This is
+# the other half: production paths it DOES need, spread across two suites.
+#
+# The union is decided where the receipt is consumed, at merge, not at verify.
+# A verify proves one part; merge is the step that has to know the parts add up.
+u10="$stub_dir/union429"; rm -rf "$u10"; mkdir -p "$u10/verify.d"
+cat > "$u10/verify.d/rust.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.rs|packaging/*|Makefile) return 0 ;; esac; return 1; }
+SUITE
+cat > "$u10/verify.d/shell.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.sh|.github/*) return 0 ;; esac; return 1; }
+SUITE
+cat > "$u10/verify.d/docs.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.md) return 0 ;; esac; return 1; }
+SUITE
+u10err="$u10/stderr"
+u10cover() {  # $1 = PROD_GLOBS, $2 = suite names, $3... = changed paths
+    local globs="$1" suites="$2"; shift 2
+    PROFILE_DIR="$u10" MAINTAINER_PROFILE=u10 MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+        MAINTAINER_ACCOUNT=t MAINTAINER_MERGE_SOURCE_ONLY=1 PROD_GLOBS="$globs" \
+        bash -c '. "'"$root"'/bin/maintainer-merge"; suites_cover_production "$@"' _ "$suites" "$@" \
+        2>"$u10err"
+}
+pg429='crates/*/src/* packaging/* Makefile .github/*'
+p429=(crates/d/src/actions/ssh.rs packaging/sysknife-sudoers Makefile .github/workflows/ci.yml CHANGELOG.md)
+
+u10cover "$pg429" "rust shell" "${p429[@]}"; rc=$?
+[ "$rc" = 0 ] \
+    && ok "two suites together cover a production diff neither covers alone" \
+    || bad "the union of rust and shell was refused (rc=$rc): $(tr '\n' ' ' < "$u10err" | cut -c1-140)"
+
+# Each half alone must still be refused, or the union check is decorative.
+u10cover "$pg429" rust "${p429[@]}"; rc=$?
+[ "$rc" != 0 ] && grep -q '\.github/workflows/ci\.yml' "$u10err" \
+    && ok "and the rust half alone is refused, naming the workflow it never runs" \
+    || bad "rust alone bought coverage of .github (rc=$rc): $(tr '\n' ' ' < "$u10err" | cut -c1-140)"
+u10cover "$pg429" shell "${p429[@]}"; rc=$?
+[ "$rc" != 0 ] && grep -qE 'ssh\.rs' "$u10err" \
+    && ok "and the shell half alone is refused, naming the daemon source it never runs" \
+    || bad "shell alone bought coverage of crates/ (rc=$rc): $(tr '\n' ' ' < "$u10err" | cut -c1-140)"
+
+# The invariant the whole gate rests on: a production path NO named suite runs
+# is refused however many suites are named. Adding suites must never become a
+# way to accumulate permission rather than coverage.
+u10cover "$pg429 build/*" "rust shell docs" "${p429[@]}" build/out.bin; rc=$?
+[ "$rc" != 0 ] && grep -q 'build/out\.bin' "$u10err" \
+    && ok "and a production path no named suite covers is refused whatever else is named" \
+    || bad "three suites waved through a file none of them run (rc=$rc)"
+
+# A suite named in the receipt that does not exist on disk must fail closed.
+# Reading a missing suite file as "covers nothing" would be harmless; reading it
+# as "covers everything" would not, and a `.` of a missing file leaves the
+# PREVIOUS suite's suite_covers defined, which is exactly that failure.
+u10cover "$pg429" "rust ghost" "${p429[@]}"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and a suite named in a receipt but missing on disk refuses rather than inherits" \
+    || bad "a missing suite file was read as coverage (rc=$rc)"
+
+# A profile with no PROD_GLOBS cannot answer the question, and a refusal that
+# prints nothing is indistinguishable from one that looked and found nothing.
+u10cover "" "rust shell" "${p429[@]}"; rc=$?
+[ "$rc" != 0 ] && grep -q 'PROD_GLOBS' "$u10err" \
+    && ok "and a profile declaring no PROD_GLOBS refuses out loud rather than in silence" \
+    || bad "the empty-PROD_GLOBS refusal said nothing (rc=$rc)"
+
+# Docs-only: nothing production, so there is nothing for the union to cover and
+# the receipt's scope question does not arise.
+u10cover "$pg429" docs README.md docs/x.md; rc=$?
+[ "$rc" = 0 ] \
+    && ok "and a diff with no production path needs no production coverage" \
+    || bad "a docs-only diff was refused for not covering production (rc=$rc)"
+
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
 # real pull request proved only that a badly chosen mutation is refused.
