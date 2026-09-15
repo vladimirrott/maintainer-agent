@@ -219,6 +219,21 @@ coverage_map() {  # $1 = suite dir, $2... = paths -> "path<TAB>suite-or-none" li
 }
 
 # Which suite covers these paths? Named explicitly, or inferred, or refused.
+# Does this path match PROD_GLOBS, the profile's own list of what invalidates a
+# receipt? cmd_merge already trusts that declaration; pick_suite did not, and the
+# two disagreeing is issue #19. Six of seven merges on 2026-09-10 fell back to an
+# asserted receipt because the pull request touched .rs and .md, no single suite
+# runs both, and the gate refused to write one. A .md change cannot invalidate a
+# mutation proof about .rs code, and cmd_merge says so at merge time.
+is_production() {
+    local p="$1" g
+    for g in "${PROD_GLOBS[@]}"; do
+        # shellcheck disable=SC2053
+        [[ "$p" == $g ]] && return 0
+    done
+    return 1
+}
+
 pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local named="$1"; shift
     local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
@@ -242,6 +257,57 @@ $(coverage_map "$dir" "$@")
         # shellcheck disable=SC1090
         ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
     done
+    # Nothing covered every path. Try again over the production paths only,
+    # because those are the ones a receipt binds. The non-production paths are
+    # named on stderr so the narrower scope is stated rather than assumed.
+    if [ -z "$covered" ] && [ "${#PROD_GLOBS[@]}" -gt 0 ]; then
+        local prod=() rest=() p
+        for p in "$@"; do
+            if is_production "$p"; then prod+=("$p"); else rest+=("$p"); fi
+        done
+        # Every non-production path must still be covered by SOME suite. A path
+        # no suite runs at all keeps refusing, which is the invariant this whole
+        # function exists for: PROD_GLOBS being incomplete must not become a way
+        # to smuggle an unknown file past the gate. This is the union case from
+        # issue #19 and nothing wider.
+        local orphan=0 q
+        for q in "${rest[@]}"; do
+            local any=0 t
+            for t in "$dir"/*.sh; do
+                [ -e "$t" ] || continue
+                # shellcheck disable=SC1090
+                ( . "$t"; suite_covers "$q" ) && { any=1; break; }
+            done
+            [ "$any" = 1 ] || { orphan=1; break; }
+        done
+        if [ "$orphan" = 0 ] && [ "${#prod[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0 ]; then
+            for s in "$dir"/*.sh; do
+                [ -e "$s" ] || continue
+                name="$(basename "$s" .sh)"
+                # shellcheck disable=SC1090
+                ( . "$s"; for p in "${prod[@]}"; do suite_covers "$p" || exit 1; done ) || continue
+                covered="$name"
+                # Name only what THIS suite does not run. A non-production path
+                # the chosen suite happens to cover is proved like any other, and
+                # listing it as unproven would understate the receipt as badly as
+                # the old refusal overstated what it needed.
+                local unproven=()
+                for p in "${rest[@]}"; do
+                    # shellcheck disable=SC1090
+                    ( . "$s"; suite_covers "$p" ) || unproven+=("$p")
+                done
+                if [ "${#unproven[@]}" -gt 0 ]; then
+                    printf '  the %s suite covers every PRODUCTION path; %d other path(s) are\n' \
+                        "$name" "${#unproven[@]}" >&2
+                    printf '  not covered by the receipt and it proves nothing about them:\n' >&2
+                    printf '    %s\n' "${unproven[@]}" >&2
+                    printf '  PROD_GLOBS is what cmd_merge re-checks at merge, so those paths\n' >&2
+                    printf '  cannot invalidate this proof. CI still gates them.\n' >&2
+                fi
+                break
+            done
+        fi
+    fi
     if [ -z "$covered" ]; then
         local map; map="$(coverage_map "$dir" "$@")"
         local orphans; orphans="$(printf '%s\n' "$map" | grep -c 'no suite covers this' || true)"

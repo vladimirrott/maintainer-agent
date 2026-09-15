@@ -2650,6 +2650,83 @@ for _f in --cap-drop=ALL --security-opt=no-new-privileges --read-only --network=
         || bad "$_f was dropped from the verify container"
 done
 
+echo "== coverage is required of production paths, which is what a receipt binds =="
+# Issue #19. Six of seven merges on 2026-09-10 fell back to an asserted receipt
+# for the same reason: the pull request touched .rs and .md, no single suite runs
+# both, and the gate refused to write one. Meanwhile cmd_merge already declares,
+# through PROD_GLOBS, which paths invalidate a receipt, and .md is not one of
+# them. The tool was refusing to prove something on the grounds that it could not
+# prove something else it does not need.
+#
+# Driven through pick_suite rather than grepped out of its source. A grep for
+# "is_production" passes against a function that returns the wrong answer, which
+# is the shape this file exists to stop.
+u9="$stub_dir/union19"; rm -rf "$u9"; mkdir -p "$u9/verify.d"
+cat > "$u9/verify.d/rust.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.rs|Cargo.lock) return 0 ;; esac; return 1; }
+SUITE
+cat > "$u9/verify.d/docs.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.md) return 0 ;; esac; return 1; }
+SUITE
+u9run() {  # $1 = space-separated PROD_GLOBS, $2... = changed paths -> stdout, stderr in $u9err
+    local globs="$1"; shift
+    PROFILE_DIR="$u9" MAINTAINER_PROFILE=u9 MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+        MAINTAINER_ACCOUNT=t MAINTAINER_MERGE_SOURCE_ONLY=1 PROD_GLOBS="$globs" \
+        bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" "$@"' _ "$@" \
+        2>"$u9err"
+}
+u9err="$u9/stderr"
+pg='crates/*/src/* Cargo.lock'
+
+# The case from issue #19: production .rs plus documentation, no single suite.
+out="$(u9run "$pg" crates/x/src/lib.rs README.md)"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = rust ] \
+    && ok "a receipt is earnable when one suite covers every production path" \
+    || bad "pick_suite still refuses the .rs + .md union (rc=$rc, stdout='$out')"
+grep -qE 'not covered by the receipt|proves nothing about' "$u9err" \
+    && ok "and it says on stderr that the receipt does not speak for the rest" \
+    || bad "a narrower receipt would be written with nothing saying it is narrower"
+# Named INSIDE the narrowing message, not merely present somewhere in stderr:
+# the refusal also lists every path, so a bare grep for the filename passes
+# against a tool that never narrowed anything.
+u9tail="$(sed -n '/not covered by the receipt/,$p' "$u9err")"
+grep -q 'README\.md' <<<"$u9tail" \
+    && ok "and names the paths it did not prove" \
+    || bad "the unproven paths are not named: $(tr '\n' ' ' < "$u9err" | cut -c1-110)"
+[ "$(printf '%s' "$out" | wc -l)" = 0 ] && [ "$out" = rust ] \
+    && ok "and the suite name reaches stdout on one line, unpolluted by the explanation" \
+    || bad "stdout carries more than the suite name, which its caller captures"
+
+# A non-production path the chosen suite DOES run is proved like any other, so
+# listing it as unproven would understate the receipt as badly as the old refusal
+# overstated what it needed.
+out="$(u9run "$pg" crates/x/src/lib.rs tests/helper.rs README.md)"; rc=$?
+u9tail="$(sed -n '/not covered by the receipt/,$p' "$u9err")"
+[ "$rc" = 0 ] && grep -q 'README\.md' <<<"$u9tail" && ! grep -q 'tests/helper\.rs' <<<"$u9tail" \
+    && ok "and a non-production path the suite does run is not called unproven" \
+    || bad "the unproven list does not match what the chosen suite covers: $(tr '\n' ' ' < "$u9err" | cut -c1-120)"
+
+# The invariant this function exists for. A path NO suite runs must still refuse,
+# so an incomplete PROD_GLOBS cannot become a way to smuggle a file past the gate.
+out="$(u9run "$pg" crates/x/src/lib.rs weird.xyz)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and a path no suite covers at all is still refused" \
+    || bad "the narrowing let an unknown file through (returned '$out')"
+
+# A production path that no suite covers is the other half of the same rule.
+out="$(u9run "packaging/*" packaging/thing README.md)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and an uncovered production path is refused" \
+    || bad "a receipt was issued for production code nothing ran (returned '$out')"
+
+# With nothing production in the diff there is no narrower scope to fall back to.
+out="$(u9run "$pg" README.md notes.rst)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and a diff with no production path falls back to nothing" \
+    || bad "pick_suite invented a scope for a diff it cannot narrow (returned '$out')"
+
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
 # real pull request proved only that a badly chosen mutation is refused.
@@ -3670,16 +3747,25 @@ PYEOF
 
 echo "== claims are visible, and staleness survives the maintainer touching them =="
 cm="$stub_dir/claimsview"; mkdir -p "$cm"
+# Dates are computed from today, never written down. The first version of this
+# fixture hardcoded 2026-08-24 and asserted the idle column matched 1[0-9]d, so
+# it passed for nine days and went red for good on the tenth, reporting a bug in
+# the tool that did not exist. A fixture that expires is a fixture that will one
+# day be "fixed" by loosening the assertion it was written to make.
+export CLAIMS_NOW CLAIMS_CLAIMANT_AT CLAIMS_OTHER_AT
+CLAIMS_NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CLAIMS_CLAIMANT_AT="$(date -u -d '14 days ago - 1 hour' +%Y-%m-%dT%H:%M:%SZ)"
+CLAIMS_OTHER_AT="$(date -u -d '3 days ago - 1 hour' +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$stub_dir/gh" <<'GHEOF'
 #!/usr/bin/env bash
 case "$*" in
-  *'issue list'*) cat <<'J'
-[{"number":272,"title":"t","assignees":[{"login":"atanishka308"}],"updatedAt":"2026-09-04T19:00:00Z","labels":[]},
- {"number":229,"title":"u","assignees":[],"updatedAt":"2026-09-04T19:00:00Z","labels":[]}]
+  *'issue list'*) cat <<J
+[{"number":272,"title":"t","assignees":[{"login":"atanishka308"}],"updatedAt":"${CLAIMS_NOW}","labels":[]},
+ {"number":229,"title":"u","assignees":[],"updatedAt":"${CLAIMS_NOW}","labels":[]}]
 J
     ;;
-  *issues/272/comments*) echo '[{"u":"atanishka308","at":"2026-08-24T10:00:00Z"}]';;
-  *issues/229/comments*) echo '[{"u":"someone","at":"2026-09-03T10:00:00Z"}]';;
+  *issues/272/comments*) echo "[{\"u\":\"atanishka308\",\"at\":\"${CLAIMS_CLAIMANT_AT}\"}]";;
+  *issues/229/comments*) echo "[{\"u\":\"someone\",\"at\":\"${CLAIMS_OTHER_AT}\"}]";;
 esac
 GHEOF
 chmod +x "$stub_dir/gh"
@@ -3689,7 +3775,7 @@ out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cm" MAINTAINER_SLUG=o/r MAINTAIN
 # updatedAt on BOTH rows is today, because assigning them moved it. Idle must
 # come from the claimant's own last comment or the check is blind to exactly
 # the claims it exists to find.
-grep -qE '#272 +atanishka308 +1[0-9]d' <<<"$out" \
+grep -qE '#272 +atanishka308 +14d' <<<"$out" \
     && ok "idle is measured from the claimant, not from updatedAt" \
     || bad "the maintainer touching an issue resets its staleness: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-90)"
 grep -q 'stale, a check-in is due' <<<"$out" \
