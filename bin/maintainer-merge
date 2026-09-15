@@ -409,6 +409,20 @@ cmd_verify() {
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
 
+    # One verify per pull request, for the same reason cmd_merge takes a lock.
+    # On 2026-09-14 a hand-run verify of #426 and the unattended review timer's
+    # verify of #426 ran side by side on one host, two full cargo builds of the
+    # same workspace against two extracted trees. The supervisor read the page
+    # cache they filled as memory exhaustion and killed five tasks; the real
+    # fault was two actors for one action. cmd_merge got this lock on
+    # 2026-09-10 and verify, which is the expensive half, did not.
+    mkdir -p "$RECEIPTS"
+    exec 201>"$RECEIPTS/.verify-$pr.lock" || die "cannot open the verify lock for #$pr"
+    flock -n 201 || die "another verify of #$pr is already running in this state directory.
+  One actor per action, and this one builds the whole workspace twice. Wait for
+  it, or remove $RECEIPTS/.verify-$pr.lock if you are sure nothing else is
+  running."
+
     local paths; paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')"
     [ -n "$paths" ] || die "could not read the changed files for #$pr"
     local -a path_list; mapfile -t path_list <<< "$paths"

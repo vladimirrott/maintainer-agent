@@ -4955,6 +4955,43 @@ grep -qiE 'already running' <<<"$out" \
     && bad "the lock stayed held after the first caller exited" \
     || ok "and once the first caller exits the lock is free again"
 
+echo "== one verify per pull request, because it is the expensive half =="
+# On 2026-09-14 a hand-run `verify 426` and the unattended review timer's
+# `verify 426` ran side by side on one host: two full cargo builds of the same
+# workspace against two extracted trees. The supervisor read the page cache they
+# filled as memory exhaustion and killed five tasks while MemAvailable was
+# 21.9 GiB. Two actors for one action, MISTAKES rule 9, and cmd_merge had taken
+# a lock for this four days earlier while verify, which builds twice, had not.
+vlock="$stub_dir/vlock"; rm -rf "$vlock"; mkdir -p "$vlock/receipts"
+make_stub podman 'echo ok'
+( if flock -n 202 2>/dev/null; then
+      touch "$vlock/held"
+      while [ ! -e "$vlock/release" ]; do sleep 0.1; done
+  else touch "$vlock/nolock"; fi ) 202>"$vlock/receipts/.verify-9.lock" &
+vpid=$!
+vwait=0
+until [ -e "$vlock/held" ] || [ -e "$vlock/nolock" ] || [ "$vwait" -ge 100 ]; do sleep 0.1; vwait=$((vwait+1)); done
+[ -e "$vlock/held" ] \
+    && ok "the first verify really took the lock before the second call ran" \
+    || bad "the holder did not get the lock, so the next assertion would be vacuous"
+out=$(PATH="$lkbin:$stub_dir:$PATH" MAINTAINER_STATE="$vlock" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO="$lkrepo" PROFILE_DIR="$covp" MAINTAINER_PROFILE=cov \
+      bash "$mg" verify 9 "$lkhead" somefilter 's/a/b/' 2>&1); vrc=$?
+# One assertion, not two. A bare "it exited non-zero" passes without the lock,
+# because this fixture profile refuses the changed path anyway, and a check that
+# passes for the wrong reason is the shape this file exists to catch. Measured:
+# with the lock removed, the rc-only assertion still said PASS.
+[ "$vrc" != 0 ] && grep -qiE 'another verify of #9 is already running' <<<"$out" \
+    && ok "a second verify is refused, and the refusal names the concurrent verify" \
+    || bad "two verifies of one pull request both proceeded, or it failed for another reason: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+touch "$vlock/release"; wait "$vpid" 2>/dev/null
+out=$(PATH="$lkbin:$stub_dir:$PATH" MAINTAINER_STATE="$vlock" MAINTAINER_ACCOUNT=testuser \
+      MAINTAINER_SLUG=o/r MAINTAINER_REPO="$lkrepo" PROFILE_DIR="$covp" MAINTAINER_PROFILE=cov \
+      bash "$mg" verify 9 "$lkhead" somefilter 's/a/b/' 2>&1)
+grep -qiE 'another verify of #9 is already running' <<<"$out" \
+    && bad "the lock stayed held after the first caller exited" \
+    || ok "and once the first caller exits the verify lock is free again"
+
 echo "== the merge is pinned to the head that was checked =="
 grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
     || bad "a push landing mid-merge would be merged unchecked"

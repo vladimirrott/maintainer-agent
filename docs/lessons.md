@@ -2365,3 +2365,42 @@ alternation across lines with a backslash inside single quotes, where a
 backslash-newline is **literal**, not a continuation. `bash -n` and `shellcheck`
 both passed and the regex matched nothing. It is built by concatenation now,
 and the test that proves it fires is what caught it.
+
+## 80. Two actors for one action, and the machine got the blame
+
+`verify 426` was running by hand. At 21:14 the unattended review timer fired,
+its agent reached the same conclusion I had, and ran `verify 426` with the same
+arguments. Two full cargo builds of the same workspace, against two separately
+extracted trees, on one twelve-core host.
+
+What that looked like from outside was memory exhaustion. Five background tasks
+were killed for it. The measurement said otherwise:
+
+```
+MemAvailable:   21918320 kB      # 21.9 GiB of 30
+SwapFree:        1967100 kB      # of 2 GiB
+largest RSS:     1.19 GB, 0.77 GB (two rustc)
+```
+
+Nothing was short of memory. The supervisor was reading `MemFree`, which the
+build's own page cache had driven to 398 MiB, and the duplicate work was what
+filled it. Killing the wrapper also left the podman containers running, so the
+builds continued with nothing collecting their results, and 5.7 GB of abandoned
+target directories accumulated in `/tmp`.
+
+`cmd_merge` took a per-pull-request lock on 2026-09-10, written up as lesson 74,
+for precisely this: MISTAKES rule 9, one watcher per action. `cmd_verify` did
+not get one, and verify is the half that builds the workspace twice.
+
+**Guard:** `cmd_verify` takes `.verify-$pr.lock` immediately after it resolves a
+container runtime, before it fetches anything or extracts a tree. The second
+caller is refused by name.
+
+The test for it passed for the wrong reason first. Asserting only that the
+second call exited non-zero was green with the lock removed, because the fixture
+profile refuses that changed path anyway. Two assertions folded into one, which
+now requires the refusal to name the concurrent verify, and that one does fail
+when the lock is taken out.
+
+A lock on the cheap half and none on the expensive half is worth saying out
+loud: the guard went where the bug had been, not where the cost was.
