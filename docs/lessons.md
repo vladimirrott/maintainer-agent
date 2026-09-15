@@ -2228,3 +2228,83 @@ One of the assertions I wrote for this passed while the bug was still live,
 because it grepped for `MAINTAINER_NOTIFY=off` and matched its own test body.
 Lesson 5 in this file is "a check must not match its own source", and it caught
 me writing the check that lesson exists to prevent.
+
+## 77. The gate refused to prove what it could, because it could not prove something it did not need
+
+`maintainer-merge verify` earns an observed receipt by running a suite twice,
+clean and mutated. `pick_suite` decides which suite. It required one suite to
+cover **every** changed path, so a pull request touching `.rs` and `.md` got
+nothing: no single suite runs both.
+
+That is most pull requests. Six of the seven merges on 2026-09-10 fell back to
+an asserted receipt for exactly this reason, and the unattended run on
+2026-09-14 earned zero observed receipts and refused outright:
+
+```
+maintainer-merge: the 'rust' suite does not cover every changed path:
+    CHANGELOG.md	docs
+    Cargo.lock	rust
+    crates/sysknife-brain/src/planning_tools/propose_plan.rs	rust
+    docs/introduction.md	docs
+    tests/evidence/workspace-tests.json	no suite covers this
+```
+
+Meanwhile `cmd_merge` already carried the answer. `PROD_GLOBS` is the profile's
+own declaration of which paths invalidate a receipt, and it is what `cmd_merge`
+re-checks when the head moves under an approval. A `.md` change cannot
+invalidate a mutation proof about `.rs` code, and one half of the tool said so
+while the other half refused on those grounds. The two halves now read the same
+declaration.
+
+**Guard:** when no suite covers everything, `pick_suite` retries over the
+production paths alone and returns the suite that covers those. Three things
+keep that from becoming a loophole:
+
+- a path **no suite covers at all** still refuses, so an incomplete
+  `PROD_GLOBS` cannot smuggle an unknown file past the gate;
+- a diff with no production path at all refuses, because there is no narrower
+  scope to fall back to;
+- the receipt names, on stderr, every path the chosen suite does not run, so a
+  narrower proof is stated rather than assumed.
+
+The refusal above had a second cause worth separating. `tests/evidence/workspace-tests.json`
+was covered by no suite, and `CONTRIBUTING.md` requires that file to move on any
+added or removed Rust test, so every test-adding pull request carried an orphan
+path. The rust suite now claims it, with the reason written next to the case
+arm: that file holds the count of the tests this suite runs. It does not run
+vitest, so the `frontend_tests` field in the same file is outside what the
+receipt proves, and the comment says that too.
+
+The test I wrote for this failed the way this file keeps recording. My first
+three assertions grepped `bin/maintainer-merge` for `is_production` and for the
+wording of the new message, which passes against a function that returns the
+wrong answer. Rewritten to drive `pick_suite` against a fixture profile, one of
+them still passed with the fix removed: it checked that stderr names
+`README.md`, and the *refusal* names every path too. It now reads only the text
+after the narrowing line. Four of the eight assertions fail with the fix
+reverted; the four that pass both ways are the invariants, which is correct.
+
+## 78. A fixture that expires reports a bug that does not exist
+
+`claims` measures how long a claim has been idle from the claimant's own last
+comment, never from `updatedAt`, because assigning an issue moves `updatedAt`
+and would reset the staleness of exactly the claims the check exists to find.
+The test for it wrote a comment date of `2026-08-24` and asserted the idle
+column matched `1[0-9]d`.
+
+It passed for nine days. On the tenth the suite went red on every machine, with
+a failure message accusing the tool of the bug it was written to prevent:
+
+```
+FAIL  the maintainer touching an issue resets its staleness:
+      #272  atanishka308  21d  stale
+```
+
+Nothing was wrong. The fixture had aged out of its own assertion window, and
+the cheap repair is to widen the pattern, which is how a test stops testing.
+
+**Guard:** the fixture computes its dates from `date -u -d '14 days ago - 1
+hour'` and asserts the exact figure, `14d`. The hour of margin is the point:
+without it, `floor(14d - ε)` is 13 whenever the two timestamps land on either
+side of a second, and a gate that fails at random teaches everyone to re-run
+until green.

@@ -10,6 +10,16 @@
 suite_covers() {  # $1 = a path from the pull request
     case "$1" in
         *.rs|*/Cargo.toml|Cargo.toml|Cargo.lock) return 0 ;;
+        # The evidence artifact holds the Rust test count and nothing else that
+        # a Rust pull request moves. CONTRIBUTING.md requires it to change on
+        # any added or removed test, so every test-adding pull request carried a
+        # path no suite claimed, and the gate refused to write a receipt for the
+        # whole class. This suite runs the tests whose count that file records,
+        # which is what covering a path means here.
+        #
+        # It does not run vitest, so the `frontend_tests` field in that file is
+        # outside what a receipt from this suite proves.
+        tests/evidence/*.json) return 0 ;;
     esac
     return 1
 }

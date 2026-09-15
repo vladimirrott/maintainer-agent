@@ -12,6 +12,30 @@ middle digit.
 
 ### Added
 
+- **A receipt is earnable when one suite covers every production path.**
+  `pick_suite` demanded a single suite cover every changed path, so a pull
+  request touching `.rs` and `.md` earned nothing: no suite runs both. Six of
+  the seven merges on 2026-09-10 fell back to an asserted receipt for that
+  reason, and the 2026-09-14 run earned zero observed receipts. `cmd_merge`
+  already declares through `PROD_GLOBS` which paths invalidate a receipt, and
+  both halves now read that declaration. A path no suite covers at all still
+  refuses, a diff with no production path still refuses, and the paths the
+  chosen suite does not run are named on stderr rather than passed over.
+- **The sysknife rust suite claims `tests/evidence/*.json`.** `CONTRIBUTING.md`
+  requires that artifact to move on any added or removed Rust test, and no suite
+  claimed it, so every test-adding pull request carried a path the gate could
+  not place. The suite runs the tests whose count that file records; the comment
+  next to the case arm says so, and says that the `frontend_tests` field is
+  outside what the receipt proves.
+
+### Fixed
+
+- **The claims fixture no longer expires.** It wrote a comment date of
+  `2026-08-24` and asserted the idle column matched `1[0-9]d`, so it passed for
+  nine days and then failed on every machine, accusing `claims` of the bug it
+  was written to prevent. Dates are computed from today with an hour of margin
+  and the assertion names the exact figure.
+
 - **`MAINTAINER_NOTIFY=off` silences the desktop popup without silencing the
   record.** Honoured by `lib/run.sh` and `platform/linux/alert.sh`, and exported
   once by the test suite. Every execution of the offline suite had been raising
