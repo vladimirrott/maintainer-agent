@@ -234,6 +234,54 @@ is_production() {
     return 1
 }
 
+# Does $1 cover every PRODUCTION path, with every other path covered by some
+# suite? That is the narrower question a receipt actually answers, and the one
+# cmd_merge re-asks when the head moves. On success this names, on stderr, the
+# paths the chosen suite does not run, so a narrower proof is stated rather than
+# assumed. Three refusals keep the narrowing from becoming a loophole: no
+# PROD_GLOBS, no production path in the diff, or a path no suite runs at all.
+covers_production() {  # $1 = suite file, $2 = suite dir, $3... = changed paths
+    local suite="$1" dir="$2"; shift 2
+    [ "${#PROD_GLOBS[@]}" -gt 0 ] || return 1
+    local prod=() rest=() p
+    for p in "$@"; do
+        if is_production "$p"; then prod+=("$p"); else rest+=("$p"); fi
+    done
+    [ "${#prod[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0 ] || return 1
+    # An incomplete PROD_GLOBS must not become a way to smuggle an unknown file
+    # past the gate, so a path no suite covers at all still refuses.
+    local q t any
+    for q in "${rest[@]}"; do
+        any=0
+        for t in "$dir"/*.sh; do
+            [ -e "$t" ] || continue
+            # shellcheck disable=SC1090
+            ( . "$t"; suite_covers "$q" ) && { any=1; break; }
+        done
+        [ "$any" = 1 ] || return 1
+    done
+    # shellcheck disable=SC1090
+    ( . "$suite"; for p in "${prod[@]}"; do suite_covers "$p" || exit 1; done ) || return 1
+    # Name only what THIS suite does not run. A non-production path the chosen
+    # suite happens to cover is proved like any other, and listing it as
+    # unproven would understate the receipt as badly as the old refusal
+    # overstated what it needed.
+    local unproven=()
+    for p in "${rest[@]}"; do
+        # shellcheck disable=SC1090
+        ( . "$suite"; suite_covers "$p" ) || unproven+=("$p")
+    done
+    if [ "${#unproven[@]}" -gt 0 ]; then
+        printf '  the %s suite covers every PRODUCTION path; %d other path(s) are\n' \
+            "$(basename "$suite" .sh)" "${#unproven[@]}" >&2
+        printf '  not covered by the receipt and it proves nothing about them:\n' >&2
+        printf '    %s\n' "${unproven[@]}" >&2
+        printf '  PROD_GLOBS is what cmd_merge re-checks at merge, so those paths\n' >&2
+        printf '  cannot invalidate this proof. CI still gates them.\n' >&2
+    fi
+    return 0
+}
+
 pick_suite() {  # $1 = named suite or empty, $2... = changed paths
     local named="$1"; shift
     local dir; dir="$(suite_dir)" || die "this profile declares no verify.d/ suites; see docs/verifying.md"
@@ -245,6 +293,7 @@ pick_suite() {  # $1 = named suite or empty, $2... = changed paths
         # for by name.
         # shellcheck disable=SC1090
         ( . "$dir/$named.sh"; for p in "$@"; do suite_covers "$p" || exit 1; done ) \
+            || covers_production "$dir/$named.sh" "$dir" "$@" \
             || die "the '$named' suite does not cover every changed path:
 $(coverage_map "$dir" "$@")
   A receipt from a suite that does not run the changed code proves nothing."
@@ -257,56 +306,14 @@ $(coverage_map "$dir" "$@")
         # shellcheck disable=SC1090
         ( . "$s"; for p in "$@"; do suite_covers "$p" || exit 1; done ) && { covered="$name"; break; }
     done
-    # Nothing covered every path. Try again over the production paths only,
-    # because those are the ones a receipt binds. The non-production paths are
-    # named on stderr so the narrower scope is stated rather than assumed.
-    if [ -z "$covered" ] && [ "${#PROD_GLOBS[@]}" -gt 0 ]; then
-        local prod=() rest=() p
-        for p in "$@"; do
-            if is_production "$p"; then prod+=("$p"); else rest+=("$p"); fi
+    # Nothing covered every path. Try again over the production paths alone,
+    # because those are the ones a receipt binds.
+    if [ -z "$covered" ]; then
+        for s in "$dir"/*.sh; do
+            [ -e "$s" ] || continue
+            covers_production "$s" "$dir" "$@" \
+                && { covered="$(basename "$s" .sh)"; break; }
         done
-        # Every non-production path must still be covered by SOME suite. A path
-        # no suite runs at all keeps refusing, which is the invariant this whole
-        # function exists for: PROD_GLOBS being incomplete must not become a way
-        # to smuggle an unknown file past the gate. This is the union case from
-        # issue #19 and nothing wider.
-        local orphan=0 q
-        for q in "${rest[@]}"; do
-            local any=0 t
-            for t in "$dir"/*.sh; do
-                [ -e "$t" ] || continue
-                # shellcheck disable=SC1090
-                ( . "$t"; suite_covers "$q" ) && { any=1; break; }
-            done
-            [ "$any" = 1 ] || { orphan=1; break; }
-        done
-        if [ "$orphan" = 0 ] && [ "${#prod[@]}" -gt 0 ] && [ "${#rest[@]}" -gt 0 ]; then
-            for s in "$dir"/*.sh; do
-                [ -e "$s" ] || continue
-                name="$(basename "$s" .sh)"
-                # shellcheck disable=SC1090
-                ( . "$s"; for p in "${prod[@]}"; do suite_covers "$p" || exit 1; done ) || continue
-                covered="$name"
-                # Name only what THIS suite does not run. A non-production path
-                # the chosen suite happens to cover is proved like any other, and
-                # listing it as unproven would understate the receipt as badly as
-                # the old refusal overstated what it needed.
-                local unproven=()
-                for p in "${rest[@]}"; do
-                    # shellcheck disable=SC1090
-                    ( . "$s"; suite_covers "$p" ) || unproven+=("$p")
-                done
-                if [ "${#unproven[@]}" -gt 0 ]; then
-                    printf '  the %s suite covers every PRODUCTION path; %d other path(s) are\n' \
-                        "$name" "${#unproven[@]}" >&2
-                    printf '  not covered by the receipt and it proves nothing about them:\n' >&2
-                    printf '    %s\n' "${unproven[@]}" >&2
-                    printf '  PROD_GLOBS is what cmd_merge re-checks at merge, so those paths\n' >&2
-                    printf '  cannot invalidate this proof. CI still gates them.\n' >&2
-                fi
-                break
-            done
-        fi
     fi
     if [ -z "$covered" ]; then
         local map; map="$(coverage_map "$dir" "$@")"

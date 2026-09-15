@@ -20,7 +20,10 @@ middle digit.
   already declares through `PROD_GLOBS` which paths invalidate a receipt, and
   both halves now read that declaration. A path no suite covers at all still
   refuses, a diff with no production path still refuses, and the paths the
-  chosen suite does not run are named on stderr rather than passed over.
+  chosen suite does not run are named on stderr rather than passed over. The
+  rule lives in one function, `covers_production`, that both the inferred and
+  the named-suite branch call: the first version fixed only the inferred one,
+  and `verify <pr> <sha> <filter> <sed> rust` was refused exactly as before.
 - **The sysknife rust suite claims `tests/evidence/*.json`.** `CONTRIBUTING.md`
   requires that artifact to move on any added or removed Rust test, and no suite
   claimed it, so every test-adding pull request carried a path the gate could

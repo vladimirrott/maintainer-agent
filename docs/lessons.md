@@ -2275,6 +2275,19 @@ arm: that file holds the count of the tests this suite runs. It does not run
 vitest, so the `frontend_tests` field in the same file is outside what the
 receipt proves, and the comment says that too.
 
+The first fix reached one caller and not the other. `pick_suite` has a separate
+branch for a suite named by hand, carrying its own copy of the coverage rule,
+and the unattended run passes `rust` explicitly. So the tests were green, the
+inferred path was fixed, and the real command was refused exactly as before:
+
+```
+$ maintainer-merge verify 426 33285c61 'ubuntu_only_descriptions_match_execution_fence' '<sed>' rust
+maintainer-merge: the 'rust' suite does not cover every changed path:
+```
+
+Running the actual command found that; nothing else would have. The rule now
+lives in one function, `covers_production`, which both branches call.
+
 The test I wrote for this failed the way this file keeps recording. My first
 three assertions grepped `bin/maintainer-merge` for `is_production` and for the
 wording of the new message, which passes against a function that returns the

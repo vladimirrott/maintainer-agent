@@ -2671,10 +2671,13 @@ cat > "$u9/verify.d/docs.sh" <<'SUITE'
 suite_covers() { case "$1" in *.md) return 0 ;; esac; return 1; }
 SUITE
 u9run() {  # $1 = space-separated PROD_GLOBS, $2... = changed paths -> stdout, stderr in $u9err
-    local globs="$1"; shift
+    u9named "" "$@"
+}
+u9named() {  # $1 = suite name or empty, $2 = PROD_GLOBS, $3... = changed paths
+    local pick="$1" globs="$2"; shift 2
     PROFILE_DIR="$u9" MAINTAINER_PROFILE=u9 MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
         MAINTAINER_ACCOUNT=t MAINTAINER_MERGE_SOURCE_ONLY=1 PROD_GLOBS="$globs" \
-        bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" "$@"' _ "$@" \
+        bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "$@"' _ "$pick" "$@" \
         2>"$u9err"
 }
 u9err="$u9/stderr"
@@ -2707,6 +2710,18 @@ u9tail="$(sed -n '/not covered by the receipt/,$p' "$u9err")"
 [ "$rc" = 0 ] && grep -q 'README\.md' <<<"$u9tail" && ! grep -q 'tests/helper\.rs' <<<"$u9tail" \
     && ok "and a non-production path the suite does run is not called unproven" \
     || bad "the unproven list does not match what the chosen suite covers: $(tr '\n' ' ' < "$u9err" | cut -c1-120)"
+
+# Naming the suite by hand takes the same narrowing. The unattended run on
+# 2026-09-14 passed `rust` explicitly and was refused by a branch that had its
+# own copy of the coverage rule, so the fix reached one caller and not the other.
+out="$(u9named rust "$pg" crates/x/src/lib.rs README.md)"; rc=$?
+[ "$rc" = 0 ] && [ "$out" = rust ] \
+    && ok "and a named suite is narrowed the same way an inferred one is" \
+    || bad "naming the suite still refuses the union (rc=$rc, stdout='$out')"
+out="$(u9named docs "$pg" crates/x/src/lib.rs README.md)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "and a named suite that misses a production path is still refused" \
+    || bad "naming a suite bought coverage it does not have (returned '$out')"
 
 # The invariant this function exists for. A path NO suite runs must still refuse,
 # so an incomplete PROD_GLOBS cannot become a way to smuggle a file past the gate.
