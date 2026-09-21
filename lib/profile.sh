@@ -127,26 +127,89 @@ sys.exit(0 if changed else 0)
 SCRUBPY
 }
 
-# Which backend failures fix themselves, and which do not.
+# Which backend failures fix themselves, which need a person, and which the
+# agent has never seen before.
 #
 # 2026-09-07T20-34-issues stopped on "You've hit your session limit, resets
 # 10:10pm". run.sh alerted at critical for the backend exit, alerted again
-# because the run wrote no report, and exited 1 so systemd's OnFailure alerted a
-# third time. Three popups and a red in maintainer-doctor for 39 hours, for a
+# because the run wrote no report, and exited 1 so systemd's OnFailure alerted
+# a third time. Three popups and a red in maintainer-doctor for 39 hours, for a
 # window that reopened by itself ninety minutes later.
 #
-# Prints the line it matched and returns 0 when waiting is the whole fix.
+# The shapes used to be an alternation written inside this function, which made
+# adding a cause a code change and made it impossible for anything to enumerate
+# what the agent can recognise. They live in lib/failure-shapes.json now, and
+# MAINTAINER_FAILURE_SHAPES overrides the path.
 #
-# The list stays short on purpose. An empty credit balance is deliberately NOT
-# in it: no retry pays an invoice, and a classifier that calls everything
-# transient silences the alerts it exists to raise. An unreadable log is not
-# transient either, for the same reason a guard that cannot ask must not answer.
-backend_transient_reason() {
-    local log="${1:-}" hit=""
-    [ -n "$log" ] && [ -r "$log" ] || return 1
-    hit="$(grep -aoiE "you'?ve hit your (session|usage) limit.{0,60}|usage limit reached.{0,60}|overloaded_error|rate_limit_error|api error: (429|5[0-9][0-9])|connection error|fetch failed" "$log" 2>/dev/null | tail -1)"
-    [ -n "$hit" ] || return 1
-    printf '%s' "$hit"
+# Three outcomes, and the third is the one worth having:
+#
+#   transient      the next slot fixes it; report at low urgency
+#   needs_human    no retry clears it; report at critical, with the fix
+#   unclassified   nothing matched; say so, and carry the evidence line
+#
+# An empty credit balance is deliberately NOT transient: no retry pays an
+# invoice, and a classifier that calls everything transient silences the alerts
+# it exists to raise. An unreadable log is not transient either, for the same
+# reason a guard that cannot ask must not answer.
+maintainer_failure_shapes_path() {
+    if [ -n "${MAINTAINER_FAILURE_SHAPES:-}" ]; then
+        printf '%s' "$MAINTAINER_FAILURE_SHAPES"; return 0
+    fi
+    local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local c
+    for c in "$here/failure-shapes.json" "$HOME/.local/share/maintainer/failure-shapes.json"; do
+        [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+# Prints "<class>\t<id>\t<matched text>" and returns 0 when a shape matched.
+# Prints "unclassified\t\t<last error-ish line>" and returns 1 when none did,
+# because a failure nobody can name still has to be reportable as that.
+# Returns 2 without classifying anything when it could not read the table or
+# the log, which is not the same answer as "nothing matched".
+maintainer_classify_failure() {  # $1 = the run log
+    local log="${1:-}" table shapes id cls pat hit
+    [ -n "$log" ] && [ -r "$log" ] || { printf 'unreadable\t\t%s' "no readable log at '${log}'"; return 2; }
+    table="$(maintainer_failure_shapes_path)" || {
+        printf 'unreadable\t\tno failure-shapes table on this host'; return 2; }
+    shapes="$(python3 - "$table" <<'PYEOF' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(3)
+for sh in d.get("shapes", []):
+    print("\t".join((sh["id"], sh["class"], sh["pattern"])))
+PYEOF
+    )" || { printf 'unreadable\t\tfailure-shapes table at %s could not be parsed' "$table"; return 2; }
+    [ -n "$shapes" ] || { printf 'unreadable\t\tfailure-shapes table at %s lists no shapes' "$table"; return 2; }
+    while IFS="$(printf '\t')" read -r id cls pat; do
+        [ -n "$id" ] || continue
+        hit="$(grep -aoiE -- "$pat" "$log" 2>/dev/null | tail -1)"
+        [ -n "$hit" ] || continue
+        printf '%s\t%s\t%s' "$cls" "$id" "$hit"
+        return 0
+    done <<< "$shapes"
+    # Nothing matched. Hand back the most error-shaped line in the log so the
+    # run is still explainable by reading one line rather than a transcript.
+    hit="$(grep -aiE 'error|fail|panic|refus|denied|cannot|could not' "$log" 2>/dev/null | tail -1)"
+    [ -n "$hit" ] || hit="$(tail -1 "$log" 2>/dev/null)"
+    printf 'unclassified\t\t%s' "${hit:-the log says nothing}"
+    return 1
+}
+
+# The two questions run.sh asks, both answered from the one table above.
+# Kept as named predicates because a call site reading `backend_transient_reason`
+# says what it wants; a call site parsing a tab-separated triple does not.
+backend_transient_reason() {  # $1 = the run log
+    local out; out="$(maintainer_classify_failure "${1:-}")" || return 1
+    case "$out" in transient*) printf '%s' "$(printf '%s' "$out" | cut -f3)" ;; *) return 1 ;; esac
+}
+
+backend_needs_human_reason() {  # $1 = the run log
+    local out; out="$(maintainer_classify_failure "${1:-}")" || return 1
+    case "$out" in needs_human*) printf '%s' "$(printf '%s' "$out" | cut -f3)" ;; *) return 1 ;; esac
 }
 
 maintainer_lib() {

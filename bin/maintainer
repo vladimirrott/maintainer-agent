@@ -564,21 +564,108 @@ def _why_it_died(log: Path) -> str:
     are written before anything can fail, so they explain nothing.
     """
     try:
-        lines = log.read_text(errors="replace").splitlines()
+        text = log.read_text(errors="replace")
     except OSError as exc:
         return f"its log is unreadable ({exc.__class__.__name__})"
-    for line in reversed(lines):
-        line = line.strip()
-        if not line or line.startswith("=== run.sh ") or line.startswith("maintainer="):
+
+    # Classify against the same table lib/profile.sh uses, rather than keeping
+    # a second copy of the shapes here. Two copies of one rule is how the CLI
+    # and the MCP tool ended up disagreeing about the same database.
+    cls, cause, evidence = _classify_log(text)
+    if cls == "unclassified":
+        return f"unclassified: {safe_for_prompt(evidence, 80)}"
+    return f"{cls}/{cause}: {safe_for_prompt(evidence, 70)}"
+
+
+def _failure_config() -> dict:
+    """The cause table, or {} when it cannot be read.
+
+    {} makes every failure `unclassified`, which is the safe answer: it says
+    the agent could not name the cause instead of inventing one.
+    """
+    env = os.environ.get("MAINTAINER_FAILURE_SHAPES")
+    here = Path(__file__).resolve().parent
+    for cand in ([Path(env)] if env else []) + [
+            here.parent / "lib" / "failure-shapes.json",
+            Path.home() / ".local/share/maintainer/failure-shapes.json"]:
+        try:
+            return json.loads(cand.read_text())
+        except Exception:
             continue
-        return safe_for_prompt(line, 90)
-    return "no reason recorded, so the run was killed before it could say"
+    return {}
+
+
+def _failure_shapes() -> list:
+    """The cause table, or an empty list when it cannot be read.
+
+    An empty list makes every failure `unclassified`, which is the safe answer:
+    it says the agent could not name the cause instead of inventing one.
+    """
+    return _failure_config().get("shapes", [])
+
+
+def _classify_log(text: str) -> tuple:
+    """(class, cause id, evidence line) for a run log. Never guesses."""
+    for sh in _failure_shapes():
+        try:
+            m = None
+            for m in re.finditer(sh["pattern"], text, re.IGNORECASE):
+                pass
+            if m:
+                return sh["class"], sh["id"], m.group(0).strip()
+        except re.error:
+            continue
+    # Nothing matched. Hand back the most error-shaped line rather than the
+    # last line: every aborted run in September ended on an unrelated shell
+    # diagnostic, and the audit reported that as the reason all three died.
+    cfg = _failure_config()
+    noise = tuple(cfg.get("evidence_noise_prefixes", ()))
+    noise_re = [re.compile(p) for p in cfg.get("evidence_noise_patterns", ())]
+
+    def _is_noise(ln: str) -> bool:
+        return ln.startswith(noise) or any(r.search(ln) for r in noise_re)
+
+    # Everything before the briefing ends is the prompt, not the run. It lists
+    # pull request titles and commit subjects, and one of those carrying the
+    # word "errors" was reported as the reason a run died.
+    markers = tuple(cfg.get("evidence_starts_after", ()))
+    lines = text.splitlines()
+    start = 0
+    for i, ln in enumerate(lines):
+        if any(m in ln for m in markers):
+            start = i + 1          # the whole marker LINE is briefing, not evidence
+    text_for_evidence = "\n".join(lines[start:]) if start else text
+    best = ""
+    for line in text_for_evidence.splitlines():
+        line = line.strip()
+        if not line or _is_noise(line):
+            continue
+        if re.search(r"error|fail|panic|refus|denied|cannot|could not|unusable",
+                     line, re.IGNORECASE):
+            best = line
+    if best:
+        return "unclassified", "", best
+    for line in reversed(text_for_evidence.splitlines()):
+        line = line.strip()
+        if line and not _is_noise(line):
+            return "unclassified", "", line
+    # A log holding the briefing and nothing else. The run started, printed no
+    # diagnostic of its own, and stopped: systemd killing it on a timeout, the
+    # OOM killer, or the machine suspending. That is a shape with a name and a
+    # place to look, so it is a class rather than the unexplained bucket. Nine
+    # runs between 2 and 18 September ended this way.
+    return ("needs_human", "died-without-saying",
+            "the run started, wrote no diagnostic of its own, and stopped")
 
 
 def cmd_audit(which: str) -> None:
     ids = ([p.stem for p in sorted(RUNS.glob("*.md"))] if which in ("--all", "")
            else [which])
-    if not ids:
+    # `not ids` used to return here, which meant a state directory holding
+    # nothing but dead runs printed "no runs to audit". Three aborted runs read
+    # as a quiet week. Only bail when there is no log to explain either.
+    if not ids and (which not in ("--all", "") or not any(
+            p.stem != "alerts" for p in LOGS.glob("*.log"))):
         print("maintainer: no runs to audit")
         return
     # A run that died leaves a log and no report. Walking runs/ alone made that
@@ -619,6 +706,23 @@ def cmd_audit(which: str) -> None:
         print(f"\n! {len(orphans)} run(s) wrote a log and no report. Each is a gap in the")
         print("  trail that reads as a quiet period. Check logs/alerts.log and the")
         print("  unit's journal for why the run stopped.")
+        # Thirty-one lines of "started and never reported" is a list nobody
+        # reads twice. The same thirty-one grouped by cause is a decision:
+        # sixteen were one unreachable host, and that is one thing to fix.
+        by_cause: dict = {}
+        for _id, why in orphans:
+            head = why.split(":", 1)[0].strip() if ":" in why else "unclassified"
+            by_cause[head] = by_cause.get(head, 0) + 1
+        print("\n  by cause:")
+        for head, n in sorted(by_cause.items(), key=lambda kv: (-kv[1], kv[0])):
+            print(f"    {n:3d}  {head}")
+        unexplained = by_cause.get("unclassified", 0)
+        if unexplained:
+            print(f"\n  {unexplained} of them match no shape in failure-shapes.json, so nothing")
+            print("  can say why they died. Add a shape for each, or the count stays a")
+            print("  number rather than a cause.")
+        else:
+            print("\n  every one of them carries a named cause.")
 
 
 def cmd_gc(dry: bool) -> None:

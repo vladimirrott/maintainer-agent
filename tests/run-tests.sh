@@ -623,6 +623,207 @@ make_stub notify-send 'exit 0'
 grep -q 'SuccessExitStatus=75' "$root/platform/linux/maintainer@.service" \
     && ok "the unit treats 75 as success, so OnFailure does not fire a second alert" \
     || bad "systemd still calls a transient failure a unit failure"
+
+echo "== the toasts three real aborted runs actually fired =="
+# Measured, not imagined. Three sysknife review runs aborted between 17 and 21
+# September and every one of them raised THREE critical popups: run.sh alerts
+# for the backend exit, alerts again because no report was written, then exits
+# 1 and systemd's OnFailure sends a third. Nine critical toasts in five days,
+# for two distinct conditions, one of which healed by itself.
+#
+#   2026-09-17T21-14  Failed to authenticate: OAuth session expired and could not be refreshed
+#   2026-09-18T11-15  (the same, the next morning, nothing suppressed the repeat)
+#   2026-09-21T11-17  API Error: Can't reach the API server - check your internet or DNS (EAI_AGAIN)
+tcl="$stub_dir/classify"; rm -rf "$tcl"; mkdir -p "$tcl"
+printf 'API Error: Can%st reach the API server - check your internet or DNS (EAI_AGAIN)\n' "'" > "$tcl/dns.log"
+printf 'Failed to authenticate: OAuth session expired and could not be refreshed\n' > "$tcl/oauth.log"
+printf 'thread panicked at src/main.rs:12: assertion failed\n' > "$tcl/real.log"
+# shellcheck disable=SC1090
+tr_out=$( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/dns.log" ); tr_rc=$?
+{ [ "$tr_rc" = 0 ] && grep -qi 'EAI_AGAIN' <<<"$tr_out"; } \
+    && ok "a DNS failure reaching the API is classified as transient, quoting what matched" \
+    || bad "EAI_AGAIN was called permanent, so it raised three critical toasts (rc=$tr_rc, '$tr_out')"
+# shellcheck disable=SC1090
+( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/oauth.log" >/dev/null ) \
+    && bad "an expired OAuth session was called transient, so nobody is told to log in" \
+    || ok "an expired login is NOT transient, because no retry fixes it"
+# shellcheck disable=SC1090
+( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/real.log" >/dev/null ) \
+    && bad "a genuine panic was waved through as transient" \
+    || ok "a genuine failure is still not transient"
+# An expired login needs a person, so it stays critical. It also repeats on
+# every timer until that person acts, which is the part that becomes noise.
+# shellcheck disable=SC1090
+( . "$root/lib/profile.sh" >/dev/null 2>&1; declare -F backend_needs_human_reason >/dev/null ) \
+    && ok "there is a class for a failure that needs a person rather than a retry" \
+    || bad "an expired login is lumped in with an unknown crash"
+# shellcheck disable=SC1090
+nh=$( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_needs_human_reason "$tcl/oauth.log" 2>/dev/null ); nh_rc=$?
+{ [ "$nh_rc" = 0 ] && grep -qi 'oauth' <<<"$nh"; } \
+    && ok "and an expired OAuth session is in it, quoting what matched" \
+    || bad "the expired-login shape is not recognised (rc=$nh_rc, '$nh')"
+# shellcheck disable=SC1090
+( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_needs_human_reason "$tcl/dns.log" >/dev/null 2>&1 ) \
+    && bad "a DNS blip is being reported as something a person must fix" \
+    || ok "and a DNS blip is not"
+# The toast has to say what to do. "Failed to authenticate" is the vocabulary of
+# the thing that broke, not a message to a person.
+grep -q 'login' <<< "$( . "$root/lib/run.sh" 2>/dev/null; true )" 2>/dev/null || true
+grep -qE 'OAuth|authenticate' "$root/lib/run.sh" \
+    && ok "run.sh translates an expired login into an instruction" \
+    || bad "the raw 'Failed to authenticate' string is what reaches the desktop"
+
+echo "== the audit names the cause, not whatever the log said last =="
+# _why_it_died returned the last non-header line, which is a heuristic and was
+# wrong for every aborted run in September: all three ended with
+#   run.sh: line 441: maintainer_scrub_secret: command not found
+# so `maintainer audit` reported a missing shell function as the reason three
+# separate runs died, when two were an expired login and one was DNS. A wrong
+# cause is worse than no cause, because somebody acts on it.
+aud="$stub_dir/audithome"; rm -rf "$aud"; mkdir -p "$aud/logs" "$aud/runs"
+cat > "$aud/logs/2031-01-01T00-00-review.log" <<'ALOG'
+=== run.sh sysknife/review 2031-01-01T00:00:00-06:00 ===
+maintainer=v0.0.0 backend=claude
+API Error: Can't reach the API server - check your internet or DNS (EAI_AGAIN)
+claude exited non-zero for 2031-01-01T00-00-review.
+/home/x/.local/share/maintainer/run.sh: line 441: something_unrelated: command not found
+ALOG
+aout=$(MAINTAINER_STATE="$aud" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_PROFILE=t \
+       python3 "$root/bin/maintainer" audit --all 2>&1)
+grep -q 'api-unreachable\|transient' <<<"$aout" \
+    && ok "the audit names the classified cause of a dead run" \
+    || bad "the audit does not classify: $(printf '%s' "$aout" | tr '\n' ' ' | cut -c1-140)"
+grep -q 'something_unrelated' <<<"$aout" \
+    && bad "the audit still blames the last line of the log" \
+    || ok "and does not blame the last line of the log"
+# An unknown death must still be reported, and reported AS unknown.
+cat > "$aud/logs/2031-01-02T00-00-review.log" <<'ALOG'
+=== run.sh sysknife/review 2031-01-02T00:00:00-06:00 ===
+the machine caught fire in a way nothing has a pattern for
+ALOG
+aout=$(MAINTAINER_STATE="$aud" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_PROFILE=t \
+       python3 "$root/bin/maintainer" audit --all 2>&1)
+grep -q 'unclassified' <<<"$aout" \
+    && ok "a death matching no shape is reported as unclassified, not guessed at" \
+    || bad "an unknown death was given a confident cause: $(printf '%s' "$aout" | tr '\n' ' ' | cut -c1-140)"
+grep -q 'caught fire' <<<"$aout" \
+    && ok "and carries its evidence line so somebody can add a shape for it" \
+    || bad "the unclassified death carries no evidence"
+# A list of thirty-one identical lines is one nobody reads twice; the same
+# thirty-one grouped by cause is a decision. Sixteen of the real ones were a
+# single unreachable host.
+grep -q 'by cause:' <<<"$aout" \
+    && ok "the audit groups the dead runs by cause" \
+    || bad "the audit lists dead runs and never totals them by cause"
+grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
+    && ok "and says out loud how many it could not explain" \
+    || bad "the audit does not report how many deaths are unexplained"
+
+echo "== the failure taxonomy is configuration, not a regex buried in a function =="
+# Two instructions met by one change. The shapes that decide whether a run is
+# retried, escalated or left unexplained were an alternation inside a shell
+# function, so adding a cause meant editing code and nothing could enumerate
+# what the agent knows how to recognise. They are a table now.
+shapes="$root/lib/failure-shapes.json"
+[ -f "$shapes" ] && ok "the failure shapes live in a file" \
+    || bad "the taxonomy is still inline in lib/profile.sh"
+python3 - "$shapes" <<'PYEOF' && ok "every shape names an id, a class, a pattern and what it means" \
+    || bad "a shape is missing a field, so a classified failure cannot be explained"
+import json, sys, re
+d = json.load(open(sys.argv[1]))
+classes = set(d["classes"])
+assert classes == {"transient", "needs_human"}, classes
+seen = set()
+for sh in d["shapes"]:
+    for k in ("id", "class", "pattern", "means"):
+        assert sh.get(k), f"{sh.get('id')} has no {k}"
+    assert sh["class"] in classes, sh
+    assert sh["id"] not in seen, f"duplicate id {sh['id']}"
+    seen.add(sh["id"])
+    re.compile(sh["pattern"])            # it has to be a usable pattern
+    if sh["class"] == "needs_human":
+        assert sh.get("fix"), f"{sh['id']} tells nobody what to do"
+PYEOF
+# No number in the classifier that the table could carry instead.
+grep -nE 'grep -aoiE "you' "$root/lib/profile.sh" >/dev/null 2>&1 \
+    && bad "the alternation is still hardcoded in backend_transient_reason" \
+    || ok "backend_transient_reason reads the table rather than carrying one"
+
+echo "== every failure is classified, or says out loud that it was not =="
+tcx="$stub_dir/classify2"; rm -rf "$tcx"; mkdir -p "$tcx"
+printf 'API Error: Can%st reach the API server - check your internet or DNS (EAI_AGAIN)\n' "'" > "$tcx/dns.log"
+printf 'Failed to authenticate: OAuth session expired and could not be refreshed\n' > "$tcx/oauth.log"
+printf 'thread panicked at src/main.rs:12: assertion failed\n' > "$tcx/odd.log"
+# shellcheck disable=SC1090
+cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; maintainer_classify_failure "$tcx/dns.log" ); crc=$?
+[ "$crc" = 0 ] && grep -q '^transient' <<<"$cls" \
+    && ok "a DNS blip classifies as transient, with a cause id: $(cut -f2 <<<"$cls")" \
+    || bad "the DNS shape is not classified (rc=$crc, got '$cls')"
+# shellcheck disable=SC1090
+cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; maintainer_classify_failure "$tcx/oauth.log" ); crc=$?
+[ "$crc" = 0 ] && grep -q '^needs_human' <<<"$cls" \
+    && ok "an expired login classifies as needing a person: $(cut -f2 <<<"$cls")" \
+    || bad "the expired-login shape is not classified (rc=$crc, got '$cls')"
+# The one that matters most: an unknown failure must SAY it is unknown rather
+# than being silently dropped into the default branch. Three runs aborted in
+# five days and failed-review.json recorded "the run is not auditable" with no
+# cause at all.
+# shellcheck disable=SC1090
+cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; maintainer_classify_failure "$tcx/odd.log" ); crc=$?
+[ "$crc" != 0 ] && grep -q '^unclassified' <<<"$cls" \
+    && ok "an unrecognised failure returns 'unclassified' rather than nothing" \
+    || bad "an unrecognised failure returns silence (rc=$crc, got '$cls')"
+grep -q 'panicked' <<<"$cls" \
+    && ok "and carries the evidence line, so the run is explainable by reading it" \
+    || bad "the unclassified verdict carries no evidence: $cls"
+# A missing or unreadable table must refuse, not classify everything as fine.
+# shellcheck disable=SC1090
+cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; MAINTAINER_FAILURE_SHAPES=/nonexistent/x.json maintainer_classify_failure "$tcx/dns.log" ); crc=$?
+[ "$crc" != 0 ] \
+    && ok "an unreadable taxonomy refuses rather than reporting nothing wrong" \
+    || bad "with no table every failure classified as clean"
+
+echo "== one broken run raises one critical toast, not two =="
+# The second alert says "produced no report", which is the SAME event described
+# a second way: the backend died, so of course it wrote nothing. Two criticals
+# for one cause is how the important one gets dismissed.
+tb="$stub_dir/twotoast"; rm -rf "$tb"; mkdir -p "$tb/.local/bin"
+tb_repo="$tb/repo"; git init -q -b main "$tb_repo"
+tb_state="$tb/state"; mkdir -p "$tb_state/runs" "$tb_state/state"
+cat > "$stub_dir/notify-send" <<'NEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$NOTIFY_LOG"
+NEOF
+chmod +x "$stub_dir/notify-send"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKENTOKENTOKENTOKEN;; *'api user'*) echo vladimirrott;; esac"
+cat > "$tb/.local/bin/maintainer" <<'MEOF'
+#!/usr/bin/env bash
+case "$1" in
+  start) echo "=== maintainer 2031-02-03T04-05-review ==="; echo "context";
+         echo "write the run report to $MAINTAINER_STATE/runs/2031-02-03T04-05-review.md";;
+  finish) exit 1 ;;
+  *) exit 0 ;;
+esac
+MEOF
+chmod +x "$tb/.local/bin/maintainer"
+# A backend failure with a message no classifier knows.
+make_stub claude 'echo "Segmentation fault in the model client" >&2; exit 1'
+: > "$tb/notify.log"
+PATH="$stub_dir:$tb/.local/bin:$PATH" NOTIFY_LOG="$tb/notify.log" HOME="$tb" MAINTAINER_NOTIFY=on \
+    MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$tb_state" \
+    MAINTAINER_REPO_PATH="$tb_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+crits=$(grep -c 'u critical' "$tb/notify.log" 2>/dev/null || true)
+[ "${crits:-0}" -le 1 ] \
+    && ok "an unrecognised backend failure raises one critical toast (got ${crits:-0})" \
+    || bad "one broken run raised ${crits} critical toasts for the same cause"
+[ "${crits:-0}" -ge 1 ] \
+    && ok "and it does still raise one, rather than going quiet" \
+    || bad "the run failed and told nobody"
+rm -f "$stub_dir/notify-send" "$stub_dir/claude" "$stub_dir/gh"
+make_stub notify-send 'exit 0'
+make_stub claude 'exit 0'
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKEN;; *'api user'*) echo vladimirrott; exit 0;; esac"
 # And the OnFailure script must write to the failing profile's trail only. It
 # globbed every *-maint directory, so a magent failure appeared in sysknife's
 # alerts.log and an operator reading either one saw the other's incidents.
@@ -1064,12 +1265,44 @@ else
     bad "gh pr merge is no longer denied; the gate can be bypassed"
 fi
 
+echo "== a suite image built here needs its recipe in the tree =="
+# The shell suite's image has now been wrong four times, each time picked by
+# hand for what its scripts happened to need that week: bash:5 with no python3,
+# python:3.12-slim with no git, python:3.12 with no cargo, and uid 0 in all
+# three. It is built from a Containerfile now. An image that exists only on the
+# host that built it is not a gate anybody else can reproduce, and the failure
+# mode is the one this repository keeps hitting: the gate blames the pull
+# request for its own container.
+for _v in "$root"/profiles/*/verify.d/*.sh; do
+    [ -e "$_v" ] || continue
+    # shellcheck disable=SC1090
+    _img="$( . "$_v" >/dev/null 2>&1; declare -F suite_image >/dev/null && suite_image )"
+    _sn="$(basename "$_v" .sh)"
+    case "$_img" in
+        localhost/*)
+            if [ -f "${_v%.sh}.Containerfile" ]; then
+                ok "suite '$_sn' builds $_img from $_sn.Containerfile"
+            else
+                bad "suite '$_sn' runs $_img and nothing in the tree builds it"
+            fi
+            ;;
+        "") bad "suite '$_sn' declares no suite_image" ;;
+        *)  ok "suite '$_sn' runs a registry image ($_img)" ;;
+    esac
+done
+# And doctor has to say "build", not "pull", for an image no registry holds.
+if grep -q 'podman build -t' "$root/bin/maintainer-doctor"; then
+    ok "doctor tells you how to build a missing locally-built suite image"
+else
+    bad "doctor would tell you to pull an image no registry has"
+fi
+
 echo "== the installed layout resolves, not just the repo layout =="
 # The bug this catches: run.sh looked for profiles at ../profiles, which is right
 # in the repo (lib/run.sh) and wrong once installed beside them. The unit exited
 # 64 and the timer logged nothing, because a file-existence check is not a start.
 lay="$stub_dir/layout"; mkdir -p "$lay/profiles/sysknife/prompts"
-cp "$root/lib/run.sh" "$lay/run.sh"
+cp "$root/lib/run.sh" "$lay/run.sh"; cp "$root/lib/profile.sh" "$lay/profile.sh"
 cp -r "$root/lib/backends" "$lay/backends"
 cp "$root/profiles/sysknife/profile.env" "$lay/profiles/sysknife/"
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo nobody; exit 0;; esac"
@@ -1292,6 +1525,14 @@ for f in "$root"/scripts/*.py; do
     n="$(basename "$f")"
     [ -f "$ih/.local/share/maintainer/scripts/$n" ] && ok "scripts/$n deployed" \
         || bad "scripts/$n was never deployed"
+done
+# The files run.sh LOADS, as opposed to the ones it calls. profile.sh was the
+# gap: run.sh named maintainer_scrub_secret, never sourced the file defining it,
+# and the exit-path token scrub silently did nothing for the whole life of the
+# trap. Nothing here compared what run.sh loads against what install.sh ships.
+for f in profile.sh preamble-core.md prose-style.md failure-shapes.json; do
+    [ -e "$ih/.local/share/maintainer/$f" ] && ok "$f deployed, and run.sh loads it" \
+        || bad "run.sh loads $f and install.sh never deployed it"
 done
 
 echo "== opencode: default-deny closes the spelling hole a denylist cannot =="
@@ -1918,7 +2159,8 @@ echo "== the doctrine is not optional =="
 # evidence rule. A run assembled without it is an unattended agent with none of
 # them, so its absence must stop the run rather than shorten the prompt.
 lay2="$stub_dir/nodoctrine"; mkdir -p "$lay2/profiles/sysknife/prompts"
-cp "$root/lib/run.sh" "$lay2/run.sh"; cp -r "$root/lib/backends" "$lay2/backends"
+cp "$root/lib/run.sh" "$lay2/run.sh"; cp "$root/lib/profile.sh" "$lay2/profile.sh"
+cp -r "$root/lib/backends" "$lay2/backends"
 cp "$root/profiles/sysknife/profile.env" "$lay2/profiles/sysknife/"
 cp "$root/profiles/sysknife/prompts/"*.md "$lay2/profiles/sysknife/prompts/"
 cp "$root/lib/prose-style.md" "$lay2/prose-style.md"
@@ -2226,7 +2468,7 @@ MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
 
 # What the backend actually receives, measured by running one.
 envh="$stub_dir/envrun"; mkdir -p "$envh/backends" "$envh/profiles/envp/prompts" "$envh/bin"
-cp "$root/lib/run.sh" "$envh/run.sh"
+cp "$root/lib/run.sh" "$envh/run.sh"; cp "$root/lib/profile.sh" "$envh/profile.sh"
 cp "$root/lib/preamble-core.md" "$root/lib/prose-style.md" "$envh/"
 cat > "$envh/backends/envdump.sh" <<'BACKEND'
 backend_name() { printf 'envdump'; }
@@ -3002,6 +3244,81 @@ else
     noenv "a mutation reaches a python file, so a .py production change can be proved (needs podman or docker)"
     noenv "a mutation that changes nothing is refused (needs podman or docker)"
 fi
+echo "== a dependency bump can earn a receipt, and the test run still has no network =="
+# #437, #438 and #439 sat six days each. The rust suite runs `cargo test
+# --offline` against the host cache, and a lockfile bump is by definition a
+# version that cache does not hold, so the clean run died on "attempting to
+# make an HTTP request, but --offline was specified" and no dependabot pull
+# request could ever be verified. Fetching on the host was the wrong fix:
+# `maintainer screen 438` names that risk by name.
+rsuite="$root/profiles/sysknife/verify.d/rust.sh"
+# shellcheck disable=SC1090
+( . "$rsuite" >/dev/null 2>&1; declare -F suite_prefetch_command >/dev/null ) \
+    && ok "the rust suite declares how to fetch what the lockfile pins" \
+    || bad "the rust suite has no prefetch, so no dependency bump can be verified"
+# shellcheck disable=SC1090
+( . "$rsuite" >/dev/null 2>&1; declare -F suite_prefetch_guard >/dev/null ) \
+    && ok "and a guard that runs before the container gets network" \
+    || bad "the prefetch reaches the network with nothing screening what it may fetch"
+# The guard decides on the lockfile, which lists every source the fetch can
+# reach. crates.io only: a pull request cannot point the fetch somewhere else.
+pfx="$stub_dir/prefetch"; rm -rf "$pfx"; mkdir -p "$pfx/clean" "$pfx/git" "$pfx/nolock"
+printf '[[package]]\nname = "uuid"\nversion = "1.26.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n' \
+    > "$pfx/clean/Cargo.lock"
+printf '[[package]]\nname = "uuid"\nversion = "1.26.1"\nsource = "registry+https://github.com/rust-lang/crates.io-index"\n\n[[package]]\nname = "sneaky"\nversion = "0.1.0"\nsource = "git+https://example.invalid/sneaky.git#deadbeef"\n' \
+    > "$pfx/git/Cargo.lock"
+# shellcheck disable=SC1090
+gout=$( . "$rsuite" >/dev/null 2>&1; suite_prefetch_guard "$pfx/clean" 2>&1 ); grc=$?
+[ "$grc" = 0 ] && ok "a crates.io-only lockfile is allowed to fetch" \
+    || bad "the guard refused an ordinary lockfile (rc=$grc): $gout"
+# shellcheck disable=SC1090
+gout=$( . "$rsuite" >/dev/null 2>&1; suite_prefetch_guard "$pfx/git" 2>&1 ); grc=$?
+if [ "$grc" != 0 ] && grep -q 'example.invalid' <<<"$gout"; then
+    ok "a git source in the lockfile refuses the fetch, and the refusal quotes it"
+else
+    bad "a lockfile pointing the fetch at an arbitrary git host was allowed (rc=$grc)"
+fi
+# Could not ask is not an answer: no lockfile means nothing pins the download.
+# shellcheck disable=SC1090
+gout=$( . "$rsuite" >/dev/null 2>&1; suite_prefetch_guard "$pfx/nolock" 2>&1 ); grc=$?
+if [ "$grc" != 0 ] && grep -q 'Cargo.lock' <<<"$gout"; then
+    ok "no lockfile refuses the fetch rather than fetching whatever resolves"
+else
+    bad "a tree with no Cargo.lock was allowed to fetch (rc=$grc)"
+fi
+# The host cache must stay out of it: downloaded crates go to an overlay
+# upperdir that dies with the verify.
+# shellcheck disable=SC1090
+oargs=$( . "$rsuite" >/dev/null 2>&1; suite_podman_args podman "$pfx/scratch" | tr '\n' ' ' )
+grep -q 'upperdir=' <<<"$oargs" \
+    && ok "new crates land in an overlay upperdir, not in ~/.cargo" \
+    || bad "the fetch would write into the host cargo cache: $oargs"
+# And every path the suite asks for has to be under the scratch it was handed.
+# The first version put the upperdir inside the extracted tree, where the
+# mutation glob is *.rs and the upperdir is full of other people's .rs files:
+# a mutation could land in a dependency. podman also creates the overlay
+# workdir mode 000, so `find` over the tree died with Permission denied and
+# #438 came back "mutation failed to apply". Measured, not reasoned about.
+stray=""
+for _tok in $oargs; do
+    case "$_tok" in
+        *upperdir=*|*workdir=*)
+            for _kv in ${_tok//,/ }; do
+                case "$_kv" in
+                    upperdir=*|workdir=*)
+                        case "${_kv#*=}" in "$pfx/scratch"/*) ;; *) stray="$stray ${_kv}" ;; esac ;;
+                esac
+            done ;;
+    esac
+done
+[ -z "$stray" ] \
+    && ok "the overlay's upperdir and workdir stay inside the scratch the gate handed over" \
+    || bad "the suite writes outside its scratch, where the mutation glob can reach:$stray"
+# The gate must hand over a scratch, never the tree the mutation walks.
+grep -q 'suite_extra_args "$rt" "$work"' "$mg" \
+    && bad "the gate passes the extracted tree as suite scratch" \
+    || ok "the gate passes a scratch directory, not the extracted tree"
+
 grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
     || bad "the gate requires one specific container runtime"
 grep -q 'suite_requires' "$root/profiles/sysknife/verify.d/rust.sh" \
@@ -3898,9 +4215,76 @@ grep -nE 'maintainer_scrub_secret\(\)' -A 24 "$root/lib/profile.sh" 2>/dev/null 
     && bad "the scrubber passes the secret as a command-line argument" \
     || ok "the secret reaches the helper through the environment, not argv"
 
-grep -q 'maintainer_scrub_secret' "$root/lib/run.sh" \
-    && ok "run.sh scrubs before it exits" \
-    || bad "the scrubber exists and no run ever calls it"
+# A grep for the NAME used to stand here, and it passed for the whole life of
+# the feature while the trap was a no-op. lib/run.sh calls
+# maintainer_scrub_secret and never sources the file that defines it, so every
+# exit logged "maintainer_scrub_secret: command not found", the `|| true` turned
+# that into success, and the token stayed on disk. Seen in the wild at the tail
+# of 2026-09-21T11-17-review. Drive the real script and look at the file.
+scrubrun="$stub_dir/scrubrun"; rm -rf "$scrubrun"; mkdir -p "$scrubrun/state"
+sr_repo="$scrubrun/repo"; git init -q -b main "$sr_repo"
+SR_TOKEN='ghp_ScrubRunTokenAAAAAAAAAAAAAAAAAAAA'
+# `api user` answers before the pin and fails after it, so the run gets past the
+# first identity check, exports GH_TOKEN, installs the trap, and then refuses.
+# That is the shortest real path through the trap.
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) echo '$SR_TOKEN';;
+  *'api user'*)
+      if [ -n "\${GH_TOKEN:-}" ]; then echo "error connecting to api.github.com" >&2; exit 1; fi
+      echo vladimirrott;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+printf 'an earlier line\nGH_TOKEN=%s\ntrailing line\n' "$SR_TOKEN" > "$scrubrun/state/leaked.log"
+PATH="$stub_dir:$PATH" HOME="$scrubrun" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$scrubrun/state" MAINTAINER_REPO_PATH="$sr_repo" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+if grep -qF "$SR_TOKEN" "$scrubrun/state/leaked.log" 2>/dev/null; then
+    bad "run.sh exited with the pinned token still on disk; the EXIT trap scrubbed nothing"
+else
+    ok "run.sh's EXIT trap really removes the pinned token from what the run left behind"
+fi
+grep -q 'trailing line' "$scrubrun/state/leaked.log" 2>/dev/null \
+    && ok "and the scrub on exit leaves the rest of the file alone" \
+    || bad "the scrub on exit ate more than the token"
+
+# The class, not the one instance. Any shell script that CALLS a helper defined
+# in lib/profile.sh has to source lib/profile.sh, and naming one without
+# sourcing it fails open every time, because the callers all use `|| true`.
+scrub_helpers="$(grep -oE '^maintainer_[a-z_]+' "$root/lib/profile.sh" | sort -u)"
+scrub_unsourced=""
+for _f in "$root"/lib/run.sh "$root"/lib/run-instance.sh "$root"/bin/*; do
+    [ -f "$_f" ] || continue
+    case "$_f" in *profile.sh) continue ;; esac
+    head -1 "$_f" | grep -q 'bash' || continue
+    for _h in $scrub_helpers; do
+        # a call site: the name followed by whitespace, never `name()`
+        grep -qE "(^|[^-_[:alnum:]])${_h}[[:space:]]" "$_f" || continue
+        grep -qE "^$_h\(\)" "$_f" && continue
+        grep -q 'profile\.sh' "$_f" && continue
+        scrub_unsourced="$scrub_unsourced $(basename "$_f"):$_h"
+    done
+done
+[ -z "$scrub_unsourced" ] \
+    && ok "every shell script that calls a profile.sh helper also sources it" \
+    || bad "these call a helper whose definition they never load:$scrub_unsourced"
+# The other direction. A tree missing profile.sh has to refuse at the start,
+# not reach the exit trap and find nothing there. Failing open on the way out is
+# how this went unnoticed; failing open on the way in would be the same defect
+# wearing the repair.
+nolib="$stub_dir/noproflib"; rm -rf "$nolib"; mkdir -p "$nolib/profiles/sysknife/prompts"
+cp "$root/lib/run.sh" "$nolib/run.sh"; cp -r "$root/lib/backends" "$nolib/backends"
+cp "$root/profiles/sysknife/profile.env" "$nolib/profiles/sysknife/"
+out=$(PATH="$stub_dir:$PATH" HOME="$nolib" bash "$nolib/run.sh" sysknife review 2>&1); rc=$?
+if [ "$rc" = 64 ] && grep -q 'profile\.sh' <<<"$out"; then
+    ok "a tree with no profile.sh refuses to start, and the refusal names the file"
+else
+    bad "a tree with no profile.sh started anyway (rc=$rc)"
+fi
 grep -q 'maintainer_scrub_secret\|token still on disk\|pinned token' "$root/bin/maintainer-doctor" \
     && ok "doctor looks for a token left behind by an earlier run" \
     || bad "nothing notices a token that a previous run left on disk"
@@ -4664,9 +5048,17 @@ out="$(aurun --all)"
 grep -q 'backend claude unusable' <<<"$out" \
     && ok "an orphan carries the reason its log recorded" \
     || bad "the audit names a dead run and drops the reason sitting in its log"
-grep -q '2026-01-03T00-00-review.*no reason' <<<"$out" \
-    && ok "and an orphan whose log says nothing is marked as unexplained" \
+# The wording moved when the causes became a table: a log that says nothing is
+# `died-without-saying` now, which is a named class with a place to look rather
+# than a shrug. What has to hold is that the two orphans do not read the same.
+r_none="$(grep '2026-01-03T00-00-review' <<<"$out" | sed 's/.*reported: //')"
+r_some="$(grep '2026-01-04T00-00-review' <<<"$out" | sed 's/.*reported: //')"
+[ -n "$r_none" ] && [ -n "$r_some" ] && [ "$r_none" != "$r_some" ] \
+    && ok "an orphan whose log says nothing reads differently from one that explains itself" \
     || bad "a log with a reason and a log with none read the same"
+grep -q 'died-without-saying' <<<"$r_none" \
+    && ok "and the silent one is named as such, with somewhere to look" \
+    || bad "the silent orphan is not classified: '$r_none'"
 
 echo "== a finding becomes a tracker issue, exactly once =="
 # The magent loop: a review finds a defect, and instead of leaving it as prose

@@ -236,6 +236,24 @@ else
                 "add suite_needs() naming the binaries its tests invoke"
             continue
         fi
+        # An image whose name starts with localhost/ is built here, not pulled,
+        # so "podman pull" is the wrong advice and the recipe has to be in the
+        # tree rather than in the shell history of whoever built it first.
+        case "$_img" in
+            localhost/*)
+                _cf="${_v%.sh}.Containerfile"
+                if [ ! -f "$_cf" ]; then
+                    red "verify suite '$_sn' runs $_img and no $_sn.Containerfile builds it" \
+                        "add the recipe beside profiles/$profile/verify.d/$_sn.sh"
+                    continue
+                fi
+                if ! podman image exists "$_img" 2>/dev/null; then
+                    red "verify suite '$_sn': $_img is not on this host, so nothing can earn a receipt there" \
+                        "podman build -t $_img -f $_cf $(dirname "$_cf")"
+                    continue
+                fi
+                ;;
+        esac
         # $_needs is a space-separated list from a file in this repository and is
         # split on purpose; it is passed as arguments rather than interpolated
         # into the shell the container runs.
