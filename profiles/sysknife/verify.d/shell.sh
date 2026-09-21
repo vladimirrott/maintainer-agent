@@ -55,9 +55,32 @@ suite_covers() {
 #
 # That is the second time this suite's image was chosen for what the scripts
 # needed on the day it was written: bash:5 carried no python3 when sysknife#386
-# started driving a python script. python:3.12 carries bash 5.2, python3 and
-# git, and docs.sh shares the same base, so this is one trust surface, not two.
-suite_image() { printf 'docker.io/library/python:3.12'; }
+# started driving a python script.
+#
+# And the third. python:3.12 carries bash 5.2, python3 and git and none of
+# cargo, node or npm, so tests/release/release-rehearsal.test.sh could not run
+# unmutated at all: it drives scripts/release_rehearsal.sh, whose preflight is
+#
+#     for tool in cargo node npm sha256sum file; do
+#
+# Three consecutive review runs reported the same `ERROR: required tool is
+# missing: cargo`, and #443, #435 and #446 each sat unmergeable because of it.
+#
+# So the image is built here rather than picked, from shell.Containerfile
+# beside this file. That costs the shared base docs.sh had, which was worth
+# something, and buys a suite whose image is derived from what its scripts
+# declare they need. maintainer-doctor refuses when the image is absent and
+# prints the build command, because an image that exists only on the host that
+# built it is not a reproducible gate.
+#
+# MAINTAINER_SHELL_IMAGE overrides it, and exists for one caller: this
+# repository's own offline suite drives maintainer-merge end to end against
+# this profile, and it runs on GitHub runners where a locally built image does
+# not exist. Those cases exercise the gate's machinery on a four-line
+# check.sh, not sysknife's release scripts, so a registry image is the honest
+# thing for them to use. maintainer-doctor prints whichever image is in
+# effect, so an override left set is visible rather than silent.
+suite_image() { printf '%s' "${MAINTAINER_SHELL_IMAGE:-localhost/sk-rehearsal:1}"; }
 
 # What that image has to contain. maintainer-doctor runs the image and checks
 # each of these resolves, because nothing else ties the image to what the suite
@@ -70,7 +93,7 @@ suite_image() { printf 'docker.io/library/python:3.12'; }
 # drives scripts/check_evidence_claims.py, git because tests/release/no-secrets.test.sh
 # builds a throwaway repository to exercise the --staged path the pre-commit
 # hook runs. maintainer-doctor runs the image and checks each one resolves.
-suite_needs() { printf 'bash python3 git'; }
+suite_needs() { printf 'bash python3 git cargo node npm sha256sum file'; }
 
 # One glob per line. The extensionless entry is the point: every privileged
 # helper in packaging/ is a python script with no .py suffix, so a single

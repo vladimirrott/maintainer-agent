@@ -2492,3 +2492,172 @@ function, `apply_mutation`, and the case drives it against a tree holding a
 `.sh`, a `.py`, an extensionless `sysknife-*`, an `.md` that must not change,
 and a symlink pointing outside the tree that must be neither followed nor
 replaced.
+
+## 82. The guard ran, the function did not, and `|| true` said fine
+
+`lib/run.sh` pinned a GitHub token into the environment for the whole run and
+installed an EXIT trap to scrub it out of anything the run left on disk. The
+trap called `maintainer_scrub_secret`, which lives in `lib/profile.sh`, and
+`lib/run.sh` never sourced `lib/profile.sh`. Every exit wrote
+
+    run.sh: line 441: maintainer_scrub_secret: command not found
+
+into the log, the `|| true` beside the call turned that into success, and the
+scrub had never once run. The suite was green throughout, because the case that
+covered it was
+
+    grep -q 'maintainer_scrub_secret' "$root/lib/run.sh" && ok "run.sh scrubs before it exits"
+
+The name is in the file either way. A grep for an identifier in a caller proves
+the caller mentions it, not that the caller can call it.
+
+Nothing leaked: `maintainer-doctor` looks for the token from the other end and
+found none on disk, which is the second guard doing its job while the first was
+a no-op. That is the only reason this is a lesson and not an incident.
+
+Three changes, and the third is the one that generalises. The behavioural test
+drives `lib/run.sh` to a real refusal with a token planted in the state
+directory and then reads the file back. The startup check refuses with exit 64
+when `profile.sh` cannot be found, because an exit-path guard that cannot run is
+worth less than no guard: the log reads as though it cleaned up. And a class
+guard walks every shell script in `bin/` and `lib/`, and fails when one calls a
+`maintainer_*` helper without sourcing the file that defines it. The instance
+was one line. The class is checkable.
+
+## 83. The audit blamed a missing shell function for three deaths it did not cause
+
+`_why_it_died` returned the last non-header line of a dead run's log. Every run
+that aborted between 2 and 21 September ended on the `command not found` line
+from lesson 82, so `maintainer audit` reported a missing shell function as the
+reason all three died. Two were an expired backend login and one was DNS.
+
+A wrong cause is worse than no cause, because somebody acts on it.
+
+The shapes that decide whether a failure is retried, escalated or left
+unexplained were an alternation inside a shell function. They are
+`lib/failure-shapes.json` now: each shape carries an id, a class, a pattern,
+what it means, and for the ones a person has to fix, the command that fixes it.
+Both the shell and the Python read the same table, so the CLI and the audit
+cannot drift into disagreeing about the same log. Adding a cause is a data
+change, and something can finally enumerate what the agent knows how to explain.
+
+Three outcomes, and the third is the point:
+
+| class | what it means |
+|---|---|
+| `transient` | the next slot fixes it by running again |
+| `needs_human` | no retry clears it and every later slot fails the same way |
+| `unclassified` | nothing matched; say so, and carry the evidence line |
+
+`unclassified` is a verdict rather than a default branch. Thirty-one dead runs
+on the sysknife trail now carry a named cause and none are unexplained:
+seventeen `gh-unreachable`, eleven `died-without-saying`, two
+`backend-unconfigured`, one `wrong-gh-account`. Grouped like that, the list is a
+decision. As thirty-one identical lines it was a warning nobody read twice.
+
+**The evidence picker had its own version of the same mistake.** It scanned the
+whole log for the most error-shaped line, and the task briefing is part of the
+log: it lists open pull requests and issue titles, and one of those titles
+contained the word `errors`. The audit reported a contributor's pull request
+title as the reason a run died. Nothing before the briefing ends is evidence of
+anything, so evidence selection starts after it, and the markers that end it are
+configuration rather than three more strings buried in a function.
+
+## 84. Three critical popups, one cause, and the marker lost the cause
+
+An unrecognised backend failure raised three desktop alerts. `lib/run.sh` called
+`alert` for the backend exit, called `alert` again because no report had been
+written, then exited 1 so systemd's `OnFailure` sent a third. Three runs aborted
+in five days and every one of them did this: nine critical toasts for two
+distinct conditions, one of which healed by itself within the hour.
+
+The second alert is the same event described a second time. The backend died, so
+of course it wrote nothing. Worse, it overwrote the failure marker: `alert` had
+already stored the real cause, and the second call replaced it with
+
+    "<run> produced no report; the run is not auditable"
+
+which is how `failed-review.json` came to record a failure with no reason in it.
+The vaguer message won because it was written last.
+
+The second alert is gone. The marker written first stands, because it is the one
+that names the cause. And `EAI_AGAIN` is in the transient table now, which turns
+the 21 September abort from three criticals into one low-urgency line that says
+the next slot will retry.
+
+An expired login is neither transient nor unknown, and it was being treated as
+unknown. It is `needs_human` now, with `claude /login` in the toast, because
+"Failed to authenticate" is the vocabulary of the thing that broke rather than a
+message to a person.
+
+## 85. A scratch directory inside the tree the mutation walks
+
+The rust suite could not verify a dependency bump: `cargo test --offline` runs
+against a cache on the host and a lockfile bump is, by definition, a version
+that cache does not hold. Three dependabot pull requests sat six days each
+because no receipt was earnable for any of them.
+
+The fix is a fetch in its own container, and what makes it acceptable is how
+little it does. `cargo fetch` compiles nothing, so no build script from the pull
+request runs. `--locked` refuses to resolve anything the committed lockfile does
+not already pin. A guard reads that lockfile on the host first and refuses if it
+names a source other than crates.io, because a pull request adding a git
+dependency would otherwise point a networked container at a host of its
+choosing. The crates land in a podman overlay's `upperdir`, so `~/.cargo` is
+untouched, and the run that executes the tests still has `--network=none`.
+
+The first version put that `upperdir` inside the extracted tree, and the gate
+caught it within one run:
+
+    find: './.cargo-work/work': Permission denied
+    maintainer-merge: mutation failed to apply
+
+Two things were wrong and the visible one was the smaller. podman creates the
+overlay workdir mode 000, so the mutation step's `find` could not traverse it.
+The one that mattered: the rust suite's mutation glob is `*.rs`, and an
+`upperdir` full of downloaded crates is full of other people's `.rs` files. A
+mutation could have landed in a dependency instead of in the pull request and
+the receipt would have recorded a proof of nothing.
+
+Suite scratch is a separate `mktemp -d` now, and `cmd_verify` refuses if it ever
+resolves inside the extracted tree.
+
+## 86. The image was wrong for the fourth time, so stop picking it
+
+`bash:5` had no python3. `python:3.12-slim` had no git. `python:3.12` runs as
+uid 0. And `python:3.12` has no cargo, which is what
+`tests/release/release-rehearsal.test.sh` needs, because it drives
+`scripts/release_rehearsal.sh` whose preflight is
+
+    for tool in cargo node npm sha256sum file; do
+
+Three review runs in a row reported `ERROR: required tool is missing: cargo` and
+refused a receipt for #443, #435 and #446. Each time the image had been chosen
+for what its scripts needed the week it was written, and each time the gate
+described its own container as the contributor failing their own test.
+
+The image is built from `shell.Containerfile` beside the suite now, so the
+recipe is in the tree rather than in the shell history of whoever built it
+first. `maintainer-doctor` refuses when a `localhost/` image is missing and
+prints the `podman build` line, because an image that exists only on the host
+that built it is not a gate anybody else can reproduce. It costs the shared base
+`docs.sh` had, which was worth something, and buys a suite whose image comes
+from what its scripts declare they need.
+
+## 87. Twelve of eighteen were already promised to somebody
+
+Offering issues to recurring contributors, I built an allocation from merged
+pull request counts, matched each issue to what its contributor had shipped, and
+had a clean table of eighteen. Then I read the tracker.
+
+Twelve of the eighteen already carried a live offer to a named person. Two more
+were covered by open pull requests that a withdrawal note on the issue had
+already explained. Nine issues were genuinely free, not eighteen, and posting
+the table would have double-booked eight of them, which is MISTAKES rule 7
+repeating itself with better arithmetic.
+
+The check that caught it is one loop: for each candidate, read the last comment
+carrying an `@mention` and look at what it says. An offer, an acceptance and a
+withdrawal all mention somebody, and only reading them tells you which. The
+count went from eighteen to nine in one command, and the honest report to the
+maintainer is that the pool was the binding constraint, not the arithmetic.

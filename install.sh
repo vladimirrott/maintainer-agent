@@ -128,6 +128,7 @@ run cp "$root/lib/run.sh" "$share/run.sh"
 run cp "$root/lib/prose-style.md" "$share/prose-style.md"
 run cp "$root/lib/preamble-core.md" "$share/preamble-core.md"
 run cp "$root/lib/profile.sh" "$share/profile.sh"
+run cp "$root/lib/failure-shapes.json" "$share/failure-shapes.json"
 if [ "$dry" = 1 ]; then say "would stamp $share/VERSION"; else stamp_version > "$share/VERSION"; fi
 # The key that makes a verification receipt unforgeable. Before this, a receipt
 # was a JSON file in the state directory and the only thing protecting it was a

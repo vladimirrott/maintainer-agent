@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "_comment": [
+    "What the agent knows how to recognise when a run dies, and what each one",
+    "means for whoever gets the toast. This is a table rather than an",
+    "alternation inside a shell function so that adding a cause is a data",
+    "change, and so that something can enumerate what the agent can explain.",
+    "",
+    "A failure matching nothing here is reported as 'unclassified' with its",
+    "own evidence line attached. That is the point: an unexplained failure has",
+    "to be visible as unexplained, not fall quietly into a default branch.",
+    "",
+    "Patterns are extended regular expressions, matched case-insensitively",
+    "against the run log with grep -aoiE. Keep them anchored on wording the",
+    "backend actually printed, and keep the trailing {0,n} bounded so a match",
+    "cannot drag half a log into a desktop notification.",
+    "",
+    "evidence_noise_prefixes: lines that exist in every run log before anything can fail. The task briefing is the trap: it lists open pull requests and issue titles, and one of those titles contained the word 'errors', so the audit reported a contributor's PR title as the reason a run died.",
+    "evidence_noise_patterns: the same job as the prefixes, for lines older log formats wrapped differently. A commit line from the briefing was being reported as the reason a run died.",
+    "evidence_starts_after: the task briefing lists open pull requests, issue titles and commit subjects, and any of those can contain the word 'error'. Nothing before the last of these markers is evidence of anything, so evidence selection starts after it. Chasing the briefing line by line with noise prefixes was losing that argument one string at a time."
+  ],
+  "classes": {
+    "transient": {
+      "urgency": "low",
+      "retries": true,
+      "exit": 75,
+      "means": "the next scheduled slot fixes this by running again"
+    },
+    "needs_human": {
+      "urgency": "critical",
+      "retries": false,
+      "exit": 1,
+      "means": "no retry clears this and every later slot fails the same way"
+    }
+  },
+  "shapes": [
+    {
+      "id": "session-limit",
+      "class": "transient",
+      "pattern": "you'?ve hit your (session|usage) limit.{0,60}",
+      "means": "the model usage window is closed and reopens on a clock"
+    },
+    {
+      "id": "usage-limit-reached",
+      "class": "transient",
+      "pattern": "usage limit reached.{0,60}",
+      "means": "the model usage window is closed and reopens on a clock"
+    },
+    {
+      "id": "upstream-overloaded",
+      "class": "transient",
+      "pattern": "overloaded_error",
+      "means": "the provider is shedding load"
+    },
+    {
+      "id": "rate-limited",
+      "class": "transient",
+      "pattern": "rate_limit_error|api error: 429",
+      "means": "the provider is rate limiting this account"
+    },
+    {
+      "id": "upstream-5xx",
+      "class": "transient",
+      "pattern": "api error: 5[0-9][0-9]",
+      "means": "the provider returned a server error"
+    },
+    {
+      "id": "connection-error",
+      "class": "transient",
+      "pattern": "connection error|fetch failed|econnreset|etimedout|socket hang up",
+      "means": "the connection to the provider broke mid-request"
+    },
+    {
+      "id": "api-unreachable",
+      "class": "transient",
+      "pattern": "can'?t reach the api server.{0,60}|network is unreachable",
+      "means": "this host could not reach the provider at all"
+    },
+    {
+      "id": "dns-failure",
+      "class": "transient",
+      "pattern": "eai_again|enotfound|temporary failure in name resolution",
+      "means": "the provider's name did not resolve"
+    },
+    {
+      "id": "gh-unreachable",
+      "class": "transient",
+      "pattern": "error connecting to api\\.github\\.com|could not reach github",
+      "means": "GitHub was unreachable, so the run never verified its identity"
+    },
+    {
+      "id": "oauth-expired",
+      "class": "needs_human",
+      "pattern": "oauth session expired.{0,60}|failed to authenticate.{0,60}",
+      "means": "the backend login has expired",
+      "fix": "claude /login"
+    },
+    {
+      "id": "invalid-key",
+      "class": "needs_human",
+      "pattern": "invalid api key.{0,60}|authentication_error",
+      "means": "the backend rejected the credential it was given",
+      "fix": "claude /login, or fix the key in profile.env"
+    },
+    {
+      "id": "out-of-credit",
+      "class": "needs_human",
+      "pattern": "your credit balance is too low.{0,60}",
+      "means": "the backend account has no credit, and no retry pays an invoice",
+      "fix": "top up the account, then: maintainer-doctor"
+    },
+    {
+      "id": "login-required",
+      "class": "needs_human",
+      "pattern": "please run .{0,12}/login",
+      "means": "the backend asked for an interactive login",
+      "fix": "claude /login"
+    },
+    {
+      "id": "backend-unconfigured",
+      "class": "needs_human",
+      "pattern": "backend [a-z]+ unusable: missing.{0,80}",
+      "means": "the backend has no settings file deployed for this profile",
+      "fix": "./install.sh"
+    },
+    {
+      "id": "wrong-gh-account",
+      "class": "needs_human",
+      "pattern": "gh is authenticated as '[^']*', not [A-Za-z0-9-]+",
+      "means": "the keyring's active GitHub account is not the one this profile posts as",
+      "fix": "gh auth switch --user <the profile's account>"
+    },
+    {
+      "id": "token-unpinnable",
+      "class": "needs_human",
+      "pattern": "could not pin a token for [A-Za-z0-9-]+",
+      "means": "no token for this profile's account is in the keyring",
+      "fix": "gh auth login --user <the profile's account>"
+    },
+    {
+      "id": "checkout-refresh-failed",
+      "class": "transient",
+      "pattern": "refresh failed, no agent run started",
+      "means": "the shared checkout could not be refreshed, usually a network or lock blip"
+    },
+    {
+      "id": "lock-held",
+      "class": "transient",
+      "pattern": "another run held the lock for over [0-9]+s",
+      "means": "a previous run was still holding the shared tree"
+    },
+    {
+      "id": "killed-silently",
+      "class": "needs_human",
+      "pattern": "\\bKilled\\b|out of memory|oom-kill|signal 9",
+      "means": "something outside the run killed the process, so it never said why",
+      "fix": "journalctl --user -u maintainer@<profile>-<task> -n 50"
+    },
+    {
+      "id": "no-doctrine",
+      "class": "needs_human",
+      "pattern": "preamble-core\\.md is missing",
+      "means": "the deployed tree has no doctrine file, so no run may start",
+      "fix": "./install.sh"
+    },
+    {
+      "id": "died-without-saying",
+      "class": "needs_human",
+      "pattern": "(?!x)x",
+      "means": "the run started, wrote no diagnostic of its own, and stopped; the reason is outside the log",
+      "fix": "journalctl --user -u 'maintainer@*' --since '<the run time>'",
+      "_note": "Never matched by pattern. _classify_log returns this id when a log holds the briefing and nothing else, and it is listed here so the taxonomy enumerates every id the agent can emit."
+    }
+  ],
+  "evidence_noise_prefixes": [
+    "=== run.sh ",
+    "=== maintainer ",
+    "=== result ===",
+    "=== done ",
+    "=== digest ===",
+    "maintainer=",
+    "backend=",
+    "skill ",
+    "repo ",
+    "main ",
+    "since the last ",
+    "write the run report to",
+    "put any drafts under",
+    "run.sh closes the run",
+    "- PR #",
+    "- issues ",
+    "- main moved",
+    "-     ",
+    "  - ",
+    "\u2713 Switched",
+    "gh identity",
+    "log renamed",
+    "[usage] ",
+    "=== sysknife-maint ",
+    "  ",
+    "\t"
+  ],
+  "evidence_noise_patterns": [
+    "^[0-9a-f]{7,40} ",
+    "^model=|^[a-z_]+=[^ ]* (model|log)=",
+    "^\\[usage\\]",
+    "^\\$ "
+  ],
+  "evidence_starts_after": [
+    "run.sh closes the run for you",
+    "log renamed to match run id",
+    "=== result ==="
+  ]
+}

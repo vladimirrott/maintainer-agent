@@ -31,6 +31,24 @@ if   [ -d "$local_root/backends" ];     then BACKEND_DIR="$local_root/backends"
 elif [ -d "$local_root/lib/backends" ]; then BACKEND_DIR="$local_root/lib/backends"
 else echo "run.sh: cannot find a backends/ directory under $local_root" >&2; exit 64
 fi
+# profile.sh holds the shared helpers, and nothing here loaded them. The EXIT
+# trap below calls maintainer_scrub_secret, so for the whole life of that trap
+# the call resolved to nothing: bash wrote "maintainer_scrub_secret: command
+# not found" into the log, the `|| true` beside it turned that into success, and
+# the pinned token was never removed from anything the run left behind. The
+# suite only grepped run.sh for the name, which is present either way.
+# Installed, profile.sh sits beside this file; in the repository it is lib/.
+if   [ -f "$local_root/lib/profile.sh" ]; then PROFILE_LIB="$local_root/lib/profile.sh"
+elif [ -f "$local_root/profile.sh" ];     then PROFILE_LIB="$local_root/profile.sh"
+else echo "run.sh: cannot find profile.sh beside or under $local_root" >&2; exit 64
+fi
+# shellcheck disable=SC1090
+. "$PROFILE_LIB"
+# Refuse at the start rather than discover it on the way out. An exit-path guard
+# that cannot run is worth less than no guard, because the log reads as though
+# it cleaned up.
+declare -F maintainer_scrub_secret >/dev/null \
+    || { echo "run.sh: $PROFILE_LIB defines no maintainer_scrub_secret, so the exit scrub would be a no-op" >&2; exit 64; }
 # --show-prompt assembles the prompt and prints it, touching nothing. It is the
 # answer to "what exactly does this thing tell an agent to do in my name", and
 # it must stay the SAME assembly the run uses, not a copy: a preview that
@@ -192,6 +210,12 @@ humanise() {  # $1 = raw message -> "sentence\nfix: command"
             printf '%s\nfix  gh auth switch --user %s' "$1" "$GH_ACCOUNT" ;;
         *"produced no report"*)
             printf 'The run ended without writing a report, so it is not auditable.\nfix  read the log below' ;;
+        *"OAuth session expired"*|*"Failed to authenticate"*|*"failed to authenticate"*)
+            printf 'The backend login has expired, so every slot fails until you renew it.\nfix  claude /login' ;;
+        *"credit balance is too low"*)
+            printf 'The backend account is out of credit. No retry pays an invoice.\nfix  top up the account, then: maintainer-doctor' ;;
+        *"only you can clear"*)
+            printf '%s\nfix  claude /login, then: maintainer-doctor' "$1" ;;
         *"cannot enforce POST=off"*)
             printf '%s\nfix  set BACKEND=claude or BACKEND=opencode in profile.env' "$1" ;;
         *"no rehearsal wall"*)
@@ -616,16 +640,25 @@ fi
 # 3. Hand it to the backend. Wall-clock is bounded by systemd, not here.
 cd "$REPO_PATH" || { alert "cannot cd to $REPO_PATH"; exit 1; }
 backend_why=""
+backend_human=""
+backend_alerted=0
 if ! backend_run "$prompt_file" "$model" "$log" "$STATE_DIR"; then
     # A model usage window that resets on a clock, or an overloaded upstream, is
     # the same class as an unreachable GitHub: recorded, reported by doctor,
     # retried by the next slot, and worth nobody's attention at `critical`.
     backend_why="$(backend_transient_reason "$log")" || backend_why=""
+    backend_human="$(backend_needs_human_reason "$log")" || backend_human=""
     if [ -n "$backend_why" ]; then
         alert_transient "the $BACKEND backend stopped on something that clears itself ($backend_why); the next slot retries this task"
+    elif [ -n "$backend_human" ]; then
+        # Between the two: no retry clears it, and one command does. Saying
+        # which one is the difference between a toast worth reading and the
+        # client's own error string on the desktop.
+        alert "the $BACKEND backend stopped on something only you can clear ($backend_human), and every slot after this one fails the same way until it is. See $log"
     else
         alert "$BACKEND exited non-zero for $run_id. See $log"
     fi
+    backend_alerted=1
     # Fall through either way: a partial report is better than none, and a run
     # that still wrote one finishes normally.
 fi
@@ -643,6 +676,20 @@ if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
         # OnFailure does not raise the third popup for one condition.
         alert_transient "$run_id wrote no report: the $BACKEND backend stopped on $backend_why"
         exit 75
+    fi
+    if [ "$backend_alerted" = 1 ]; then
+        # The backend already said why, at critical, naming the cause. "Produced
+        # no report" is that same event described a second time: the backend
+        # died, so of course it wrote nothing. Two criticals for one cause is
+        # how the one that matters gets dismissed; three aborted runs between 17
+        # and 21 September fired three each.
+        #
+        # The marker is deliberately NOT rewritten here. `alert` already stored
+        # the cause, and overwriting it with "produced no report" is what left
+        # failed-review.json saying a run was not auditable without saying why.
+        printf '%s\n' "$run_id produced no report, and the $BACKEND failure above is why. See $log" \
+            | tee -a "$log" >&2
+        exit 1
     fi
     alert "$run_id produced no report; the run is not auditable. See $log"
     exit 1

@@ -555,7 +555,7 @@ container_runtime() {
 # The runtime is passed in rather than read out of cmd_verify's locals, because
 # a suite reaching into its caller's scope works until somebody renames the
 # variable. A suite that ignores the argument behaves exactly as before.
-suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args "$1"; }
+suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_args "$1" "${2:-}"; }
 
 # Symlinks that leave the tree, listed.
 #
@@ -674,7 +674,17 @@ cmd_verify() {
     say "suite: $suite ($(suite_image) under $rt)"
 
     local work; work="$(mktemp -d)"
-    trap 'rm -rf "$work"' RETURN
+    # Scratch for a suite that needs somewhere to put things, and it must NOT
+    # sit inside the extracted tree. The rust suite's overlay upperdir fills
+    # with downloaded crates, every one of them full of .rs files, and the
+    # mutation glob for that suite is *.rs: inside the tree, a mutation could
+    # land in a dependency instead of in the pull request. The overlay's
+    # workdir is worse. podman creates it mode 000, so the mutation step's
+    # `find` over the tree died with "Permission denied" and the verify
+    # reported "mutation failed to apply". Measured on #438 on 2026-09-21.
+    local scratch; scratch="$(mktemp -d)"
+    case "$scratch" in "$work"/*) die "the suite scratch is inside the extracted tree" ;; esac
+    trap 'rm -rf "$work" "$scratch"' RETURN
     git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:v-$pr" --force || die "cannot fetch #$pr"
     local real_head; real_head="$(git -C "$REPO_PATH" rev-parse "v-$pr")"
     case "$real_head" in "$sha"*) ;; *) git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
@@ -764,10 +774,53 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
             --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
             --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
             --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
-            -v "$work:/repo:z" $(suite_extra_args "$rt") \
+            -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
     }
+
+    # Phase one, and only for a suite that asks for it.
+    #
+    # The rust suite runs `cargo test --offline` against a cache on this host,
+    # and a dependency bump names, by definition, a version that cache does not
+    # hold. The clean run died on "attempting to make an HTTP request, but
+    # --offline was specified", which reads as the pull request failing its own
+    # test, and #437, #438 and #439 each sat six days because of it.
+    #
+    # What makes a networked container acceptable here is how little it does.
+    # `cargo fetch` compiles nothing, so none of the pull request's build
+    # scripts run. --locked refuses to resolve anything the committed lockfile
+    # does not already pin, so it downloads what the diff under review says.
+    # suite_prefetch_guard reads that lockfile on the host FIRST and refuses if
+    # it names a source other than crates.io. The crates land in the overlay's
+    # upperdir under the extracted tree, so ~/.cargo is untouched. And the run
+    # that executes the tests still has --network=none.
+    if declare -F suite_prefetch_command >/dev/null; then
+        if declare -F suite_prefetch_guard >/dev/null; then
+            local gmsg gorc=0
+            gmsg="$(suite_prefetch_guard "$work" 2>&1)" || gorc=$?
+            [ "$gorc" = 0 ] || die "the dependency fetch was refused before it got a network:
+
+$(printf '%s' "$gmsg" | sed 's/^/    /')"
+        fi
+        say "fetching what the lockfile pins (network, no build scripts, --locked)"
+        # shellcheck disable=SC2046
+        "$rt" --log-level=error run --rm \
+            --timeout "${MAINTAINER_PREFETCH_TIMEOUT:-900}" \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --read-only \
+            --tmpfs /tmp:rw,nosuid,size=256m \
+            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
+            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
+            -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
+            -w /repo "$(suite_image)" \
+            sh -c "$(suite_prefetch_command)" >"$work/prefetch.log" 2>&1 \
+        || die "the dependency fetch failed. That is my container's network or a
+  lockfile that does not match the manifests, not the pull request's test:
+
+$(tail -5 "$work/prefetch.log" | sed 's/^/    /')"
+    fi
 
     local clean_log="$work/clean.log" mut_log="$work/mutated.log"
     say "running '$filter' unmutated"

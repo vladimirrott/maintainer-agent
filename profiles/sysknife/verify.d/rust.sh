@@ -54,11 +54,67 @@ suite_mutate_glob() { printf '*.rs'; }
 # supervisor killed both mid-build. A verify that takes the machine down with it
 # proves nothing and costs the whole run. Raise it with MAINTAINER_CARGO_JOBS on
 # a bigger machine; CI is unaffected, this is the local gate only.
-suite_podman_args() {
-    printf '%s\n' -v "$HOME/.cargo:/cargo:O" \
+#
+# $2 is the extracted tree on the host, and it carries the overlay's upperdir.
+# Without one, podman discards the overlay when the container exits, so a crate
+# downloaded by the fetch below is gone by the time the offline run wants it.
+# With one, the host's ~/.cargo stays the read-only lower layer, every newly
+# downloaded crate lands under the extracted tree, and the whole thing is
+# deleted with that tree when the verify ends.
+suite_podman_args() {  # $1 = the container runtime, $2 = the extracted tree
+    local ovl="$HOME/.cargo:/cargo:O" work="${2:-}"
+    if [ -n "$work" ]; then
+        mkdir -p "$work/.cargo-upper" "$work/.cargo-work"
+        ovl="$ovl,upperdir=$work/.cargo-upper,workdir=$work/.cargo-work"
+    fi
+    printf '%s\n' -v "$ovl" \
         -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
         -e CARGO_NET_OFFLINE=true \
         -e "CARGO_BUILD_JOBS=${MAINTAINER_CARGO_JOBS:-4}"
+}
+
+# A dependency bump is a version the host cache does not hold, so `cargo test
+# --offline` died on it and no dependabot pull request could earn a receipt at
+# all: #437, #438 and #439 each sat six days on that. Populating the host cache
+# was the obvious fix and the wrong one, because `maintainer screen 438` names
+# running the pull request's manifests against the real ~/.cargo as the risk.
+#
+# What makes fetching in a container acceptable is what `cargo fetch` does not
+# do. It compiles nothing, so no build script from the pull request runs.
+# --locked refuses to resolve anything the committed lockfile does not already
+# pin, so it downloads what the reviewed diff says and not a resolution of its
+# own. CARGO_NET_OFFLINE is overridden here and only here; the run that
+# executes the tests still has --network=none.
+suite_prefetch_command() { printf 'CARGO_NET_OFFLINE=false cargo fetch --locked\n'; }
+
+# Runs on the host, before the fetch container is given a network.
+#
+# Cargo.lock lists every source a fetch can reach, so it is the whole question:
+# a pull request that adds a git dependency or an alternate registry would
+# otherwise point a networked container at a host of its choosing. sysknife's
+# lockfile names one source across 657 packages.
+suite_prefetch_guard() {  # $1 = the extracted tree
+    local lock="$1/Cargo.lock" srcs offenders="" line
+    if [ ! -f "$lock" ]; then
+        printf 'no Cargo.lock in the extracted tree, so nothing pins what a fetch would download\n'
+        return 1
+    fi
+    # Captured first, then inspected. A pipeline ending in grep reports the
+    # grep, and "no offending source" and "the file could not be read" then
+    # look identical.
+    srcs="$(grep -h '^source = ' "$lock" 2>/dev/null | sort -u)"
+    while IFS= read -r line; do
+        [ -n "$line" ] || continue
+        case "$line" in
+            'source = "registry+https://github.com/rust-lang/crates.io-index"') ;;
+            *) offenders="$offenders  $line"$'\n' ;;
+        esac
+    done <<<"$srcs"
+    if [ -n "$offenders" ]; then
+        printf 'the lockfile names a source that is not crates.io, and the fetch has network:\n%s' "$offenders"
+        return 1
+    fi
+    return 0
 }
 
 # $1 = the filter the caller passed.
