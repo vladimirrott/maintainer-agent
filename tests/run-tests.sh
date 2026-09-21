@@ -30,6 +30,13 @@ bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
 noenv(){ printf '  SKIP  %s\n' "$1"; skip=$((skip+1)); }
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2')"; fi; }
 
+# The sysknife shell suite builds its own image, because the release rehearsal
+# it runs needs cargo, node and npm. This suite drives maintainer-merge end to
+# end against that profile on a four-line check.sh, so it needs the gate's
+# machinery and none of those tools, and it runs on GitHub runners where a
+# locally built image does not exist. Pin those cases to a registry image.
+export MAINTAINER_SHELL_IMAGE=docker.io/library/python:3.12
+
 # A fake PATH: gh, claude, codex and notify-send never reach the real ones.
 stub_dir="$(mktemp -d)"
 # And a scratch state directory, so a test run cannot append to the real audit

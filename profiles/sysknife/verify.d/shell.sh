@@ -72,7 +72,15 @@ suite_covers() {
 # declare they need. maintainer-doctor refuses when the image is absent and
 # prints the build command, because an image that exists only on the host that
 # built it is not a reproducible gate.
-suite_image() { printf 'localhost/sk-rehearsal:1'; }
+#
+# MAINTAINER_SHELL_IMAGE overrides it, and exists for one caller: this
+# repository's own offline suite drives maintainer-merge end to end against
+# this profile, and it runs on GitHub runners where a locally built image does
+# not exist. Those cases exercise the gate's machinery on a four-line
+# check.sh, not sysknife's release scripts, so a registry image is the honest
+# thing for them to use. maintainer-doctor prints whichever image is in
+# effect, so an override left set is visible rather than silent.
+suite_image() { printf '%s' "${MAINTAINER_SHELL_IMAGE:-localhost/sk-rehearsal:1}"; }
 
 # What that image has to contain. maintainer-doctor runs the image and checks
 # each of these resolves, because nothing else ties the image to what the suite
