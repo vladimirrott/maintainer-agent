@@ -2713,3 +2713,76 @@ not a set you assembled earlier for a different purpose. A check whose input
 is stale reports on a world that has moved, and reports it confidently. The
 re-scan is one loop over every open issue and takes half a minute, which is
 less than the withdrawal it saves.
+
+## 90. A warning the reader sees, and a guess the reader does not
+
+`offers` reported @QinXi-ai OVER-OFFERED on sysknife, holding #428, #433 and
+#460 unanswered. Every one of the three was wrong, and the campaign running at
+the time was under instruction to hand half the new issues to that contributor.
+
+Two were withdrawals. I had retracted #428 and #433 in public comments that
+said so plainly, and each named both the person I was withdrawing from and the
+person the issue went back to. The third named them only in a coordination
+note: "read #458 first, @QinXi-ai has an offer out on it", about a different
+issue entirely.
+
+All three were AMBIGUOUS by the tool's own reading. It printed "who holds it
+cannot be read from the thread" and then charged the issue to every handle in
+the sentence it had just called unreadable. Acting on the guess was invisible;
+only the warning was on screen, so a reader who saw the warning still trusted
+the count beside it.
+
+    person      open  unans  eligible?
+    QinXi-ai       4      3  OVER-OFFERED: 3 unanswered (#460, #433, #428)   before
+    QinXi-ai       1      0  no: working on #459                             after
+
+An ambiguous issue is now charged to nobody. It stays out of the free pool,
+because somebody does hold it; which body is the thing that could not be read.
+An open pull request settles a thread the way an assignee already did.
+
+The shape to carry: when a check reports that it could not determine something,
+every number downstream of that determination has to stop too. Printing the
+uncertainty and then publishing a figure derived from it is worse than either
+one alone, because the figure looks like it survived the check.
+
+## 91. The remedy the tool printed did nothing
+
+The AMBIGUOUS line ended with "Assign whoever has it, or say so in a comment
+naming only them." The second half was false. `crowded` took the maximum number
+of handles across every comment on the thread, so a count that had reached two
+could never come back down, and the issue stayed ambiguous however many times I
+clarified it.
+
+Nobody reported this, because the advice reads as reasonable and the person
+following it has no reason to re-run the command and check. I found it by
+following my own instruction and watching nothing change.
+
+It reads the last comment that names anybody now, which is already the rule for
+each person's own state four lines below.
+
+I tried to go further first and read a later single-name comment as a
+retraction. That broke the double-booking test, and it deserved to: two
+single-name comments are as likely to be two offers as a correction, and this
+file says two hundred lines up that intent is not parseable out of a sentence.
+
+The guard is to test the remedy, not just the detection. Every warning that
+tells a human what to do is a claim about the system's behaviour, and it goes
+stale the same way a comment does. An assertion that follows the printed advice
+and re-checks the warning is three lines and it is the only thing that keeps
+the two honest.
+
+## 92. A marker nothing writes is a marker nobody uses
+
+`RELEASE_MARKER` has existed since the day an offer and a release were found to
+be the same shape in prose. No command ever wrote it. Every withdrawal I posted
+in three months was hand-typed English, so `offers` went on counting the person
+as a holder, which is lesson 90's root cause rather than its symptom.
+
+`maintainer release <issue> <user> <reason>` writes it. It names one person and
+refuses a reason that names a second, because a retraction that also names the
+contributor the issue is going back to is what made sysknife#428 ambiguous in
+the first place. It reads the comment back before reporting success.
+
+The shape: a convention that depends on a human remembering to type an exact
+string is not a convention, it is a hope. Either a command writes it or the
+parser should not look for it.
