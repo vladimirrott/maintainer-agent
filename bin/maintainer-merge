@@ -835,9 +835,14 @@ $(tail -5 "$work/prefetch.log" | sed 's/^/    /')"
         # These shapes are the suite environment, never the pull request. A test
         # that genuinely fails prints its own assertion; it does not report a
         # missing interpreter.
-        if looks_environmental "$clean_log"; then
+        local env_hit
+        if env_hit="$(looks_environmental "$clean_log")"; then
             die "the unmutated test failed on my suite environment, not the pull request.
 
+  the line that says so:
+$(printf '%s' "$env_hit" | sed 's/^/    /')
+
+  the last of the run:
 $(tail -5 "$clean_log" | sed 's/^/    /')
 
   That is a missing binary or an unexecutable path inside the verify
@@ -998,7 +1003,16 @@ looks_environmental() {
     # image carries bash, python3 and git. Fifth time this gate could not run
     # and described it as the pull request failing its own test.
     shapes="$shapes|required tool is missing"
-    grep -qaiE "$shapes" "$1" 2>/dev/null
+    # Print the line that matched, not just a yes. The verdict "this failed on
+    # my suite environment" was unfalsifiable without it: a verify of
+    # sysknife#461 refused on 2026-09-21, tailed five Compiling lines that said
+    # nothing, and named no shape, so deciding whether the gate was right meant
+    # reading this function and guessing. A refusal nobody can act on is where
+    # --admin comes from.
+    local hit
+    hit="$(grep -aiE "$shapes" "$1" 2>/dev/null | tail -1)"
+    [ -n "$hit" ] || return 1
+    printf '%s' "$hit"
 }
 
 cmd_merge() {

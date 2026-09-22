@@ -669,7 +669,13 @@ if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
     # whatever happens to the alert. A gap in the index is indistinguishable
     # from a run that never started, and this run demonstrably started: it has
     # a log, and it may already have posted.
-    "$HELPER" abort "$run_id" "the run wrote no usable report" >>"$log" 2>&1 || true
+    # Say WHY in the index, not only that it happened. "the run wrote no usable
+    # report" is the symptom, and the index is the document a reader trusts: a
+    # line recording an abort without its cause is the same gap one level in.
+    # Thirty-one aborted runs carried that sentence and nothing else.
+    abort_why="$(maintainer_classify_failure "$log" 2>/dev/null \
+        | awk -F'\t' '{printf "%s%s: %s", $1, ($2==""?"":"/"$2), $3}')"
+    "$HELPER" abort "$run_id" "no report; ${abort_why:-cause not determined}" >>"$log" 2>&1 || true
     if [ -n "$backend_why" ]; then
         # The backend never got far enough to write anything, and the reason
         # heals on its own. Exit 75 so SuccessExitStatus absorbs it and
