@@ -726,6 +726,23 @@ grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
     && ok "and says out loud how many it could not explain" \
     || bad "the audit does not report how many deaths are unexplained"
 
+echo "== release-check says so when it read a CHANGELOG that is not the one you tag =="
+# On 2026-09-22 release-check answered `digit: last` for a release whose
+# Unreleased section drops Node 18 and 20 support. The heuristic was fine; the
+# TREE was four commits behind, so the section it read did not contain the
+# entry. Following that answer would have published a breaking change as a
+# patch to everyone pinned to ^0.16.
+#
+# The existing guard asks whether HEAD is an ancestor of origin/main, which is
+# TRUE for a stale checkout. Being behind is the common case and it read as
+# healthy.
+grep -q 'HEAD\.\.origin/main\|rev-list --count' "$root/bin/maintainer-repo" \
+    && ok "release-check counts how far behind the tree is" \
+    || bad "a checkout behind origin/main still reports a confident digit"
+grep -qi 'behind' "$root/bin/maintainer-repo" \
+    && ok "and says so in words, next to the verdict it affects" \
+    || bad "nothing tells the reader the CHANGELOG is not the one being tagged"
+
 echo "== a container the kernel killed is not a test that failed =="
 # sysknife#470's verify came back `the test does not pass unmutated (rc=137)`.
 # 137 is 128+9: the container was SIGKILLed, which on this path means the
