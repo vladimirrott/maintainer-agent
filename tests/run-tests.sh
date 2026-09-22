@@ -741,7 +741,17 @@ ilk="$stub_dir/instlock"; rm -rf "$ilk"; mkdir -p "$ilk/state"
 # Hold the lock the way a run does, then drive the check out of install.sh.
 ( flock 9; sleep 6 ) 9<>"$ilk/state/run.lock" &
 ilk_pid=$!
-sleep 1
+# Wait for the holder to ACQUIRE it rather than sleeping a fixed second. Under
+# load that sleep is a race, and this suite ran with a rust build beside it on
+# 2026-09-21 and failed once for exactly that reason. A gate that fails at
+# random teaches everyone to re-run until green, which is how a real failure
+# gets waved through: MISTAKES rule 2.
+ilk_wait=0
+while flock -n "$ilk/state/run.lock" true 2>/dev/null; do
+    ilk_wait=$((ilk_wait + 1))
+    [ "$ilk_wait" -gt 200 ] && break
+    sleep 0.05
+done
 if flock -n "$ilk/state/run.lock" true 2>/dev/null; then
     bad "the fixture lock is not actually held, so this case proves nothing"
 else
