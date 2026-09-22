@@ -13,12 +13,13 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 share="$HOME/.local/share/maintainer"
 bin="$HOME/.local/bin"
 units="$HOME/.config/systemd/user"
-dry=0; timers=0; uninstall=0
+dry=0; timers=0; uninstall=0; force=0
 for a in "$@"; do
     case "$a" in
         --dry-run)   dry=1 ;;
         --timers)    timers=1 ;;
         --uninstall) uninstall=1 ;;
+        --force)     force=1 ;;
         *) echo "install.sh: unknown flag $a" >&2; exit 64 ;;
     esac
 done
@@ -155,6 +156,36 @@ done
 # render step below then wrote into the nested copy while the live deny wall
 # stayed stale at its previous size. Remove the destination first so a re-install
 # is a replacement rather than an accumulation.
+# Refuse while a run is reading the tree this is about to replace.
+#
+# The line below deletes $share/profiles and recopies it. A run in flight reads
+# those files from start to finish, and on 2026-09-21 a sysknife review run held
+# its lock for over two hours while this was one command away from being run
+# over it. Nothing here looked. Deleting a live run's profile mid-pass fails in
+# a way nobody can explain afterwards, because the evidence goes with the
+# directory.
+#
+# Ask the lock rather than guessing from a process list: a pattern match finds
+# the shell doing the matching, and MISTAKES rule 1 is seven instances of that.
+if [ "$dry" = 0 ] && [ "$force" = 0 ]; then
+    _busy=""
+    for _env in "$root"/profiles/*/profile.env; do
+        [ -f "$_env" ] || continue
+        # shellcheck disable=SC1090
+        _sd="$( . "$_env" >/dev/null 2>&1; printf '%s' "${STATE_DIR:-}" )"
+        [ -n "$_sd" ] && [ -e "$_sd/run.lock" ] || continue
+        flock -n "$_sd/run.lock" true 2>/dev/null && continue
+        _busy="$_busy $(basename "$(dirname "$_env")")"
+    done
+    if [ -n "$_busy" ]; then
+        echo "install.sh: a run is in flight for:$_busy" >&2
+        echo "            This replaces $share/profiles, which that run reads for" >&2
+        echo "            the whole of its pass." >&2
+        echo "" >&2
+        echo "            Wait for it (maintainer status), or --force if you are sure." >&2
+        exit 69
+    fi
+fi
 run rm -rf "$share/backends" "$share/profiles"
 run cp -r "$root/lib/backends" "$share/backends"
 run cp -r "$root/profiles" "$share/profiles"

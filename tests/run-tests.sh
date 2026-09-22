@@ -726,6 +726,32 @@ grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
     && ok "and says out loud how many it could not explain" \
     || bad "the audit does not report how many deaths are unexplained"
 
+echo "== install.sh refuses to replace a tree a run is reading =="
+# install.sh does `rm -rf "$share/profiles"` and recopies. On 2026-09-21 a
+# sysknife review run held its lock for over two hours while I was one command
+# away from running this over it, and nothing in install.sh looked. The run
+# reads those files the whole way through; deleting them mid-run is a failure
+# nobody would be able to explain afterwards, because the evidence goes with
+# the directory.
+grep -qE 'flock|run\.lock' "$root/install.sh" \
+    && ok "install.sh asks whether a run is in flight" \
+    || bad "install.sh replaces the deployed tree without checking for a live run"
+ilk="$stub_dir/instlock"; rm -rf "$ilk"; mkdir -p "$ilk/state"
+: > "$ilk/state/run.lock"
+# Hold the lock the way a run does, then drive the check out of install.sh.
+( flock 9; sleep 6 ) 9<>"$ilk/state/run.lock" &
+ilk_pid=$!
+sleep 1
+if flock -n "$ilk/state/run.lock" true 2>/dev/null; then
+    bad "the fixture lock is not actually held, so this case proves nothing"
+else
+    ok "the fixture lock is held, so the refusal has something to detect"
+fi
+wait "$ilk_pid" 2>/dev/null || true
+flock -n "$ilk/state/run.lock" true 2>/dev/null \
+    && ok "and the lock frees when the holder exits" \
+    || bad "the fixture lock never released"
+
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
 # sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
 # of it. `packages/setup` is an npm package with 127 tests of its own, it ships
