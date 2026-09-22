@@ -726,6 +726,66 @@ grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
     && ok "and says out loud how many it could not explain" \
     || bad "the audit does not report how many deaths are unexplained"
 
+echo "== an aborted run records its cause in the index, not just its symptom =="
+# index.md is the document a reader trusts, and for thirty-one aborted runs it
+# said "the run wrote no usable report" and nothing else. That is the symptom.
+# The failure marker had the cause and the index did not, so the trail could
+# tell you a week was quiet but never why.
+abrt="$stub_dir/aborthome"; rm -rf "$abrt"; mkdir -p "$abrt/.local/bin"
+abrt_repo="$abrt/repo"; git init -q -b main "$abrt_repo"
+abrt_state="$abrt/state"; mkdir -p "$abrt_state/runs" "$abrt_state/state"
+cat > "$abrt/.local/bin/maintainer" <<'AEOF'
+#!/usr/bin/env bash
+case "$1" in
+  start) echo "=== maintainer 2031-05-06T07-08-review ==="; echo "context";
+         echo "write the run report to $MAINTAINER_STATE/runs/2031-05-06T07-08-review.md";;
+  finish) exit 1 ;;
+  abort) printf '%s\n' "$3" > "$ABORT_REASON_FILE"; exit 0 ;;
+  *) exit 0 ;;
+esac
+AEOF
+chmod +x "$abrt/.local/bin/maintainer"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOKENTOKENTOKENTOKEN;; *'api user'*) echo vladimirrott;; esac"
+make_stub claude 'echo "API Error: Cannot reach the API server - check your internet or DNS (EAI_AGAIN)" >&2; exit 1'
+: > "$abrt/reason.txt"
+PATH="$stub_dir:$abrt/.local/bin:$PATH" ABORT_REASON_FILE="$abrt/reason.txt" HOME="$abrt" \
+    MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$abrt_state" \
+    MAINTAINER_REPO_PATH="$abrt_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+if grep -qE 'transient|needs_human|unclassified' "$abrt/reason.txt" 2>/dev/null; then
+    ok "the abort recorded in the index carries a classified cause"
+else
+    bad "the index still records only the symptom: '$(cat "$abrt/reason.txt" 2>/dev/null)'"
+fi
+grep -qi 'eai_again\|reach the api' "$abrt/reason.txt" 2>/dev/null \
+    && ok "and the evidence line that produced it" \
+    || bad "the recorded cause carries no evidence: '$(cat "$abrt/reason.txt" 2>/dev/null)'"
+rm -f "$stub_dir/claude"; make_stub claude 'exit 0'
+
+echo "== when the gate blames its own container it says which line said so =="
+# The verdict was unfalsifiable. On 2026-09-21 a verify of sysknife#461 refused
+# with "the unmutated test failed on my suite environment", tailed five
+# Compiling lines that said nothing, and named no shape. Deciding whether the
+# gate was right meant reading the pattern list and guessing. A refusal nobody
+# can act on is the shape lessons.md keeps recording.
+envd="$stub_dir/envdiag"; rm -rf "$envd"; mkdir -p "$envd"
+printf 'Compiling foo v1.0\nerror: could not find system library '"'"'glib-2.0'"'"'\nCompiling bar v2.0\n' > "$envd/glib.log"
+printf 'Compiling foo v1.0\nassertion failed: left != right\n' > "$envd/real.log"
+# Drive the predicate straight out of the file: it is a pure function of a log
+# and the tool around it needs a whole profile to start.
+env_mg="$root/bin/maintainer-merge"
+hit=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_environmental "$2"' _ "$env_mg" "$envd/glib.log") || true
+grep -qi 'system library' <<<"$hit" \
+    && ok "an environmental refusal names the line that made it environmental" \
+    || bad "looks_environmental still answers yes or no and nothing else: '$hit'"
+neg=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_environmental "$2"' _ "$env_mg" "$envd/real.log") || true
+[ -z "$neg" ] \
+    && ok "and a genuine assertion failure is still not called environmental" \
+    || bad "a real test failure was excused as the container's fault: '$neg'"
+grep -q 'the line that says so' "$env_mg" \
+    && ok "the refusal quotes that line back to the reader" \
+    || bad "the refusal prints a tail that may not contain the reason"
+
 echo "== the failure taxonomy is configuration, not a regex buried in a function =="
 # Two instructions met by one change. The shapes that decide whether a run is
 # retried, escalated or left unexplained were an alternation inside a shell
