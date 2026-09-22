@@ -44,15 +44,21 @@ suite_podman_args() {  # $1 = the container runtime
     esac
 }
 
-# $1 = a node test-name pattern. `npm test` forwards what follows `--` to the
-# script, and `node --test` takes --test-name-pattern.
-suite_command() {
-    printf 'npm test --prefix packages/setup -- --test-name-pattern %s\n' "$1"
-}
+# $1 = the path of a test file, the same shape the shell suite's filter takes.
+#
+# --test-name-pattern was the obvious choice and it is the wrong one: it selects
+# which tests REPORT, not which files RUN, so the whole suite executes. Measured
+# against sysknife#468 in this image, that runs setup-contract.test.mjs, which
+# wants a reachable daemon socket and fails, and the gate would then have
+# reported a contributor as failing a test their change never touched. That is
+# the fifth instance of this suite family blaming the pull request for the
+# container, caught here before it reached anybody.
+suite_command() { printf 'node --test %s\n' "$1"; }
 
-# node --test prints a TAP summary. `# pass N` is the count of tests that ran
-# and passed; a pattern matching nothing prints `# pass 0`, which is the
-# vacuous run this whole file exists to refuse.
+# How many tests actually executed. node --test prints `ℹ pass N` under its
+# default reporter and `# pass N` under TAP, and the first version of this read
+# only the TAP form, so a clean run of ten passing tests counted zero and the
+# gate refused it as vacuous. Accept both rather than pin the reporter.
 suite_ran() {  # $1 = the clean log
-    awk '/^# pass /{s+=$3} END{print s+0}' "$1"
+    awk '/(^|[^a-z])pass [0-9]+/ { for (i=1;i<=NF;i++) if ($i=="pass") s+=$(i+1) } END { print s+0 }' "$1"
 }

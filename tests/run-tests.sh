@@ -749,15 +749,33 @@ done
     || ok "and claims nothing it cannot run"
 # A count that cannot be read is a vacuous pass. node --test prints "# pass N".
 npass="$stub_dir/npass"; rm -rf "$npass"; mkdir -p "$npass"
+# node --test prints `ℹ pass N` under its default reporter and `# pass N` under
+# TAP. The first version of suite_ran read only the TAP form, so a clean run of
+# ten passing tests counted zero and the gate refused it as vacuous. Measured
+# in the real image against sysknife#468, not assumed from the docs.
 printf 'ok 1 - a\nok 2 - b\n# tests 2\n# pass 2\n# fail 0\n' > "$npass/clean.log"
+printf '\xe2\x84\xb9 tests 10\n\xe2\x84\xb9 pass 10\n\xe2\x84\xb9 fail 0\n' > "$npass/spec.log"
 printf '# tests 0\n# pass 0\n# fail 0\n' > "$npass/empty.log"
 # shellcheck disable=SC1090
 n1=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/clean.log" )
 # shellcheck disable=SC1090
 n0=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/empty.log" )
+# shellcheck disable=SC1090
+nspec=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/spec.log" )
 { [ "$n1" -ge 1 ] && [ "$n0" = 0 ]; } \
     && ok "it counts executed tests, and a filter matching nothing counts zero ($n1 / $n0)" \
     || bad "suite_ran cannot tell a real run from a vacuous one ($n1 / $n0)"
+[ "${nspec:-0}" -ge 1 ] \
+    && ok "and it reads the default reporter too, not only TAP ($nspec)" \
+    || bad "a clean run under node's default reporter counts zero and is refused ($nspec)"
+# The filter is a file, not a name pattern. --test-name-pattern selects which
+# tests report and still runs every file, which in this package means
+# setup-contract.test.mjs wanting a daemon socket the container has not got.
+# shellcheck disable=SC1090
+ncmd=$( . "$nsuite" >/dev/null 2>&1; suite_command 'packages/setup/tests/x.test.mjs' )
+grep -q 'test-name-pattern' <<<"$ncmd" \
+    && bad "the node filter still selects names, so every file runs: $ncmd" \
+    || ok "the node filter names one file, so an unrelated file cannot fail the run"
 # The package ships to npm, so it is production and the merge gate has to
 # re-check it. A suite with no matching PROD_GLOBS entry lets the same change
 # through the no-production narrowing instead.
