@@ -726,6 +726,63 @@ grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
     && ok "and says out loud how many it could not explain" \
     || bad "the audit does not report how many deaths are unexplained"
 
+echo "== packages/setup has a suite, because 127 tests had no gate at all =="
+# sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
+# of it. `packages/setup` is an npm package with 127 tests of its own, it ships
+# to users, and the rust, shell and docs suites between them claimed none of it,
+# so the gate refused every pull request touching it. That is issue #11 again in
+# a fourth language.
+nsuite="$root/profiles/sysknife/verify.d/node.sh"
+[ -f "$nsuite" ] && ok "sysknife has a node suite" || bad "packages/setup is still uncoverable"
+for fn in suite_covers suite_image suite_needs suite_command suite_ran; do
+    # shellcheck disable=SC1090
+    ( . "$nsuite" >/dev/null 2>&1; declare -F "$fn" >/dev/null ) \
+        && ok "node suite defines $fn" || bad "node suite has no $fn"
+done
+# shellcheck disable=SC1090
+( . "$nsuite" >/dev/null 2>&1; suite_covers packages/setup/node-preflight.js ) \
+    && ok "and it claims the JavaScript nothing else did" \
+    || bad "the node suite does not cover packages/setup"
+# shellcheck disable=SC1090
+( . "$nsuite" >/dev/null 2>&1; suite_covers crates/sysknife-daemon/src/lib.rs ) \
+    && bad "the node suite claims Rust it cannot run" \
+    || ok "and claims nothing it cannot run"
+# A count that cannot be read is a vacuous pass. node --test prints "# pass N".
+npass="$stub_dir/npass"; rm -rf "$npass"; mkdir -p "$npass"
+# node --test prints `ℹ pass N` under its default reporter and `# pass N` under
+# TAP. The first version of suite_ran read only the TAP form, so a clean run of
+# ten passing tests counted zero and the gate refused it as vacuous. Measured
+# in the real image against sysknife#468, not assumed from the docs.
+printf 'ok 1 - a\nok 2 - b\n# tests 2\n# pass 2\n# fail 0\n' > "$npass/clean.log"
+printf '\xe2\x84\xb9 tests 10\n\xe2\x84\xb9 pass 10\n\xe2\x84\xb9 fail 0\n' > "$npass/spec.log"
+printf '# tests 0\n# pass 0\n# fail 0\n' > "$npass/empty.log"
+# shellcheck disable=SC1090
+n1=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/clean.log" )
+# shellcheck disable=SC1090
+n0=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/empty.log" )
+# shellcheck disable=SC1090
+nspec=$( . "$nsuite" >/dev/null 2>&1; suite_ran "$npass/spec.log" )
+{ [ "$n1" -ge 1 ] && [ "$n0" = 0 ]; } \
+    && ok "it counts executed tests, and a filter matching nothing counts zero ($n1 / $n0)" \
+    || bad "suite_ran cannot tell a real run from a vacuous one ($n1 / $n0)"
+[ "${nspec:-0}" -ge 1 ] \
+    && ok "and it reads the default reporter too, not only TAP ($nspec)" \
+    || bad "a clean run under node's default reporter counts zero and is refused ($nspec)"
+# The filter is a file, not a name pattern. --test-name-pattern selects which
+# tests report and still runs every file, which in this package means
+# setup-contract.test.mjs wanting a daemon socket the container has not got.
+# shellcheck disable=SC1090
+ncmd=$( . "$nsuite" >/dev/null 2>&1; suite_command 'packages/setup/tests/x.test.mjs' )
+grep -q 'test-name-pattern' <<<"$ncmd" \
+    && bad "the node filter still selects names, so every file runs: $ncmd" \
+    || ok "the node filter names one file, so an unrelated file cannot fail the run"
+# The package ships to npm, so it is production and the merge gate has to
+# re-check it. A suite with no matching PROD_GLOBS entry lets the same change
+# through the no-production narrowing instead.
+grep -q 'packages/setup' "$root/profiles/sysknife/profile.env" \
+    && ok "packages/setup is declared production" \
+    || bad "a published npm package is not in PROD_GLOBS"
+
 echo "== an aborted run records its cause in the index, not just its symptom =="
 # index.md is the document a reader trusts, and for thirty-one aborted runs it
 # said "the run wrote no usable report" and nothing else. That is the symptom.
@@ -785,6 +842,22 @@ neg=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_env
 grep -q 'the line that says so' "$env_mg" \
     && ok "the refusal quotes that line back to the reader" \
     || bad "the refusal prints a tail that may not contain the reason"
+# And the reason to print it: the shape list held the bare token `pkg-config`,
+# which matches an ordinary cargo line compiling a CRATE of that name. Every
+# rust verify that failed for any reason was reported as the container's fault.
+# Measured on sysknife#438 on 2026-09-21, the matched line was
+#   Compiling pkg-config v0.3.33
+printf 'Compiling serde v1.0\n   Compiling pkg-config v0.3.33\nerror: test failed\n' > "$envd/crate.log"
+fp=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_environmental "$2"' _ "$env_mg" "$envd/crate.log") || true
+[ -z "$fp" ] \
+    && ok "a crate named pkg-config in ordinary build output is not environmental" \
+    || bad "the gate blames its own container whenever pkg-config is compiled: '$fp'"
+# The shape it was written for must still bite. This is the real glib wording.
+printf 'The system library `glib-2.0` required by crate `glib-sys` was not found.\nerror: failed to run custom build command for `glib-sys v0.18.1`\n' > "$envd/realglib.log"
+gp=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_environmental "$2"' _ "$env_mg" "$envd/realglib.log") || true
+grep -qi 'system library\|custom build command' <<<"$gp" \
+    && ok "and a genuinely missing system library still is" \
+    || bad "narrowing the shape lost the case it was written for: '$gp'"
 
 echo "== the failure taxonomy is configuration, not a regex buried in a function =="
 # Two instructions met by one change. The shapes that decide whether a run is

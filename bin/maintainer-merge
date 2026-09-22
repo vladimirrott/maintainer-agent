@@ -987,7 +987,16 @@ looks_environmental() {
     # alternation into a pattern that matches nothing.
     local shapes='command not found|: not found$|permission denied'
     shapes="$shapes|cannot execute|exec format error"
-    shapes="$shapes|could not find system library|pkg-config"
+    # `could not find system library` is cargo's wording when a -sys crate's
+    # pkg-config probe fails, which is the sysknife-shell/glib case. The bare
+    # token `pkg-config` used to sit here beside it and matched
+    #     Compiling pkg-config v0.3.33
+    # in ordinary build output, so every rust verify that failed for ANY reason
+    # was reported as this container's fault. Measured on sysknife#438 on
+    # 2026-09-21, an hour after this function started printing what it matched.
+    # A shape that matches a dependency's NAME is not a shape.
+    shapes="$shapes|could not find system library"
+    shapes="$shapes|pkg-config[^ ]* (not found|exited|failed)"
     shapes="$shapes|failed to run custom build command"
     shapes="$shapes|linker .?cc.? not found|error while loading shared libraries"
     # EPERM out of a container that dropped every capability. sysknife#429's
