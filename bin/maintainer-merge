@@ -826,6 +826,13 @@ $(tail -5 "$work/prefetch.log" | sed 's/^/    /')"
     say "running '$filter' unmutated"
     run_in_container "$clean_log"; local clean_rc=$?
     if [ "$clean_rc" != 0 ]; then
+        if looks_killed "$clean_rc"; then
+            die "the unmutated run was KILLED (exit $clean_rc), so it never reached a verdict.
+
+  That is my container hitting its memory cap or its timeout, not #$pr. Raise
+  MAINTAINER_VERIFY_MEMORY or lower MAINTAINER_CARGO_JOBS and run it again.
+  Do NOT report the contributor as failing their own test."
+        fi
         # Three times this gate could not run and reported the contributor as
         # failing: an image with no python3, an image with no git, and /tmp
         # mounted noexec. Each arrived as "the test does not pass unmutated",
@@ -880,6 +887,15 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     if [ "$mut_rc" = 0 ]; then
         die "THE GUARD DOES NOT BITE: '$filter' still passes with the mutation applied.
   This is the defect the gate exists for. No receipt written."
+    fi
+    # A kill is not a proof. The mutated run is expected to fail, so every
+    # non-zero used to count as the guard biting, and a container the memory
+    # cap killed would have minted a receipt for a proof that never ran.
+    if looks_killed "$mut_rc"; then
+        die "the mutated run was KILLED (exit $mut_rc), so nothing was proved.
+
+  A killed container is not a guard biting. Raise MAINTAINER_VERIFY_MEMORY or
+  lower MAINTAINER_CARGO_JOBS and run it again. No receipt written."
     fi
 
     mkdir -p "$RECEIPTS"
@@ -981,6 +997,26 @@ cmd_show() {
 # Getting this wrong is expensive in a specific direction: the gate reports a
 # contributor as failing their own test, under my name, in public. That has
 # happened twice.
+# An exit code, not a log line.
+#
+# A container the kernel or the runtime killed writes no diagnostic at all, so
+# looks_environmental can never match it: there is nothing in the log to match
+# against. sysknife#470's verify came back `the test does not pass unmutated
+# (rc=137)`, which reads as the contributor's test failing when what happened
+# is that the memory cap took the compile.
+#
+# 137 is 128+9, SIGKILL, which here is --memory or the OOM killer. 143 is
+# 128+15, SIGTERM, which is how --timeout arrives. 124 is GNU timeout's own
+# code. A segfault (139) is deliberately absent: that one can genuinely be the
+# code under test.
+#
+# This matters most on the MUTATED run. That run is expected to fail, so any
+# non-zero was read as the guard biting, and a killed container would have
+# bought a receipt for a proof that never ran.
+looks_killed() {  # $1 = an exit code
+    case "${1:-}" in 137|143|124) return 0 ;; *) return 1 ;; esac
+}
+
 looks_environmental() {
     # Built by concatenation. A backslash-newline inside single quotes is
     # literal, so writing this as one wrapped string silently turns the
