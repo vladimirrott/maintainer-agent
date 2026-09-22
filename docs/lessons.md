@@ -2661,3 +2661,55 @@ carrying an `@mention` and look at what it says. An offer, an acceptance and a
 withdrawal all mention somebody, and only reading them tells you which. The
 count went from eighteen to nine in one command, and the honest report to the
 maintainer is that the pool was the binding constraint, not the arithmetic.
+
+## 88. The deduplication existed, and I filed around it
+
+`maintainer file-issue` hashes the normalised title, embeds the hash in the
+issue body as `<!-- maintainer-finding: ... -->`, and refuses to file a second
+issue carrying the same one. It exists because sysknife's #342 and #343 are
+identical titles filed nine minutes apart, one of them still open.
+
+On 2026-09-21 a timer filed sysknife#464 through that tool, with its
+fingerprint. Twenty-five minutes later I filed #465, the same defect on the
+same two lines of the same file, through `gh issue create`. No fingerprint,
+nothing to compare, nothing refused. I closed it as a duplicate within the
+hour.
+
+The deny wall names `gh issue create` in thirty-two spellings, so the
+unattended profile cannot make this mistake. Interactive work is outside that
+wall, and I was working from a drafts folder written by a run the day before,
+which had no way to record that a later run had already filed its contents.
+
+Two changes came out of it, and the second is the general one. The issues I
+filed by hand got their fingerprints added afterwards, so a later run cannot
+duplicate them either. And a draft is not a task list: before acting on one,
+ask the tracker whether somebody already did it. The tool asks. I did not.
+
+This is MISTAKES rule 7 at a new address. The rule already says to run the
+command whose job is the decision you are about to make by reading, and it
+already carries `gh pr merge` as its example. `gh issue create` is the same
+shape: a verb that works, beside a tool that works and also checks.
+
+## 89. The scan measured a different set than the offers did
+
+Offering issues to recurring contributors, I built a candidate list of
+eighteen, scanned every one of them for a live `@mention` offer, and found
+twelve already promised to somebody. That check was right and it caught a lot.
+
+Then I chose the final nine from a different list.
+
+Five of the issues I offered had never been in the scanned set, because I
+assembled the candidates before I finalised the allocation and then reached
+outside them for better matches. Two of those five were already held:
+sysknife#428 had been with @xianjianlf2 since 15 September, and #433 was held
+for @vsolano9 in a note three comments up the same thread. Both were
+double-booked for four hours until I re-scanned every open issue on the
+tracker rather than my own shortlist.
+
+Nobody lost an evening, which is luck and not design.
+
+The guard is to scan the set you are about to act on, at the moment you act,
+not a set you assembled earlier for a different purpose. A check whose input
+is stale reports on a world that has moved, and reports it confidently. The
+re-scan is one loop over every open issue and takes half a minute, which is
+less than the withdrawal it saves.
