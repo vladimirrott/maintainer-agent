@@ -726,6 +726,36 @@ grep -qE 'match no shape|every one of them carries a named cause' <<<"$aout" \
     && ok "and says out loud how many it could not explain" \
     || bad "the audit does not report how many deaths are unexplained"
 
+echo "== a container the kernel killed is not a test that failed =="
+# sysknife#470's verify came back `the test does not pass unmutated (rc=137)`.
+# 137 is 128+9: the container was SIGKILLed, which on this path means the
+# memory cap or the OOM killer, and the pull request had nothing to do with it.
+# looks_environmental reads the LOG, and a killed process writes no diagnostic
+# at all, so no shape could ever match. The signal is in the exit code.
+grep -qE '\b137\b' "$root/bin/maintainer-merge" \
+    && ok "the gate knows what exit 137 means" \
+    || bad "a SIGKILLed container is still reported as the contributor's test failing"
+# And it must stay narrow: an ordinary non-zero is still the pull request's.
+kexit="$stub_dir/killexit"; rm -rf "$kexit"; mkdir -p "$kexit"
+: > "$kexit/empty.log"
+kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 137 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
+[ "$kf" = yes ] && ok "137 is recognised as a kill" || bad "137 is not recognised (got '$kf')"
+kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 101 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
+[ "$kf" = no ] && ok "and an ordinary cargo failure (101) is still the pull request's" \
+    || bad "a real test failure would be excused as a kill (got '$kf')"
+kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 143 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
+[ "$kf" = yes ] && ok "and SIGTERM (143), which is how the timeout arrives" \
+    || bad "a timed-out container reads as a failing test (got '$kf')"
+# The direction that matters most. The mutated run is EXPECTED to fail, so any
+# non-zero was read as the guard biting, and a container the memory cap killed
+# would mint a receipt on no evidence at all. A kill is not a proof.
+grep -q 'looks_killed "$mut_rc"' "$root/bin/maintainer-merge" \
+    && ok "a killed mutated run is refused rather than counted as the guard biting" \
+    || bad "an OOM-killed mutation still buys a receipt"
+grep -q 'looks_killed "$clean_rc"' "$root/bin/maintainer-merge" \
+    && ok "and a killed clean run is blamed on the container, not the contributor" \
+    || bad "a killed clean run still reads as the pull request failing"
+
 echo "== install.sh refuses to replace a tree a run is reading =="
 # install.sh does `rm -rf "$share/profiles"` and recopies. On 2026-09-21 a
 # sysknife review run held its lock for over two hours while I was one command
