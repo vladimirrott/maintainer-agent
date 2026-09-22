@@ -4178,6 +4178,121 @@ grep -qiE 'AMBIGUOUS #71' <<<"$out" \
     && bad "an assigned issue was called ambiguous, which makes the warning noise" \
     || ok "an assigned issue is not ambiguous, because the assignee settles it"
 
+echo "== an ambiguous issue does not count against anybody it names =="
+# The tool said "who holds it cannot be read from the thread" and then counted
+# every name in that unreadable sentence as a live hold. Saying "I cannot tell"
+# and then acting on a guess is worse than either one alone: the guess is
+# invisible, and it lands on the people the sentence happened to name.
+#
+# sysknife 2026-09-22: @QinXi-ai was reported OVER-OFFERED with three unanswered
+# offers. #428 and #433 were withdrawn from them in public comments that also
+# named the contributor the issue went back to, and #460 named them only to say
+# "read #458 first, @QinXi-ai has an offer out on it". All three were ambiguous
+# by this tool's own reading, and all three counted. The campaign that followed
+# would have skipped the one contributor it was told to offer work to.
+#
+# An ambiguous issue stays out of the free pool, because somebody does hold it.
+# It attributes to nobody, because which body is the thing that cannot be read.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo '[{"author":{"login":"vet"},"mergedAt":"2026-09-09T00:00:00Z"}]';;
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":70,"labels":[],"assignees":[]}]';;
+  *issues/70/comments*) echo '[{"u":"owner","b":"@newbie this one is yours. I offered the last one to @veteran, who took it."}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -qE '^(newbie|veteran) ' <<<"$out" \
+    && bad "an ambiguous issue was still charged to somebody: $(grep -E '^(newbie|veteran) ' <<<"$out" | tr '\n' ' ')" \
+    || ok "an ambiguous issue is charged to nobody, so neither name loses eligibility"
+grep -q 'DOUBLE-BOOKED' <<<"$out" \
+    && bad "one unreadable sentence was reported as a double-booking" \
+    || ok "an ambiguous issue is not reported as a double-booking"
+grep -qE 'free to offer.*#70|#70.*free' <<<"$out" \
+    && bad "an ambiguous issue was offered as free, so it can be handed to a second person" \
+    || ok "an ambiguous issue stays out of the free pool, because somebody does hold it"
+
+echo "== a release comment clears the ambiguity it names somebody out of =="
+# The AMBIGUOUS line used to say "say so in a comment naming only them", and a
+# comment naming only them did nothing: `crowded` took the maximum across the
+# whole thread, so a count that reached two could never come back down. The
+# issue stayed ambiguous however many times I clarified it, which teaches the
+# reader to skip the warning rather than act on it.
+#
+# Prose cannot settle it, and this tool says so two hundred lines up: a second
+# single-name comment is as likely to be a second offer as a correction, and
+# the double-booking case above depends on reading it that way. The marker is
+# what settles it, because it is the one thing in a thread that carries intent
+# the machine can read.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+case "$*" in
+  *'pr list'*'--state merged'*) echo '[{"author":{"login":"vet"},"mergedAt":"2026-09-09T00:00:00Z"}]';;
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":72,"labels":[],"assignees":[]}]';;
+  *issues/72/comments*) printf '%s' '[{"u":"owner","b":"@newbie this one is yours. I offered the last one to @veteran, who took it."},{"u":"owner","b":"@veteran releasing you from this one, it was never yours. <!-- maintainer: claim-released -->"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of \
+      python3 "$root/bin/maintainer" offers 2>&1)
+grep -q 'AMBIGUOUS #72' <<<"$out" \
+    && bad "a release comment did not clear the ambiguity, so nothing a maintainer can write does" \
+    || ok "a release comment clears the ambiguity, because the marker carries intent a machine can read"
+grep -qE '^newbie +1' <<<"$out" \
+    && ok "and the person who still holds it is charged with it" \
+    || bad "the remaining holder is charged to nobody: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+grep -qE '^veteran ' <<<"$out" \
+    && bad "the released handle is still charged with the issue" \
+    || ok "and the released handle is not charged with it"
+
+echo "== release writes the marker that offers reads =="
+# The marker that retracts an offer has existed since the release/offer
+# confusion was first fixed, and nothing ever wrote it. Every withdrawal I
+# posted was hand-typed prose, so `offers` went on counting the person as a
+# holder. sysknife 2026-09-22: #428 and #433 were withdrawn from @QinXi-ai in
+# public, in as many words, and the tool still reported them OVER-OFFERED with
+# both. A marker with no command behind it is a marker nobody uses.
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+if [ "$1" = "api" ] && [ "$2" = "-X" ]; then printf '%s\n' "$*" >> "$CAPTURE"; echo '{}'; exit 0; fi
+echo '[]'
+GHEOF
+chmod +x "$stub_dir/gh"
+cap="$ofd/release-capture.txt"; : > "$cap"
+out=$(PATH="$stub_dir:$PATH" CAPTURE="$cap" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r \
+      MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" release 70 veteran "it was never yours" 2>&1)
+grep -q 'maintainer: claim-released' "$cap" \
+    && ok "release posts a comment carrying the marker offers reads" \
+    || bad "the posted comment has no marker, so offers still counts them: $(cat "$cap" | cut -c1-140)"
+grep -q '@veteran' "$cap" \
+    && ok "and the comment names the person being released" \
+    || bad "the comment does not name the person"
+handles="$(grep -oE '@[A-Za-z0-9-]+' "$cap" | sort -u | tr '\n' ' ')"
+[ "$handles" = "@veteran " ] \
+    && ok "and it names nobody else, so it cannot create a fresh ambiguity" \
+    || bad "the release comment names more than one handle: $handles"
+grep -q 'it was never yours' "$cap" \
+    && ok "and it carries the reason, because a bare retraction reads as a rebuke" \
+    || bad "the reason was dropped"
+# POST=off rehearses rather than posting, like every other writing command.
+: > "$cap"
+out=$(PATH="$stub_dir:$PATH" CAPTURE="$cap" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r \
+      MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of MAINTAINER_POST=off \
+      python3 "$root/bin/maintainer" release 70 veteran "no longer needed" 2>&1)
+[ -s "$cap" ] \
+    && bad "release posted with POST=off" \
+    || ok "release rehearses at POST=off and writes nothing"
+grep -qi 'would release' <<<"$out" \
+    && ok "and says what it would have posted" \
+    || bad "the rehearsal says nothing: $out"
+
 echo "== an issue with an open pull request closing it is not free to offer =="
 # The 2026-09-07 20:09 issues run reported it in its own process notes:
 # "`maintainer offers` cannot see pull request threads ... #371 was printed as

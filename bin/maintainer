@@ -1043,6 +1043,62 @@ def cmd_assign(number: str, who: str) -> None:
         f"            reserve it with the claim label and say so instead.")
 
 
+def cmd_release(number: str, who: str, reason: str) -> None:
+    """Retract an offer in a way `offers` can read.
+
+    RELEASE_MARKER has existed since the day an offer and a release were found
+    to be the same shape in prose, and until now nothing wrote it. Every
+    withdrawal went out as hand-typed English, so `offers` kept counting the
+    person as a holder and kept them out of the eligible pool.
+
+    sysknife 2026-09-22 is the case that forced this: #428 and #433 were
+    withdrawn from @QinXi-ai in public comments saying so in as many words, and
+    `offers` still reported them OVER-OFFERED holding both. The campaign that
+    followed was told to hand work to exactly the contributor those two phantom
+    holds ruled out.
+
+    The comment names one person and no one else. A retraction that also names
+    the contributor an issue is going back to is the thing that made #428
+    ambiguous in the first place, so say that on its own line, afterwards.
+    """
+    if not number.isdigit():
+        raise SystemExit("maintainer: release needs an issue number")
+    if _gh_mentions("@" + who) != {who}:
+        raise SystemExit(f"maintainer: {who!r} is not a GitHub handle")
+    reason = (reason or "").strip()
+    if not reason:
+        # A bare retraction reads as a rebuke to the person on the other end,
+        # and they cannot tell whether they did something wrong.
+        raise SystemExit("maintainer: release needs a reason; it is read by a person")
+    if _gh_mentions(reason):
+        raise SystemExit(
+            f"maintainer: the reason names {', '.join('@' + m for m in sorted(_gh_mentions(reason)))}.\n"
+            f"            A release comment names one person. Naming a second is\n"
+            f"            what makes a thread ambiguous, which is the thing this\n"
+            f"            command exists to clear. Post that part separately.")
+    body = f"@{who} {reason}\n\n{RELEASE_MARKER}"
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    if post != "on":
+        print(f"would release (POST={post or 'off'}): #{number} from {who}")
+        print(f"  body: {body!r}")
+        return
+    _spawn(("gh", "api", "-X", "POST",
+            f"repos/{SLUG}/issues/{number}/comments",
+            "-f", f"body={body}"), cwd=REPO, check=False)
+    # Read it back. A comment that did not land leaves the phantom hold in
+    # place, and the whole point of this command is that the retraction is
+    # visible to the tool rather than only to a reader.
+    got = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
+                  "--jq", "[.[].body]") or []
+    if any(RELEASE_MARKER in b and f"@{who}" in b for b in got):
+        print(f"#{number} released from {who}")
+        return
+    raise SystemExit(
+        f"maintainer: posted the release on #{number} and could not read it back.\n"
+        f"            Until a comment on that issue carries the marker, `offers`\n"
+        f"            still counts {who} as holding it.")
+
+
 def cmd_holders(number: str) -> None:
     """Print who the maintainer has pointed at one issue, one handle per line.
 
@@ -1157,8 +1213,17 @@ def cmd_offers() -> None:
                 continue
             body = c["b"] or ""
             here = _gh_mentions(body)
-            if len(here) > 1 and RELEASE_MARKER not in body:
-                crowded = max(crowded, len(here))
+            if not here:
+                continue
+            # The last comment naming anybody decides, which is already the
+            # rule for each person's own state on the line below. Taking the
+            # maximum across the whole thread made the remedy this command
+            # prints ("say so in a comment naming only them") do nothing: a
+            # count that only ever rose could not be brought back down, so an
+            # issue stayed AMBIGUOUS however many times I clarified it. A tool
+            # that prints a fix and then ignores it teaches the reader to skip
+            # the warning rather than act on it.
+            crowded = 0 if RELEASE_MARKER in body else len(here)
             for m in here:
                 mentioned[m] = RELEASE_MARKER not in body
         # Everyone the maintainer ever pointed here, released or not. A person
@@ -1191,8 +1256,28 @@ def cmd_offers() -> None:
         # request open against it.
         assigned = {a.get("login") for a in (i.get("assignees") or []) if a.get("login")}
         assigned.discard(owner)
-        if crowded > 1 and not assigned:
+        if crowded > 1 and not assigned and not (taken and taken[1]):
             ambiguous_on[i["number"]] = crowded
+            # Saying "who holds this cannot be read from the thread" and then
+            # charging it to every name in that unreadable sentence is a guess
+            # wearing a warning's clothes. The warning is visible and the guess
+            # is not, so the reader trusts a number the tool already said it
+            # could not compute.
+            #
+            # sysknife 2026-09-22: @QinXi-ai was reported OVER-OFFERED holding
+            # #428, #433 and #460. Two were withdrawals whose comments named
+            # both them and the contributor the issue went back to; the third
+            # named them only in "read #458 first, @QinXi-ai has an offer out
+            # on it". Every one was ambiguous by this tool's own reading, and
+            # every one counted. The campaign that followed was told to offer
+            # work to exactly the person these three holds ruled out.
+            #
+            # Charge it to nobody. The issue stays out of the free pool below,
+            # because somebody does hold it and handing it to a second person
+            # is the failure this whole command exists to prevent. Only a human
+            # reading the thread can say which body, and the AMBIGUOUS line
+            # sends them there.
+            continue
         # An assignment to somebody else retires an older mention. sysknife #331
         # on 2026-09-09: @ITSMERNB was offered it on 09-01 and answered, it was
         # handed to @be-student on 09-06 who took the assignment and opened PR
@@ -2020,6 +2105,8 @@ def main() -> None:
         cmd_gc("--dry-run" in sys.argv[2:])
     elif cmd == "assign" and len(sys.argv) == 4:
         cmd_assign(sys.argv[2], sys.argv[3])
+    elif cmd == "release" and len(sys.argv) == 5:
+        cmd_release(sys.argv[2], sys.argv[3], sys.argv[4])
     elif cmd == "holders" and len(sys.argv) == 3:
         cmd_holders(sys.argv[2])
     elif cmd == "offers":
