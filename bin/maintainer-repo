@@ -110,6 +110,20 @@ cmd_release_check() {
         say "                           uncommitted, so origin/main does not have it yet"
     elif ! git merge-base --is-ancestor HEAD origin/main 2>/dev/null; then
         say "                           HEAD is not on origin/main; the counts above are"
+    else
+        # Being an ancestor is exactly the STALE case, and the check above reads
+        # it as healthy. On 2026-09-22 this answered `digit: last` for a release
+        # whose Unreleased section drops Node 18 and 20 support, because the
+        # checkout was four commits behind and that entry was not in the file it
+        # read. Publishing a break as a patch hands it to everyone pinned to the
+        # series, which is the one outcome docs/release.md exists to prevent.
+        local _behind
+        _behind="$(git rev-list --count HEAD..origin/main 2>/dev/null || printf 0)"
+        if [ "${_behind:-0}" -gt 0 ]; then
+            say "                           HEAD is $_behind commit(s) BEHIND origin/main, so this"
+            say "                           is NOT the CHANGELOG you are about to tag. Pull, then"
+            say "                           run this again; the digit below may be wrong."
+        fi
     fi
     # The two heading lines are dropped, because sed prints both delimiters. An
     # empty Unreleased section therefore came back as two lines, `-z` was false,
