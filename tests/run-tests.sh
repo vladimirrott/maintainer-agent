@@ -3904,9 +3904,33 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate2" MAINTAINER_ACCOUNT=testuser \
           MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
           bash "$mg" verify 42 "$verify_head" check.sh 's/NOTHING/MATCHES/' shell 2>&1)
+    # "The mutation changed nothing" and "the guard does not bite" are
+    # different findings, and this assertion used to accept the wrong one for
+    # the right outcome. The sysknife review of 2026-09-23 11:16 hit the real
+    # shape: a sed aimed at CONTRIBUTING.md, which the shell suite's
+    # suite_mutate_glob does not list, so no file was touched, the mutated run
+    # passed, and the gate reported the contributor's guard as not biting. That
+    # is MISTAKES.md rule 4, a mutation that did not apply, inside the tool that
+    # exists to enforce it.
+    grep -q 'changed nothing' <<<"$out" \
+        && ok "a mutation that matches no line is refused as a no-op"
+    grep -q 'changed nothing' <<<"$out" \
+        || bad "a no-op mutation is not named as one: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
     grep -q 'THE GUARD DOES NOT BITE' <<<"$out" \
-        && ok "a mutation that changes nothing is refused" \
-        || bad "a no-op mutation produced a receipt"
+        && bad "a no-op mutation is still reported as a guard that does not bite" \
+        || ok "and it is not blamed on the guard"
+    # The shape that actually happened: the file exists, the sed matches it, and
+    # the suite's mutate glob does not list it.
+    printf 'the guard holds\n' > "$vr/NOTES.md"
+    git -C "$vr" add -A; git -C "$vr" commit -qm notes
+    verify_head4="$(git -C "$vr" rev-parse HEAD)"
+    git -C "$vr" update-ref "refs/pull/44/head" "$verify_head4"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate4" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          bash "$mg" verify 44 "$verify_head4" check.sh 's/the guard holds/the guard is gone/' shell 2>&1)
+    grep -q 'changed nothing' <<<"$out" \
+        && ok "a mutation aimed outside the suite's mutate glob is refused as a no-op" \
+        || bad "a mutation that touched no file was read as a verdict about the guard: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
 else
     # One skip per case the if-branch would have run, so the suite reports the
     # same number of cases on every machine. Emitting a single line here made
@@ -3915,7 +3939,9 @@ else
     noenv "the shell suite produced an observed receipt (needs podman or docker)"
     noenv "a test that asks git what is tracked runs on the extracted tree (needs podman or docker)"
     noenv "a mutation reaches a python file, so a .py production change can be proved (needs podman or docker)"
-    noenv "a mutation that changes nothing is refused (needs podman or docker)"
+    noenv "a mutation that matches no line is refused as a no-op (needs podman or docker)"
+    noenv "and it is not blamed on the guard (needs podman or docker)"
+    noenv "a mutation aimed outside the suite's mutate glob is refused as a no-op (needs podman or docker)"
 fi
 echo "== a dependency bump can earn a receipt, and the test run still has no network =="
 # #437, #438 and #439 sat six days each. The rust suite runs `cargo test
