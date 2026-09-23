@@ -79,20 +79,40 @@ def classify_path(path):
 
 
 def parse(diff):
-    """{path: [(sign, text), ...]} for every changed line, in order."""
-    files, path = {}, None
+    """{path: [(sign, text), ...]} for every changed line, in order.
+
+    Only inside a hunk. `gh pr diff --patch` concatenates one mbox patch per
+    commit, so between two diffs there is a `From <sha>` line, the commit
+    message and a bare `---`. Reading +/- by first character alone turns that
+    `---` into a removed line and every `- bullet` in a commit body into
+    another, filed under whichever path the previous patch ended on. The first
+    version did that, and sysknife#494 was refused with a complaint about a
+    manifest line reading `--`. It failed closed, which is the right direction
+    for the wrong reason: every rebased Dependabot pull request would be refused
+    the same way.
+    """
+    files, path, in_hunk = {}, None, False
     for line in diff.splitlines():
         if line.startswith("diff --git "):
             # `diff --git a/x b/x`; take the b-side, which is the path after a
             # rename and identical otherwise.
             path = line.split(" b/", 1)[1] if " b/" in line else None
             files.setdefault(path, [])
+            in_hunk = False
             continue
-        if line.startswith(("--- ", "+++ ", "index ", "@@", "new file", "deleted file",
+        if line.startswith("From ") and len(line.split()) > 2:
+            # The next commit's mbox header: nothing after it belongs to the
+            # file the previous patch was describing.
+            path, in_hunk = None, False
+            continue
+        if line.startswith("@@"):
+            in_hunk = path is not None
+            continue
+        if line.startswith(("--- ", "+++ ", "index ", "new file", "deleted file",
                             "old mode", "new mode", "similarity index", "rename ",
                             "Binary files")):
             continue
-        if path is None:
+        if not in_hunk or path is None:
             continue
         if line.startswith("+"):
             files[path].append(("+", line[1:]))
