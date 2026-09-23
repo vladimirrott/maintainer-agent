@@ -12,6 +12,24 @@ middle digit.
 
 ### Added
 
+- **`maintainer-merge verify-deps` gates a dependency bump.** A lockfile bump has
+  no guard to mutate, so `verify` could never write a receipt for one and `merge`
+  refused the whole class; sysknife#437, #438 and #439 sat six days each on that,
+  and on 2026-09-23 sysknife#492 and #495 went through `gh pr merge --admin`,
+  which spends no receipt at all. The class does carry a mechanical claim:
+  nothing outside dependency metadata changed, no lockfile line points at a
+  source outside crates.io or registry.npmjs.org, no npm package newly runs an
+  install script, and every added action pin is a 40-hex SHA that GitHub agrees
+  is the tag its comment names. `scripts/classify_dependency_bump.py` answers the
+  first three from the diff and is tested on nine fixtures; the pin check needs a
+  token and runs in the gate. The receipt is kind `dependency`, which an
+  unattended run may spend, because the gate observed every check itself.
+- **Doctor compares the suite image against the recipe that builds it.** `podman
+  image exists` answers yes for an image built in August and one built from
+  today's Containerfile, so sysknife#471 waited two review runs for a yamllint
+  that had been added to the recipe. The build stamps the recipe's sha256 as the
+  `maintainer.recipe` label, doctor compares it, and an unlabelled image is
+  reported as one whose drift cannot be seen.
 - **A receipt is earnable when one suite covers every production path.**
   `pick_suite` demanded a single suite cover every changed path, so a pull
   request touching `.rs` and `.md` earned nothing: no suite runs both. Six of
@@ -33,6 +51,34 @@ middle digit.
 
 ### Fixed
 
+- **A branch updated from main no longer invalidates its receipt.** `cmd_merge`
+  compared `verified_head..new_head`, and two dots include everything main gained
+  since the receipt, so GitHub's "Update branch", which sysknife's branch
+  protection requires before merging, made the gate name main's own commits as
+  the pull request changing. It now merges the verified head with the main commit
+  the branch contains and compares that tree against the tree being merged, which
+  also covers a conflict resolution that a commit-list comparison would miss. It
+  falls back to the strict range on a conflict, on a git without `merge-tree
+  --write-tree`, and when the verified head is already an ancestor of main.
+- **The sysknife shell suite can lint YAML.** Its image carried no yamllint, so
+  the clean run of `tests/release/release-rehearsal.test.sh` could not execute
+  and sysknife#471 could earn no receipt. The image installs yamllint 1.38.0 and
+  PyYAML 6.0.2, sysknife CI's own pins, so the gate and CI parse the same file
+  with the same parser, and `suite_needs` names yamllint so the live probe fails
+  if a rebuild drops it.
+- **The pin verifier reads composite actions.** `scripts/verify-action-pins.sh`
+  scanned `.github/workflows` only, so a `uses:` inside a local composite action
+  under `.github/actions/` was checked by nothing, the hole sysknife#471 closed
+  on the other side. It now scans both, refuses a `.github/actions` directory
+  that exists and holds no `action.yml`, and refuses a workflows directory with
+  no workflow in it, because a scan that read nothing must not print an
+  all-clear.
+- **The prompts reserve the issues that are reserved now.** Three prompts named
+  `#345, #327 and #356` and said the hold lifted after 2026-09-09; by 2026-09-23
+  all three were closed and seven OPEN issues carried the `twir-listed` label the
+  prompts said nothing about. They now ask the label each run. The review
+  prompt's step 6 also told the agent to approve fork workflow runs, which its
+  own deny wall forbids by design; it now says to list them for a human, once.
 - **The gate can prove a python or packaging change.** The three suites covered
   `*.rs`, `*.md` and `*.sh`; nothing covered `*.py`, `packaging/*` or `Makefile`,
   and `packaging/*` is in `PROD_GLOBS`. sysknife#401's production change is one

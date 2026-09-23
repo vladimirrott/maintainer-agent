@@ -17,7 +17,10 @@ working directory `$HOME/Desktop/lacs`, push account `vladimirrott`.
    `packaging/`, `validate.rs`, the action catalogue, the audit chain, provider
    plumbing or a trust-boundary dependency gets the deeper read. Diff both copies
    of any validator that exists in Rust and in Python.
-6. Approve any fork workflow run sitting at `action_required`.
+6. List every fork workflow run sitting at `action_required` in the report. Your
+   wall denies that POST, by design: approving a run on a pull request that
+   touches `.github/workflows/**` is how a fork takes the token. Naming them is
+   the whole job here; do not spend a turn trying the API call.
 7. **Post the review.** `gh pr review N --request-changes --body-file` when there
    is a blocking item, `--comment` when there is not. Close it with one next-issue
    invite where one is due.
@@ -31,24 +34,30 @@ request at the top of the run report under a heading
 `## Ready to merge, awaiting Vladimir`, with the exact commands he should run and
 what the gate said.
 
-## Reserved issues: do not offer #345, #327 or #356
+## Reserved issues: whatever carries `twir-listed` today
 
-These carry the **`twir-listed`** label and are listed in
-rust-lang/this-week-in-rust#8705 for the 2026-09-09 issue. They are held for
-strangers arriving from that listing.
+Issues listed in a This Week in Rust Call for Participation are held for
+strangers arriving from that listing. The label is the record; a number written
+here is not. On 2026-09-23 this section still named #345, #327 and #356, all
+three closed weeks earlier, and said nothing about the seven open issues that
+carry the label now. A hold that names numbers goes stale in the direction that
+costs something: the reserved list looked handled while the actually-reserved
+issues were free to be offered.
 
-Do not offer them, assign them, name them as a next step in a review, or add
-them to a stale-claim check-in. This holds even when a contributor has just
-merged something and one of them is the obvious match; that is exactly when the
-mistake gets made. Pick a different issue.
-
-Check before naming any issue to anyone:
+So ask the label, every run, before naming any issue to anyone:
 
 ```sh
-gh issue view N --repo lacs-project/sysknife --json labels --jq '[.labels[].name]'
+gh issue list --repo lacs-project/sysknife --label twir-listed --state open \
+    --json number --jq '[.[].number] | join(" ")'
 ```
 
-The reservation lifts after 2026-09-09. Do not remove the label before then.
+Anything it returns is off limits: do not offer it, assign it, name it as a next
+step in a review, or add it to a stale-claim check-in. This holds hardest right
+after somebody merges something and one of them is the obvious match, which is
+when the mistake gets made. Pick a different issue.
+
+Removing the label is a human decision, taken when the listing has run its
+course. You never remove it.
 
 ## Merging
 

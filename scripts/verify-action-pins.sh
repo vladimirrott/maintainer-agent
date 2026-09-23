@@ -19,6 +19,37 @@ root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 [ -d "$root/.github/workflows" ] || { echo "verify-action-pins: no .github/workflows under $root" >&2; exit 2; }
 fail=0
 
+# Every file a `uses:` can hide in, collected once and used by both passes below.
+#
+# Workflows were the whole list until sysknife#471 showed the hole: a `uses:`
+# inside a LOCAL composite action under .github/actions/ is a supply-chain entry
+# point that nothing opened, so an unpinned reference rode in through a file the
+# scan never read. Both halves of this script now read the same set.
+#
+# An absent .github/actions is normal and fine. One that exists and holds no
+# action metadata is a scan that read nothing, and a scan that read nothing must
+# not print an all-clear: that is the difference between "asked, nothing to
+# report" and "could not ask".
+sources=()
+while IFS= read -r f; do sources+=("$f"); done < <(
+    find "$root/.github/workflows" -maxdepth 1 -type f \( -name '*.yml' -o -name '*.yaml' \) | sort)
+if [ "${#sources[@]}" = 0 ]; then
+    echo "verify-action-pins: no workflow files under $root/.github/workflows, so nothing was scanned" >&2
+    exit 2
+fi
+if [ -d "$root/.github/actions" ]; then
+    found=()
+    while IFS= read -r f; do found+=("$f"); done < <(
+        find "$root/.github/actions" -type f \( -name 'action.yml' -o -name 'action.yaml' \) | sort)
+    if [ "${#found[@]}" = 0 ]; then
+        echo "verify-action-pins: $root/.github/actions exists and holds no action.yml, so the composite scan read nothing" >&2
+        exit 2
+    fi
+    sources+=("${found[@]}")
+fi
+while IFS= read -r f; do sources+=("$f"); done < <(
+    find "$root/examples" -maxdepth 1 -type f -name '*.yml' 2>/dev/null | sort)
+
 # A loop cannot fail on a line it never saw.
 #
 # The extraction at the bottom of this file requires a line to be pinned
@@ -36,7 +67,7 @@ fail=0
 # reproduced the defect being fixed: the probe line was never seen either.
 # A leading `#` is excluded so a commented-out example is not flagged.
 unparsed="$(grep -hE '^[[:space:]]*(-[[:space:]]*)?uses:' \
-                "$root"/.github/workflows/*.yml "$root"/examples/*.yml 2>/dev/null \
+                "${sources[@]}" 2>/dev/null \
             | grep -oE 'uses:.*' | sed 's/[[:space:]]*$//' | sort -u \
             | grep -vE '^uses: [^@ ]+@[0-9a-f]{40} *# *\S+$' || true)"
 if [ -n "$unparsed" ]; then
@@ -75,7 +106,7 @@ while IFS= read -r line; do
 # examples/ too: a pin somebody copies out of an example is the one most worth
 # being true.
 done < <(grep -hoE 'uses: [^@ ]+@[0-9a-f]{40} *# *\S+' \
-             "$root"/.github/workflows/*.yml "$root"/examples/*.yml 2>/dev/null \
+             "${sources[@]}" 2>/dev/null \
          | sed 's/^uses: //' | sort -u)
 
 [ "$fail" = 0 ] && echo "  every pin is the tag it claims" || echo "  a pin does not match its comment" >&2
