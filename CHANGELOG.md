@@ -10,6 +10,11 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.6.1] — 2026-09-23
+
+One defect, found the way this project prefers: by running 0.6.0 against the
+four dependency bumps `verify-deps` was written for, an hour after tagging it.
+
 ### Fixed
 
 - **`verify-deps` reads hunks, not commit messages.** `gh pr diff --patch`
