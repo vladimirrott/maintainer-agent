@@ -10,6 +10,20 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`verify-deps` reads hunks, not commit messages.** `gh pr diff --patch`
+  concatenates one mbox patch per commit, so a pull request with two commits
+  carries a `From <sha>` line, a commit message and a bare `---` between the
+  diffs. Classifying `+`/`-` by first character alone read that `---` as a
+  removed line and every `- bullet` in a message as another, filed under
+  whichever path the previous patch ended on. sysknife#494 was refused with
+  `a manifest line changed outside its version literal` naming the line `--`:
+  the right verdict for that pull request, which does carry source changes, but
+  for a reason that would refuse every rebased Dependabot pull request too. The
+  parser now only reads lines inside a hunk. Found by running the released
+  0.6.0 against the four bumps it was written for.
+
 ## [0.6.0] — 2026-09-23
 
 The middle digit. Several things that used to succeed now refuse:

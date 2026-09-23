@@ -3381,6 +3381,70 @@ grep -q 'verify-deps' "$root/bin/maintainer-merge" \
     && ok "maintainer-merge exposes verify-deps" \
     || bad "no verify-deps subcommand"
 
+# `gh pr diff --patch` on a pull request with more than one commit emits an mbox
+# header per commit: a `From <sha>` line, the message, a bare `---`, and a
+# diffstat. Parsing +/- by their first character reads `---` as a removed line
+# `--` and the diffstat rows as context, and the first version of this
+# classifier did exactly that: sysknife#494 was refused with
+# `a manifest line changed outside its version literal` naming the line `--`.
+# It failed closed, which is the right direction and the wrong reason, and it
+# would refuse every rebased Dependabot pull request the same way.
+cat > "$dp/multicommit.patch" <<'PATCH'
+From 97c226f0ee1a0f0b0e0d0c0b0a09080706050403 Mon Sep 17 00:00:00 2001
+From: dependabot[bot] <support@github.com>
+Date: Mon, 22 Sep 2026 17:35:56 +0000
+Subject: [PATCH] chore(deps): bump async-openai from 0.41.3 to 0.42.0
+
+Signed-off-by: dependabot[bot] <support@github.com>
+---
+ crates/sysknife-brain/Cargo.toml | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/crates/sysknife-brain/Cargo.toml b/crates/sysknife-brain/Cargo.toml
+index 2754962e..0e947bf6 100644
+--- a/crates/sysknife-brain/Cargo.toml
++++ b/crates/sysknife-brain/Cargo.toml
+@@ -20,7 +20,7 @@ async-trait = { workspace = true }
+ futures = "0.3"
+-async-openai = { version = "0.41", features = ["chat-completion"] }
++async-openai = { version = "0.42", features = ["chat-completion"] }
+ rig = { package = "rig-core", version = "0.40.0" }
+
+From e6943e48ffffffffffffffffffffffffffffffff Mon Sep 17 00:00:00 2001
+From: A Maintainer <someone@example.invalid>
+Date: Tue, 23 Sep 2026 01:12:00 -0600
+Subject: [PATCH] chore(deps): a second commit on the same branch
+
+Bodies carry bullet lists, and a bullet starts with the same character a
+removed line does:
+
+- one point
+- another
+---
+ Cargo.lock | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 5d61b394..30a412b8 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -126,9 +126,9 @@ dependencies = [
+ name = "async-openai"
+-version = "0.41.3"
++version = "0.42.0"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+PATCH
+vout="$(dep_case "$dp/multicommit.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && ok "an mbox header between commits is not read as a changed line" \
+    || bad "the commit metadata was parsed as content: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+# And the count has to be the hunks' own lines: two in the manifest and two in
+# the lockfile. Under the defect it also counted `---` and the two bullets in
+# the second commit's message.
+grep -q '"changed_lines": 4' <<<"$vout" \
+    && ok "only the hunk bodies are counted, not the commit messages around them" \
+    || bad "the changed-line count includes lines from outside a hunk: $(grep changed_lines <<<"$vout")"
+
 # End to end, because a subcommand that exists and a subcommand that works are
 # different claims and grep cannot tell them apart.
 dep_state="$stub_dir/depstate"; mkdir -p "$dep_state"
