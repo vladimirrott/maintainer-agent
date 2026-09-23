@@ -10,6 +10,12 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.6.2] — 2026-09-23
+
+The gate telling a contributor their guard does not bite, when the mutation had
+not touched a single file. Found by the agent, in a run of the release it was
+shipped in, reading its own tool after the answer contradicted its evidence.
+
 ### Fixed
 
 - **A mutation that changes nothing is refused as a no-op, not reported as a
