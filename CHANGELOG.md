@@ -10,6 +10,21 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-23
+
+The middle digit. Several things that used to succeed now refuse:
+`install.sh` will not replace a tree a run is reading, the pin verifier rejects
+a `.github/actions` directory holding no metadata, an issue assigned to the
+maintainer is no longer offered as free, and an unreadable listing refuses where
+it used to print an empty roster. While the major version is 0 a removed
+capability moves the middle digit, whichever direction it makes the tool safer
+in.
+
+Most of this release came out of using the tool. `verify-deps`, the recipe
+fingerprint, and the first four entries under Fixed are one afternoon's manual
+pass over the sysknife queue: every one of them is a way the gate made itself
+the expensive path while the cheap path carried no proof at all.
+
 ### Added
 
 - **`maintainer-merge verify-deps` gates a dependency bump.** A lockfile bump has
