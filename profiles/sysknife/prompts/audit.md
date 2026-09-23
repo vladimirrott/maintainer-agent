@@ -52,21 +52,23 @@ TWiR-listed issue in front of an existing contributor.
 Put the `main` SHA you audited against at the top of the report, so the next run
 diffs from it rather than starting over.
 
-## Reserved issues: do not offer #345, #327 or #356
+## Reserved issues: whatever carries `twir-listed` today
 
-These carry the **`twir-listed`** label and are listed in
-rust-lang/this-week-in-rust#8705 for the 2026-09-09 issue. They are held for
-strangers arriving from that listing.
+Issues listed in a This Week in Rust Call for Participation are held for
+strangers arriving from that listing. The label is the record; a number written
+into a prompt is not. On 2026-09-23 this section still named #345, #327 and
+#356, all three closed weeks earlier, and said nothing about the seven open
+issues carrying the label then. A hold that names numbers goes stale in the
+direction that costs something.
 
-Do not offer them, assign them, name them as a next step in a review, or add
-them to a stale-claim check-in. This holds even when a contributor has just
-merged something and one of them is the obvious match; that is exactly when the
-mistake gets made. Pick a different issue.
-
-Check before naming any issue to anyone:
+Ask the label, every run, before naming any issue to anyone:
 
 ```sh
-gh issue view N --repo lacs-project/sysknife --json labels --jq '[.labels[].name]'
+gh issue list --repo lacs-project/sysknife --label twir-listed --state open \
+    --json number --jq '[.[].number] | join(" ")'
 ```
 
-The reservation lifts after 2026-09-09. Do not remove the label before then.
+Anything it returns is off limits: do not offer it, assign it, name it as a next
+step, or add it to a stale-claim check-in. Removing the label is a human
+decision; you never remove it.
+

@@ -247,11 +247,30 @@ else
                         "add the recipe beside profiles/$profile/verify.d/$_sn.sh"
                     continue
                 fi
+                _recipe="$(sha256sum "$_cf" | cut -d" " -f1)"
+                _build="podman build --label maintainer.recipe=$_recipe -t $_img -f $_cf $(dirname "$_cf")"
                 if ! podman image exists "$_img" 2>/dev/null; then
                     red "verify suite '$_sn': $_img is not on this host, so nothing can earn a receipt there" \
-                        "podman build -t $_img -f $_cf $(dirname "$_cf")"
+                        "$_build"
                     continue
                 fi
+                # An image that exists and an image built from the recipe in
+                # this tree are different claims, and `podman image exists`
+                # answers the first one for both. sysknife#471 waited two review
+                # runs for a yamllint that was added to the Containerfile; the
+                # image on this host was still August's, and every check here
+                # was green. So the build stamps the recipe's hash on the image
+                # and this compares it.
+                _stamp="$(podman image inspect --format '{{index .Config.Labels "maintainer.recipe"}}' \
+                          "$_img" 2>/dev/null)"
+                case "$_stamp" in
+                    "$_recipe") ;;
+                    ""|"<no value>")
+                        yellow "verify suite '$_sn': $_img carries no recipe fingerprint, so drift from $_sn.Containerfile is invisible" \
+                               "$_build" ;;
+                    *)  red "verify suite '$_sn': $_img was built from a different $_sn.Containerfile" \
+                            "$_build" ;;
+                esac
                 ;;
         esac
         # $_needs is a space-separated list from a file in this repository and is

@@ -202,6 +202,112 @@ PYEOF
     say "receipt recorded for #$pr at $sha (asserted, not observed)"
 }
 
+# maintainer-merge verify-deps <pr> <head-sha>
+#
+# The receipt a dependency bump can actually earn.
+#
+# `verify` proves a guard bites by mutating it. A lockfile bump has no guard, so
+# that proof does not exist for the class, no receipt was ever earnable, and
+# `merge` refused every Dependabot pull request. On 2026-09-23 sysknife#492 and
+# #495 were merged with `gh pr merge --admin` for exactly that reason: the gate
+# had nothing to say about them, so the gate was stepped around, which is worse
+# than a gate that says something narrow.
+#
+# What this checks instead, all of it mechanical and none of it asserted:
+#
+#   * every changed path is dependency metadata (lockfile, manifest, action pin)
+#   * no changed line adds a source outside crates.io or registry.npmjs.org, and
+#     no npm package newly runs an install script
+#   * every added action pin is a 40-hex SHA whose tag comment is the tag GitHub
+#     says that SHA is on
+#
+# scripts/classify_dependency_bump.py does the first two from the diff and is
+# tested on its own; the third needs the network and happens here.
+#
+# The receipt it writes is kind `dependency`, and cmd_merge accepts it from an
+# unattended run because the gate observed every one of these checks itself.
+# What it does NOT say is that the new version is good. CI's own suites say that,
+# and cmd_merge still requires a fully green board.
+cmd_verify_deps() {
+    local pr="${1:?pr}" sha="${2:?head sha}"
+    pr="$(pr_or_die "$pr")" || exit 1
+    [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
+    local classifier="${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/classify_dependency_bump.py"
+    [ -f "$classifier" ] || die "no dependency classifier at $classifier; run ./install.sh"
+
+    # Re-pinned here rather than trusted from argv: a push between the caller
+    # reading the head and this running would otherwise be classified under the
+    # old SHA and receipted under the new one.
+    local real_head
+    real_head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)" \
+        || die "could not read the head of #$pr"
+    [ -n "$real_head" ] || die "could not read the head of #$pr"
+    case "$real_head" in
+        "$sha"*) ;;
+        *) die "#$pr is at ${real_head:0:8}, not ${sha:0:8}. It moved while you were reading it." ;;
+    esac
+
+    local diff rc=0
+    diff="$(gh pr diff "$pr" --repo "$REPO_SLUG" --patch 2>&1)" || rc=$?
+    [ "$rc" = 0 ] || die "could not read the diff for #$pr:
+
+$(printf '%s' "$diff" | sed 's/^/    /')"
+    [ -n "$diff" ] || die "the diff for #$pr is empty, so nothing was classified"
+
+    local verdict vrc=0
+    verdict="$(printf '%s\n' "$diff" | python3 "$classifier")" || vrc=$?
+    if [ "$vrc" != 0 ]; then
+        die "#$pr is not a pure dependency bump, so it needs a real receipt:
+
+$(printf '%s' "$verdict" | sed 's/^/    /')"
+    fi
+
+    # Every pin the diff adds, checked against what GitHub says the tag is. A
+    # mutable tag is why the pin is a SHA; a comment naming a tag the SHA is not
+    # on is how a pin stops being auditable without looking wrong.
+    local checked=0 action tag pinsha upstream repo
+    while IFS=$'\t' read -r action pinsha tag; do
+        [ -n "$action" ] || continue
+        # `owner/repo/sub/dir@sha` is one action inside a repository; the tag
+        # belongs to the repository.
+        repo="${action%%/*}/$(cut -d/ -f2 <<<"$action")"
+        upstream="$(gh api "repos/$repo/commits/$tag" --jq .sha 2>&1)" || \
+            die "could not ask GitHub what $repo $tag is, so the pin is unverified:
+
+$(printf '%s' "$upstream" | sed 's/^/    /')"
+        [ "$upstream" = "$pinsha" ] || die "the pin comment is not true: $action is pinned to
+  ${pinsha:0:12} and $repo $tag is ${upstream:0:12}. A pin whose comment names a
+  version it is not on is the shape a supply-chain swap hides in."
+        say "pin: $action $tag = ${pinsha:0:12} (GitHub agrees)"
+        checked=$((checked+1))
+    done < <(printf '%s\n' "$verdict" | python3 -c '
+import json, sys
+for p in json.load(sys.stdin).get("pins", []):
+    print("\t".join((p["action"], p["sha"], p["tag"])))
+')
+
+    local files lines
+    files="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(", ".join(f"{k} ({v})" for k,v in d["files"].items()))')"
+    lines="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed_lines"])')"
+    mkdir -p "$RECEIPTS"
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" <<'PYEOF' \
+        || die "could not record the dependency receipt"
+import json, sys, datetime, getpass
+out, pr, head, files, lines, pins = sys.argv[1:7]
+json.dump({
+    "pr": int(pr), "head": head, "kind": "dependency",
+    "proof": (f"pure dependency bump: {lines} changed line(s) in {files}; "
+              f"no source outside crates.io/registry.npmjs.org, no new install "
+              f"script, {pins} action pin(s) verified against their tags"),
+    "files": files, "changed_lines": int(lines), "pins_verified": int(pins),
+    "recorded_at": datetime.datetime.now().astimezone().isoformat(),
+    "recorded_by": getpass.getuser(),
+}, open(out, "w"), indent=2)
+PYEOF
+    receipt_seal "$RECEIPTS/$pr.json"
+    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s) verified)"
+}
+
 # maintainer-merge verify <pr> <head-sha> <test-filter> <sed-mutation> [crate]
 #
 # Runs the test filter in podman against the PR head, then again with the
@@ -1115,13 +1221,25 @@ cmd_merge() {
     # The layer that is not evadable. An asserted receipt is a human's claim
     # that a guard bites; nothing checked it. A human may merge on one. An
     # unattended run may not, whatever it managed to write.
-    if [ -n "${MAINTAINER_IN_RUN:-}" ] && [ "$kind" != observed ]; then
-        die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
+    # `dependency` sits beside `observed` because the gate performed its checks
+    # itself: the classifier read every changed line and every action pin was
+    # compared against GitHub. `asserted` is the one an unattended run may not
+    # spend, because nothing checked it.
+    case "$kind" in
+        observed|dependency) ;;
+        *) if [ -n "${MAINTAINER_IN_RUN:-}" ]; then
+               die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
   only on a receipt \`maintainer-merge verify\` produced by watching the
-  mutation fail."
-    fi
-    [ "$kind" = observed ] || say "the receipt is ASSERTED, not observed: it records a claim a
-     human made, and nothing here checked it"
+  mutation fail, or \`verify-deps\` for a pure dependency bump."
+           fi ;;
+    esac
+    case "$kind" in
+        observed) ;;
+        dependency) say "the receipt is a DEPENDENCY receipt: nothing but dependency metadata
+     changed, and every action pin was checked against its tag" ;;
+        *) say "the receipt is ASSERTED, not observed: it records a claim a
+     human made, and nothing here checked it" ;;
+    esac
 
     # Does what the receipt was earned by reach every production path being
     # merged? Until sysknife#429 nothing asked here, because cmd_verify refused
@@ -1382,15 +1500,48 @@ $(printf '%s' "$checks" | head -c 300)"
     # a tree that no longer exists.
     git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:mm-$pr" --force || die "cannot fetch #$pr"
     if [ "$head" != "$verified_head" ]; then
-        local diff
-        diff="$(git -C "$REPO_PATH" diff --name-only "${verified_head}..mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        local diff merged base how
+        # `git diff verified_head..mm-$pr` is the two-dot trap. The range holds
+        # everything MAIN gained since the receipt as well, so GitHub's "Update
+        # branch" — which sysknife's branch protection REQUIRES before a merge —
+        # made every receipt look stale and named main's own merged commits as
+        # the pull request changing. The way around it was `gh pr merge --admin`,
+        # which spends no receipt at all: a gate invalidated by a mandatory step
+        # is a gate people stop using.
+        #
+        # The receipt is a claim about the pull request's contribution, so
+        # compare that: merge the verified head with the main commit this branch
+        # actually contains, and diff the result against the tree being merged.
+        # Equal means the author changed nothing since the receipt, including
+        # inside a conflict resolution, which comparing commit lists would miss.
+        git -C "$REPO_PATH" fetch -q origin main 2>/dev/null || true
+        base="$(git -C "$REPO_PATH" merge-base "mm-$pr" origin/main 2>/dev/null)"
+        # Only when the verified head is the pull request's own work. If main
+        # already contains it, this is not a branch update and the merge below
+        # would fold the later commits in as "main's", which is how a real push
+        # would slip through.
+        if [ -n "$base" ] \
+           && ! git -C "$REPO_PATH" merge-base --is-ancestor "$verified_head" "$base" 2>/dev/null \
+           && merged="$(git -C "$REPO_PATH" merge-tree --write-tree \
+                "$base" "$verified_head" 2>/dev/null)"; then
+            how="the tree is the clean merge of the verified head with main"
+            diff="$(git -C "$REPO_PATH" diff --name-only "$merged" "mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        else
+            # merge-tree exits non-zero on a conflict, and a conflict resolution
+            # is a human edit this receipt never saw. Same for a git too old to
+            # have --write-tree. Fall back to the strict range: refusing a
+            # receipt that might still hold costs a re-verify, and the other
+            # error costs a merge nobody proved.
+            how="no production diff"
+            diff="$(git -C "$REPO_PATH" diff --name-only "${verified_head}..mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        fi
         if [ -n "$diff" ]; then
             git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
             die "production code changed since the verified head $verified_head:
 $(printf '%s' "$diff" | sed 's/^/    /')
   The receipt no longer describes this tree. Re-verify and record a new one."
         fi
-        say "head moved $verified_head -> ${head:0:8}, no production diff; receipt still applies"
+        say "head moved $verified_head -> ${head:0:8}, $how; receipt still applies"
     fi
     git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
 
@@ -1420,10 +1571,12 @@ _executed || return 0
 case "${1:-}" in
     receipt) shift; cmd_receipt "$@" ;;
     verify)  shift; cmd_verify "$@" ;;
+    # A bump has no guard to mutate, so it earns its receipt a different way.
+    verify-deps) shift; cmd_verify_deps "$@" ;;
     # One part of a diff no single suite covers. Each part is observed the same
     # way a whole verify is; merge is what checks the parts add up.
     verify-part) shift; VERIFY_PART=1 cmd_verify "$@" ;;
     merge)   shift; cmd_merge "$@" ;;
     show)    shift; cmd_show "$@" ;;
-    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [suite]|verify-part <pr> <sha> <test-filter> <sed-mutation> <suite>|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
+    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [suite]|verify-deps <pr> <sha>|verify-part <pr> <sha> <test-filter> <sed-mutation> <suite>|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
 esac

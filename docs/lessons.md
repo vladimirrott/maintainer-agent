@@ -2786,3 +2786,88 @@ the first place. It reads the comment back before reporting success.
 The shape: a convention that depends on a human remembering to type an exact
 string is not a convention, it is a hope. Either a command writes it or the
 parser should not look for it.
+
+## 93. A gate a required step invalidates is a gate people step around
+
+sysknife's branch protection requires an up-to-date branch. GitHub's "Update
+branch" button merges main into the pull request. `cmd_merge` then asked
+`git diff <verified_head>..<new_head> -- PROD_GLOBS`, and two dots include
+everything MAIN gained since the receipt, so the gate printed main's own merged
+commits as "production code changed since the verified head" and refused.
+
+Every merge hit it. The way past it is `gh pr merge --admin`, which spends no
+receipt at all, and on 2026-09-23 that is what happened to sysknife#492 and
+#495. The gate did not fail; it made itself the expensive path, and the cheap
+path had no proof in it.
+
+The receipt is a claim about the pull request's contribution, so that is what
+the check has to compare: merge the verified head with the main commit the
+branch actually contains, and diff the resulting tree against the tree being
+merged. Equal means the author changed nothing, including inside a conflict
+resolution, which comparing commit lists would miss. It falls back to the strict
+range when `merge-tree` reports a conflict, when git is too old, or when the
+verified head is already an ancestor of main, because that last case is not a
+branch update and folding the later commits in as "main's" is how a real push
+would slip through.
+
+Two dots are the same trap MISTAKES.md 7c names for reading a PR diff. It turns
+out to be worse inside a gate than inside a report: a wrong reading in a report
+gets corrected by the next reader, and a wrong reading in a gate teaches
+everyone to bypass the gate.
+
+## 94. A class with no guard to mutate is a class with no gate
+
+`verify` proves a guard bites by breaking it and watching a test go red. A
+dependency bump has no guard, so the proof does not exist, so no receipt was
+ever earnable, so `merge` refused every Dependabot pull request. Three of them
+sat six days each, and the two on 2026-09-23 went through `--admin`.
+
+"No proof is possible here" was true of the proof the gate knew how to ask for.
+The class does carry a claim: nothing outside dependency metadata changed, no
+lockfile line points at a source outside crates.io or registry.npmjs.org, no
+npm package newly runs an install script, and every action pin is a SHA that
+GitHub agrees is the tag its comment names. All of that is mechanical, and
+`verify-deps` checks it rather than being told about it, which is why the
+receipt it writes is one an unattended run may spend.
+
+The shape: when a gate refuses a whole class, the question is not how to make
+the class fit the proof, it is what that class can actually prove.
+
+## 95. An image that exists and an image built from the recipe are two claims
+
+sysknife#471 waited through two review runs for a receipt the shell suite could
+not earn, because the suite's image had no yamllint and the release test it runs
+lints YAML. Doctor checked that the image existed and that every binary in
+`suite_needs` resolved inside it, which is exactly the right question and was
+being asked of the wrong image: a build from August answers `podman image
+exists` the same as a build from today's Containerfile.
+
+The build now stamps the recipe's sha256 on the image as a label and doctor
+compares it, so a stale image reads as stale. The tool declaration moved with
+it: `suite_needs` names yamllint, so the live probe fails loudly if a later
+rebuild drops it.
+
+That was the fourth tool this image has been missing (python3, git, an
+executable /tmp, now yamllint). Each one arrived as "the pull request fails its
+own test", which is the most expensive sentence this gate can say. The pattern
+underneath is not "add the tool": it is that a recipe in the tree and an image
+on a host drift silently, and nothing was comparing them.
+
+## 96. A hold that names numbers goes stale in the direction that costs something
+
+Three prompts carried "do not offer #345, #327 or #356" and "the reservation
+lifts after 2026-09-09". On 2026-09-23 all three issues were closed, and the
+`twir-listed` label was on seven OPEN issues the prompts said nothing about. The
+stale text looked like a working reservation while the actually-reserved work
+was free to be handed to an existing contributor, which is the one thing the
+rule exists to prevent.
+
+The label is the record. The prompts now run `gh issue list --label twir-listed`
+and reserve whatever it returns. A dated exception in prose expires by being
+read, and nothing schedules the reading.
+
+The same pass found the other half of the same shape: step 6 of the review
+prompt said "approve any fork workflow run sitting at `action_required`", and
+the deny wall forbids that POST on purpose. An instruction the wall refuses
+costs a turn and produces a report line that reads like a failure. Two rules
+about the same action have to be one rule.

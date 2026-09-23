@@ -93,7 +93,7 @@ suite_image() { printf '%s' "${MAINTAINER_SHELL_IMAGE:-localhost/sk-rehearsal:1}
 # drives scripts/check_evidence_claims.py, git because tests/release/no-secrets.test.sh
 # builds a throwaway repository to exercise the --staged path the pre-commit
 # hook runs. maintainer-doctor runs the image and checks each one resolves.
-suite_needs() { printf 'bash python3 git cargo node npm sha256sum file'; }
+suite_needs() { printf 'bash python3 git cargo node npm sha256sum file yamllint'; }
 
 # One glob per line. The extensionless entry is the point: every privileged
 # helper in packaging/ is a python script with no .py suffix, so a single
