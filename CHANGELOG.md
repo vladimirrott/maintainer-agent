@@ -10,6 +10,26 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A mutation that changes nothing is refused as a no-op, not reported as a
+  guard that does not bite.** `apply_mutation` runs sed only over the files a
+  suite's `suite_mutate_glob` lists, so a mutation aimed at a file outside that
+  list, or an expression that matches no line, left the tree untouched. The
+  mutated run then passed for the gate's own reason and `cmd_verify` printed
+  `THE GUARD DOES NOT BITE`, which is a verdict about the contributor's test
+  from a mutation that never happened. sysknife's review run hit it on
+  2026-09-23 with a sed aimed at `CONTRIBUTING.md` while the shell suite mutates
+  `*.sh *.py sysknife-* Makefile *.yml`, and read the gate to find out why the
+  answer contradicted its own reproduction. `apply_mutation` now counts the
+  files it changed and the caller refuses at zero, naming the glob. `xargs -r`
+  also stops an empty file list leaving sed reading stdin.
+
+  The case that was supposed to cover this asserted the old message, so it
+  passed while the gate conflated the two findings. It now requires the accurate
+  one and fails on the other, and a second case reproduces the real shape: a
+  file that exists, a sed that matches it, and a suite that does not mutate it.
+
 ## [0.6.1] — 2026-09-23
 
 One defect, found the way this project prefers: by running 0.6.0 against the

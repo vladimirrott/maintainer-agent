@@ -590,9 +590,29 @@ apply_mutation() {  # $1 = extracted tree, $2 = sed expression
     done
     [ "$first" = 0 ] || { printf 'this suite declares no mutate glob\n' >&2; return 1; }
     mfind+=(\))
+    # Prints how many files the mutation actually changed.
+    #
+    # A sed that matches no line, or that names a file this suite's
+    # mutate glob does not list, leaves the tree exactly as it was. The mutated
+    # run then passes for the gate's own reason, and `cmd_verify` used to read
+    # that as THE GUARD DOES NOT BITE: a verdict about the contributor's test,
+    # from a mutation that never happened. sysknife's review run hit it on
+    # 2026-09-23 with a sed aimed at CONTRIBUTING.md while the shell suite
+    # mutates '*.sh' '*.py' 'sysknife-*' 'Makefile' '*.yml'. That is MISTAKES.md
+    # rule 4, a mutation that did not apply, inside the tool written to enforce
+    # it.
+    local sums; sums="$(mktemp -d)" || return 1
     ( cd "$work" && find . -type f "${mfind[@]}" \
-        -not -path './.container-target/*' -not -path './.git/*' -print0 \
-        | xargs -0 sed --sandbox -i "$mutation" )
+        -not -path './.container-target/*' -not -path './.git/*' -print0 ) > "$sums/list" || {
+        rm -rf "$sums"; return 1; }
+    ( cd "$work" && xargs -0 -r -a "$sums/list" sha256sum ) > "$sums/before" 2>/dev/null
+    # -r, so a glob that matches nothing does not leave sed reading stdin.
+    if ! ( cd "$work" && xargs -0 -r -a "$sums/list" sed --sandbox -i "$mutation" ); then
+        rm -rf "$sums"; return 1
+    fi
+    ( cd "$work" && xargs -0 -r -a "$sums/list" sha256sum ) > "$sums/after" 2>/dev/null
+    awk 'NR==FNR { was[$2] = $1; next } was[$2] != $1' "$sums/before" "$sums/after" | wc -l
+    rm -rf "$sums"
 }
 
 pick_suite() {  # $1 = named suite or empty, $2... = changed paths
@@ -986,8 +1006,18 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     # text transform. Confirmed on this host by tests/run-tests.sh.
     # -type f as well as the refusal above: `sed -i` on a symlink replaces it
     # with the dereferenced content, so this must never see one.
-    apply_mutation "$work" "$mutation" \
+    local mutated_files
+    mutated_files="$(apply_mutation "$work" "$mutation")" \
         || die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
+    if [ "${mutated_files:-0}" -lt 1 ]; then
+        die "the mutation changed nothing, so this run says nothing about the guard.
+
+  sed matched no line in any file this suite mutates:
+    $(suite_mutate_glob | tr '\n' ' ')
+  Either the expression matches nothing, or the file it targets is outside that
+  list. Re-run with a mutation that lands inside it. This is not a verdict about
+  #$pr."
+    fi
     run_in_container "$mut_log"; local mut_rc=$?
 
     if [ "$mut_rc" = 0 ]; then
