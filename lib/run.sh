@@ -233,7 +233,10 @@ humanise() {  # $1 = raw message -> "sentence\nfix: command"
 # failure could reach nobody and say nothing about it.
 session_display() {
     local d
-    d="$(loginctl show-session "$(loginctl show-user "$USER" -p Display --value 2>/dev/null)" \
+    # USER is unset under `podman run`, and `set -u` would kill the run here,
+    # on the path that only runs when something has already gone wrong.
+    local who; who="${USER:-$(id -un 2>/dev/null)}"
+    d="$(loginctl show-session "$(loginctl show-user "$who" -p Display --value 2>/dev/null)" \
          -p Display --value 2>/dev/null)"
     printf '%s' "${d:-${DISPLAY:-:0}}"
 }

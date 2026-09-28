@@ -27,7 +27,13 @@ suite_image() { printf 'docker.io/library/bash:5'; }
 # that grows a dependency adds it here, or maintainer-doctor cannot see it.
 suite_needs() { printf 'bash'; }
 
-suite_mutate_glob() { printf '*.sh'; }
+# apply_mutation runs `find -name "<glob>"`, so each entry matches a BASENAME,
+# never a path. Every shape suite_covers claims needs one here or a pull request
+# touching it passes the coverage check and then mutates nothing: magent's own
+# suite covered bin/, lib/ and scripts/ while mutating '*.sh' alone, and every
+# command in that repository lives in bin/ without an extension, so the whole
+# class was unverifiable. Extend this when you extend suite_covers.
+suite_mutate_glob() { printf '%s\n' '*.sh' 'pre-commit' 'pre-push' 'commit-msg'; }
 
 suite_podman_args() { printf '%s\n' -e "BASH_ENV=/dev/null"; }
 

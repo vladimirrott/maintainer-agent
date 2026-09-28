@@ -28,7 +28,14 @@ suite_image() { printf 'docker.io/library/python:3.12'; }
 # git repositories for the prune and release-check cases.
 suite_needs() { printf 'bash python3 git'; }
 
-suite_mutate_glob() { printf '*.sh'; }
+# apply_mutation runs `find -name "<glob>"`, so each of these matches a
+# BASENAME rather than a path. This was '*.sh' alone while suite_covers claimed
+# bin/, lib/, scripts/ and profiles/, and every command in this repository lives
+# in bin/ with no extension: a pull request touching one passed the coverage
+# check and then mutated nothing, so no receipt was reachable for the whole
+# class. The list below is checked against suite_covers by the offline suite,
+# over this repository's own tracked files.
+suite_mutate_glob() { printf '%s\n' '*.sh' '*.py' 'maintainer*' '*.json' '*.env' '*.md'; }
 
 # Copied out of the read-only mount first. The suite writes fixtures next to
 # itself, and /repo is mounted ro.

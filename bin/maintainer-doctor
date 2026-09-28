@@ -189,9 +189,15 @@ case "$(uname -s)" in
         else
             yellow "no timers for $profile" "./install.sh --timers"
         fi
-        [ "$(loginctl show-user "$USER" -p Linger --value 2>/dev/null)" = yes ] \
+        # `podman run` exports no USER, and `set -u` turned that into a dead
+        # report halfway down: everything from Container verification on never
+        # printed, and the offline suite's two image-recipe cases failed inside
+        # the verify container for that reason rather than for anything they
+        # test. id(1) answers without the environment.
+        who="${USER:-$(id -un 2>/dev/null)}"
+        [ "$(loginctl show-user "$who" -p Linger --value 2>/dev/null)" = yes ] \
             && green "lingering on: timers run without a login session" \
-            || yellow "lingering off: timers stop when you log out" "sudo loginctl enable-linger $USER"
+            || yellow "lingering off: timers stop when you log out" "sudo loginctl enable-linger $who"
         # Lesson 8: a timer about to fire immediately is usually a catch-up.
         systemctl --user list-timers "maintainer@$profile-*" --all --no-pager 2>/dev/null | grep -qE '^\S+ +[0-9]+s ' \
             && yellow "a timer fires within seconds; Persistent=true may be catching up" "expected after enabling; otherwise check the stamp files"

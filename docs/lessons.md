@@ -2871,3 +2871,36 @@ prompt said "approve any fork workflow run sitting at `action_required`", and
 the deny wall forbids that POST on purpose. An instruction the wall refuses
 costs a turn and produces a report line that reads like a failure. Two rules
 about the same action have to be one rule.
+
+## 97. The merge gate could not verify a single line of this repository's own code
+
+Two defects, found on the same day, by trying to earn a receipt for a change to
+`bin/maintainer-repo`.
+
+**`apply_mutation` matches a basename.** It runs `find -name "<glob>"`, so a
+mutate glob is a basename pattern and never a path. magent's shell suite claimed
+`bin/*`, `lib/*`, `scripts/*` and `profiles/*` in `suite_covers` and mutated
+`*.sh`. Every command in this repository lives in `bin/` with no extension. A
+pull request touching one passed the coverage check, mutated nothing, and
+`cmd_verify` refused with "the mutation changed nothing" - the right refusal for
+the wrong reason, and no receipt was reachable for the class.
+
+**`maintainer-doctor` died on an unset `USER`.** `podman run` exports none, and
+under `set -u` the lingering check aborted the report before Container
+verification printed. The two image-recipe cases in the offline suite are what
+fails when that happens, so the suite reported `923 passed, 2 failed` inside its
+own verify container, `cmd_verify` read the failing clean run, and refused every
+pull request on the grounds that the suite environment was broken. It was, and
+not for any reason the failing cases named. The same bare `$USER` sat in
+`lib/run.sh`'s `session_display`, on the notification path, which runs only
+after something has already gone wrong.
+
+Together they made every route to a receipt closed, which is how a maintainer
+learns to merge with `--admin` and how a gate becomes decorative.
+
+**Guard:** the offline suite walks this repository's tracked files, takes the
+ones `PROD_GLOBS` matches and a suite covers, and requires each basename to
+match one of that suite's mutate globs, naming every file it cannot reach. It
+asserts the selection is non-empty first, because a filter that selects nothing
+passes. `maintainer-doctor` is driven with `env -u USER` and must reach the end
+of its report, and no shipped script may read `$USER` without a `:-` fallback.
