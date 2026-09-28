@@ -2236,6 +2236,40 @@ grep -q 'CHANGELOG read from' <<<"$out" \
     && ok "it names which tree the CHANGELOG came from" \
     || bad "the CHANGELOG source is unstated while the counts come from origin/main"
 
+# A removed capability that lives in CI rather than in what installs.
+# sysknife's 2026-09-28 batch was five docs-and-CI pull requests. Three
+# CHANGELOG entries said a gate now "refuses", so the wording heuristic scored a
+# break and release-check answered RELEASE DUE, middle digit, while
+# `git diff v0.22.0..main -- crates apps packages` named zero files. Cutting
+# that release would have published byte-identical crates to crates.io, and a
+# version there can never be replaced. The wording cannot tell a gate that
+# refuses from a binary that refuses, so the report has to carry the
+# shipped-surface count beside it.
+mkdir -p "$rcrepo/ci"; printf 'g1\n' > "$rcrepo/ci/gate"
+git -C "$rcrepo" add -A >/dev/null; git -C "$rcrepo" commit -qm 'add a gate'
+git -C "$rcrepo" tag v0.2.0
+printf 'g2\n' > "$rcrepo/ci/gate"
+git -C "$rcrepo" commit -qam 'the gate refuses more than it used to'
+git -C "$rcrepo" push -q --tags origin main
+rc_run_shipped() { PATH="$stub_dir:$PATH" MAINTAINER_SLUG=o/r MAINTAINER_REPO="$rcrepo" \
+    MAINTAINER_STATE="$stub_dir/rcstate" MAINTAINER_ACCOUNT=t \
+    PROD_GLOBS="bin/* ci/*" SHIPPED_GLOBS="bin/*" bash "$mr" release-check 2>&1; }
+out="$(rc_run_shipped)"
+grep -qE 'shipped surface touched: +0' <<<"$out" \
+    && ok "release-check counts the shipped surface apart from production" \
+    || bad "release-check does not say how much of the diff actually ships"
+grep -q 'byte-identical' <<<"$out" \
+    && ok "and says a release would publish byte-identical artifacts" \
+    || bad "a release with an untouched shipped surface is not flagged as such"
+# Unset must be loud. A silent zero here reads as "nothing ships", which is the
+# opposite of what an unconfigured profile means.
+out="$(PATH="$stub_dir:$PATH" MAINTAINER_SLUG=o/r MAINTAINER_REPO="$rcrepo" \
+    MAINTAINER_STATE="$stub_dir/rcstate" MAINTAINER_ACCOUNT=t PROD_GLOBS="bin/* ci/*" \
+    bash "$mr" release-check 2>&1)"
+grep -q 'declares no SHIPPED_GLOBS' <<<"$out" \
+    && ok "an unset SHIPPED_GLOBS is reported rather than scored as zero" \
+    || bad "an unset SHIPPED_GLOBS is indistinguishable from an untouched one"
+
 
 echo "== --timers enables unit files that exist =="
 # The bug: the loop globbed $root/systemd, a directory this repository has never
