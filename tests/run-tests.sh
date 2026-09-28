@@ -3527,10 +3527,80 @@ grep -q 'was built from a different' <<<"$iout" \
 grep -q 'maintainer.recipe=' "$root/bin/maintainer-doctor" \
     && ok "doctor's rebuild command stamps the fingerprint it will later check" \
     || bad "doctor tells you to build an image it cannot later recognise"
+# An environment with no USER. `podman run` sets none, and `set -u` then killed
+# maintainer-doctor at the lingering check, halfway through its report and
+# before Container verification ever printed. The two image-recipe cases above
+# are exactly what fails when that happens, so the offline suite reported
+# `923 passed, 2 failed` inside its own verify container and neither failure
+# said anything about what those cases test. `maintainer-merge verify` read the
+# failing clean run and refused, correctly, which is how every pull request
+# against this repository's production code became unverifiable. Found on #107.
+#
+# Through the stubbed podman above: a real one here would build container
+# storage under the test's temporary HOME and leave it behind.
+iout="$(env -u USER PATH="$stub_dir:$PATH" HOME="$ih" MAINTAINER_PROFILE=p \
+    bash "$root/bin/maintainer-doctor" 2>&1)"
+grep -q 'unbound variable' <<<"$iout" \
+    && bad "doctor dies on an unset USER instead of reporting" \
+    || ok "doctor survives an environment that exports no USER"
+grep -q 'Container verification' <<<"$iout" \
+    && ok "and reaches the end of its report with USER unset" \
+    || bad "doctor stops before Container verification when USER is unset"
+# The same read sits on the unattended runner's notification path, which is the
+# worst place for a crash: it fires only when something has already failed.
+bare_user="$(grep -rn '[$]USER' "$root/bin" "$root/lib" "$root/scripts" "$root/install.sh" 2>/dev/null \
+    | grep -v 'USER:-' || true)"
+[ -z "$bare_user" ] \
+    && ok "no shipped script reads USER without a fallback" \
+    || bad "an unset USER would kill these under set -u: $(printf '%s' "$bare_user" | tr '\n' ' ' | cut -c1-160)"
+grep -rq 'USER:-' "$root/bin" "$root/lib" \
+    && ok "and the fallback form is present, so the check above can match" \
+    || bad "no USER:- anywhere, so the anti-pattern grep proves nothing"
 rm -f "$stub_dir/podman"
 command -v podman >/dev/null 2>&1 \
     && ok "the podman stub is gone, so the cases below see the real one" \
     || noenv "no podman on this host; the container cases below will skip"
+
+echo "== every production file a suite covers can be mutated =="
+# apply_mutation runs `find -name "<glob>"`, so a mutate glob matches a
+# BASENAME, not a path. magent's shell suite covered `bin/*`, `lib/*` and
+# `scripts/*` and mutated `*.sh`, and every command in this repository lives in
+# bin/ with no extension. A pull request touching one passed the coverage check,
+# changed nothing when the mutation ran, and cmd_verify refused with "the
+# mutation changed nothing" - a correct refusal that made the class
+# unverifiable. Driven against this repository, which is what the magent profile
+# points at.
+mg_suite="$root/profiles/magent/verify.d/shell.sh"
+# shellcheck disable=SC1090  # the suite file is chosen at runtime, by design
+mg_globs_raw="$( . "$mg_suite"; suite_mutate_glob )"
+mapfile -t mg_globs <<< "$mg_globs_raw"
+mg_prod_raw="$( . "$root/profiles/magent/profile.env" >/dev/null 2>&1; printf '%s' "${PROD_GLOBS:-}" )"
+read -r -a mg_prod <<< "$mg_prod_raw"
+mg_files="$(git -C "$root" ls-files 2>/dev/null)"
+[ -n "$mg_files" ] && [ "${#mg_prod[@]}" -gt 0 ] \
+    && ok "the mutate-glob check has a file list and a PROD_GLOBS to read" \
+    || bad "no tracked files or no PROD_GLOBS; the check below would be vacuous"
+mg_checked=0; mg_unreachable=""
+while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    isprod=0
+    # shellcheck disable=SC2254  # PROD_GLOBS entries ARE globs; matching them literally would defeat the check
+    for pat in "${mg_prod[@]}"; do case "$f" in $pat) isprod=1; break ;; esac; done
+    [ "$isprod" = 1 ] || continue
+    # shellcheck disable=SC1090
+    ( . "$mg_suite"; suite_covers "$f" ) || continue
+    mg_checked=$((mg_checked + 1))
+    base="${f##*/}"; hit=0
+    # shellcheck disable=SC2254  # a mutate glob is a glob
+    for g in "${mg_globs[@]}"; do [ -n "$g" ] || continue; case "$base" in $g) hit=1; break ;; esac; done
+    [ "$hit" = 1 ] || mg_unreachable="$mg_unreachable $f"
+done <<< "$mg_files"
+[ "$mg_checked" -gt 0 ] \
+    && ok "$mg_checked production file(s) are covered by the shell suite" \
+    || bad "no production file matched both PROD_GLOBS and suite_covers; the check is vacuous"
+[ -z "$mg_unreachable" ] \
+    && ok "and every one of them can be reached by a mutation" \
+    || bad "no mutation can land on:$(printf '%s' "$mg_unreachable" | cut -c1-200)"
 
 echo "== the verify container can run a script the test itself wrote =="
 # sysknife#410's release test writes an "echoing scanner" stub into mktemp -d,
