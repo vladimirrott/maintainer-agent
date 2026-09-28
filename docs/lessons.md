@@ -2904,3 +2904,34 @@ match one of that suite's mutate globs, naming every file it cannot reach. It
 asserts the selection is non-empty first, because a filter that selects nothing
 passes. `maintainer-doctor` is driven with `env -u USER` and must reach the end
 of its report, and no shipped script may read `$USER` without a `:-` fallback.
+## 98. A release verdict read "refuses" in a CHANGELOG and could not tell CI from the product
+
+`maintainer-repo release-check` scores a break from the words a CHANGELOG uses:
+`no longer`, `used to succeed`, `refuses`. On 2026-09-28 sysknife merged five
+pull requests, every one of them documentation, CI scripts or end-to-end tests.
+Three entries said a gate now refuses something it used to accept, so the
+heuristic counted three breaks and the verdict came back:
+
+    production files touched:  5
+    removed-capability wording: 3 occurrence(s)
+    verdict: RELEASE DUE ...
+    digit:   middle. Something that used to succeed now refuses
+
+Every number there is correct and the conclusion is wrong. `PROD_GLOBS` is the
+receipt-invalidation set, so it contains `.github/*` and `scripts/*`: a workflow
+change has to invalidate a receipt. A workflow change does not reach anybody who
+installed the last version. The mechanical answer was one command away:
+
+    $ git diff --name-only v0.22.0..origin/main -- crates apps packages
+    (nothing)
+
+Cutting that release would have published byte-identical crates to crates.io,
+where a version can never be replaced or reused.
+
+**Guard:** the profile declares `SHIPPED_GLOBS` alongside `PROD_GLOBS`, and
+`release-check` prints `shipped surface touched:` beside the production count.
+At zero it says a release would publish byte-identical artifacts and that any
+break named below is in CI. An unset `SHIPPED_GLOBS` prints a warning instead of
+zero, because unset and untouched are the two answers a guard must never
+conflate. Three tests in `tests/run-tests.sh` drive a repository whose only
+change since its tag is outside the shipped set.

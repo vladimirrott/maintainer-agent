@@ -87,7 +87,7 @@ cmd_release_check() {
     # an earlier version of this check read subject lines for the word
     # "security" and scored a genuine authorization fix as zero, because its
     # subject was "fix(daemon): gate mutating query actions".
-    local prod unrel sec added breaking
+    local prod shipped unrel sec added breaking
     # Same fix as the merge gate: these were sysknife's directories, so on any
     # other repository the count was zero and every release looked like "docs
     # and tests only".
@@ -98,6 +98,24 @@ cmd_release_check() {
         prod=0
     else
         prod="$(git diff --name-only "$tag"..origin/main -- "${globs[@]}" | wc -l)"
+    fi
+    # PROD_GLOBS is the receipt-invalidation set, so it contains CI: a workflow
+    # change has to invalidate a receipt. It is the wrong set for a release
+    # decision, because a gate that now refuses does not reach anybody who
+    # installed the last version. On 2026-09-28 sysknife merged five docs-and-CI
+    # pull requests, three CHANGELOG entries said a gate "refuses", and this
+    # answered RELEASE DUE with a middle digit while nothing under crates/,
+    # apps/ or packages/ had moved since the tag. That release would have
+    # published byte-identical artifacts, and a crates.io version can never be
+    # replaced.
+    local -a ship; read -r -a ship <<< "${SHIPPED_GLOBS:-}"
+    if [ "${#ship[@]}" -eq 0 ]; then
+        say "WARNING: this profile declares no SHIPPED_GLOBS, so nothing below can say"
+        say "         whether the change reaches an installed copy. Set it in"
+        say "         profile.env. Unset is not the same as untouched."
+        shipped=""
+    else
+        shipped="$(git diff --name-only "$tag"..origin/main -- "${ship[@]}" | wc -l)"
     fi
     # Read from the working tree, because that is the file a human is about to
     # tag, while every count above comes from origin/main. Those are two trees,
@@ -138,6 +156,14 @@ cmd_release_check() {
     # removed capability, which docs/release.md counts as a break.
     breaking="$(printf '%s' "$unrel" | grep -ciE 'no longer|used to (succeed|work)|refuses' || true)"
     say "production files touched:  $prod"
+    if [ -n "$shipped" ]; then
+        say "shipped surface touched:    $shipped"
+        if [ "$shipped" -eq 0 ]; then
+            say "                           nothing that installs has changed since $tag, so a"
+            say "                           release would publish byte-identical artifacts and"
+            say "                           any break named below is in CI, not in the product."
+        fi
+    fi
     say "CHANGELOG Security section: $([ "$sec" -gt 0 ] && echo yes || echo no)"
     say "CHANGELOG Added section:    $([ "$added" -gt 0 ] && echo yes || echo no)"
     say "removed-capability wording: $breaking occurrence(s)"
