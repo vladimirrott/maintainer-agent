@@ -60,6 +60,19 @@ CARGO_LOCK_OK = (
 # introduces one stops here and goes to a person.
 NPM_DANGEROUS = ("hasInstallScript", "scripts", "preinstall", "postinstall", "gypfile")
 
+# `FROM <registry>/<repo>:<tag>@sha256:<64 hex> [AS <stage>]`, the only shape a
+# base image may have here. A tag alone is mutable, so the digest is the control
+# and a bump that drops it has given up the property the pin existed for,
+# whatever Dependabot titled the pull request. `--platform=` and friends are
+# allowed through because they change nothing about where the bytes come from.
+FROM_PIN = re.compile(
+    r"^\s*FROM\s+(?:--[^\s]+\s+)*"
+    r"(?P<image>[^\s:@]+):(?P<tag>[^\s@/]+)"
+    r"@(?P<digest>sha256:[0-9a-f]{64})"
+    r"(?:\s+AS\s+\S+)?\s*$",
+    re.IGNORECASE,
+)
+
 
 def classify_path(path):
     base = os.path.basename(path)
@@ -75,6 +88,8 @@ def classify_path(path):
         return "workflow"
     if path.startswith(".github/actions/") and base in ("action.yml", "action.yaml"):
         return "workflow"
+    if base == "Dockerfile" or base.startswith("Dockerfile.") or base.endswith(".Dockerfile"):
+        return "dockerfile"
     return None
 
 
@@ -150,7 +165,7 @@ def main():
         # here, and one of them must not be called a dependency bump.
         refuse("the diff named no changed file, so nothing was classified")
 
-    pins, kinds, changed_lines = [], {}, 0
+    pins, images, kinds, changed_lines = [], [], {}, 0
     for path, lines in sorted(files.items()):
         kind = classify_path(path)
         if kind is None:
@@ -194,6 +209,29 @@ def main():
                     if not value.startswith(("sha512-", "sha1-")):
                         refuse("an integrity field is not a sha512/sha1 digest", path, body)
 
+        elif kind == "dockerfile":
+            # Paired by image name rather than line by line: the claim is that
+            # the same repository moved to a new digest, so every added FROM has
+            # to name an image some removed FROM already named. A bump that
+            # repoints the build at another registry is a new place to download
+            # from, which is the one thing this whole class may not do.
+            added, removed = [], []
+            for sign, text in lines:
+                if not text.strip().upper().startswith("FROM"):
+                    refuse("a Dockerfile line changed that is not a base image pin",
+                           path, text.strip())
+                match = FROM_PIN.match(text)
+                if not match:
+                    refuse("a base image is not pinned by digest", path, text.strip())
+                (added if sign == "+" else removed).append(match)
+            was = {m["image"] for m in removed}
+            for match in added:
+                if match["image"] not in was:
+                    refuse("the base image comes from a different image than the one "
+                           "it replaces", path, match.string.strip())
+                images.append({"image": match["image"], "tag": match["tag"],
+                               "digest": match["digest"]})
+
         elif kind == "workflow":
             for sign, text in lines:
                 match = PIN.match(text)
@@ -211,6 +249,9 @@ def main():
         # The caller verifies these against GitHub: a comment naming a tag the
         # SHA is not on is the whole reason to pin by SHA in the first place.
         "pins": pins,
+        # And these against the registry, for the same reason: a digest that is
+        # not the one its tag resolves to is a pin whose comment is false.
+        "images": images,
     }, sys.stdout, indent=2)
     print()
 

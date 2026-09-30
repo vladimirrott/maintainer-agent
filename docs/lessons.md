@@ -3005,3 +3005,58 @@ because the whole value of this check is in the case where the head looks clean,
 and a check that goes quiet when it could not ask is worse there than no check.
 Five tests drive it, including one where the force-push history is innocent, so
 the guard cannot pass by crying wolf.
+
+## 101. The gate had no arm for the ecosystem the repository actually builds on
+
+sysknife pins its build images by manifest-list digest, so a moved or compromised
+tag cannot change the build, and Dependabot's docker ecosystem bumps them.
+`classify_dependency_bump.py` knew Cargo, npm and GitHub Actions, and answered
+`Dockerfile is not dependency metadata` for everything else.
+
+That refusal is the right default and it was still a defect. sysknife#534 and
+#535 are one-line base-image digest bumps, and the only ways to land them were an
+asserted receipt, which an unattended run may not write, or `gh pr merge --admin`,
+which is the path this gate exists to remove. A gate that cannot speak about a
+whole ecosystem does not stop that ecosystem from merging. It stops the gate from
+being in the way while it does.
+
+The claim a base-image bump can prove is the same three the rest of the class
+proves: nothing outside dependency metadata changed, no new place to download
+from appeared, and every pin still names what it claims to name. Only the third
+needs the network, and it needs a registry rather than GitHub.
+
+**Guard:** a `dockerfile` arm that refuses any changed line that is not a `FROM`,
+any base image that stops being pinned by digest, and any added `FROM` whose
+image is not one a removed `FROM` already named, which is the no-new-source claim
+one registry over. `scripts/resolve_image_digest.py` then asks the registry what
+the tag resolves to, over the Registry v2 token dance with no new binary
+dependency, and `verify-deps` refuses a digest that is not the answer. Nine
+tests, four of them refusals pinned to their own reason: asserting only
+`"verdict": "refused"` passed while the classifier was still refusing every
+Dockerfile for being a Dockerfile, which is a negative test satisfied by a code
+path it is not about.
+
+## 102. A verifier that inspected nothing looked like one with nothing to inspect
+
+`verify-deps` counted the action pins it checked and wrote that count into the
+receipt. It read them with
+
+    while IFS=$'\t' read -r action pinsha tag; do ... done < <(python3 -c ...)
+
+and process substitution reports the status of the redirection, never of the
+command inside it. A producer that died left the loop reading an empty stream,
+`checked` at zero, and a sealed receipt reading `0 action pin(s) verified` about
+a diff that bumped a pin. MISTAKES rule 2b, in the gate whose whole job is
+telling a check that passed from a check that never ran.
+
+The fix is two things, and the second is the one that matters. Command
+substitution propagates, so reading into a variable first turns a dead producer
+into a refusal. But a verifier also has to compare what it checked against what
+the diff declared: the classifier says how many pins and images it found, and a
+receipt is a claim about all of them. Zero checked out of one declared is not a
+clean bump, it is a check that did not run.
+
+**Guard:** both loops read from a variable, and each is followed by an equality
+against the classifier's declared count. Mutation-proved in both directions:
+removing the `|| die` alone leaves the suite green, because the count check
+catches it; removing both mints the receipt and the test goes red.

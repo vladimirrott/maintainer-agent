@@ -10,6 +10,39 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **A dependency bump may now be a base-image digest bump.**
+  `classify_dependency_bump.py` knew Cargo, npm and GitHub Actions, and answered
+  `Dockerfile is not dependency metadata` for anything else. sysknife pins its
+  build images by manifest-list digest so a moved tag cannot change the build,
+  and Dependabot bumps them, so every such pull request had only two ways to
+  land: an asserted receipt, which an unattended run may not write, or
+  `gh pr merge --admin`, which is the path this gate exists to remove. The new
+  `dockerfile` arm refuses a changed line that is not a `FROM`, a base image
+  that stops being pinned by digest, and an added `FROM` naming an image no
+  removed `FROM` named, which is the no-new-source claim one registry over.
+  `scripts/resolve_image_digest.py` then asks the registry what the tag resolves
+  to, over the Registry v2 token dance with no new binary dependency, and
+  `verify-deps` refuses a digest that is not the answer. Nine tests. The four
+  refusals assert their own reason, because while the classifier still refused
+  every Dockerfile for being a Dockerfile, a bare `"verdict": "refused"` passed
+  for a code path the test was not about ([lesson 101](docs/lessons.md)).
+
+### Fixed
+
+- **A verifier that inspected nothing no longer looks like one with nothing to
+  inspect.** `verify-deps` read its action pins with
+  `while ... done < <(python3 -c ...)`, and process substitution reports the
+  status of the redirection rather than of the command inside it. A producer
+  that died left the loop reading an empty stream, the counter at zero, and a
+  sealed receipt reading `0 action pin(s) verified` about a diff that bumped a
+  pin. Both loops now read from a variable, so a dead producer refuses, and each
+  is followed by an equality against the count the classifier declared: zero
+  checked out of one declared is a check that did not run, not a clean bump.
+  Mutation-proved in both directions ([lesson 102](docs/lessons.md)).
+
+
 Two guards, both from the same session's work on sysknife, and both about a
 check that answered a narrower question than the one being asked.
 
