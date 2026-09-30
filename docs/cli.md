@@ -31,7 +31,7 @@ The only path to a merge.
 
 | command | what it does |
 |---|---|
-| `maintainer-merge verify <pr> <sha> <filter> <sed>` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated |
+| `maintainer-merge verify <pr> <sha> <filter> <sed>` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit |
 | `maintainer-merge merge <pr>` | merge, if every condition holds. See the table in the README |
 | `maintainer-merge show [pr]` | print a recorded receipt |
 | `maintainer-merge receipt <pr> <sha> <proof>` | record a human's claim. Refused inside an unattended run, and a run may not merge on one |

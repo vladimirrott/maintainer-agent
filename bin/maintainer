@@ -1488,9 +1488,6 @@ def cmd_screen(pr: str) -> None:
         print("  podman run --rm --network=none -v \"$PWD:/repo:ro\" docker.io/library/rust:1-slim \\")
         print("    sh -c 'cd /repo && cargo test --offline'")
         print("If it does not, say in the review that you reviewed by reading.")
-        if any(".github/workflows/" in p for p, _ in ordered):
-            print("\nThis PR touches .github/workflows/. Do NOT approve its queued workflow")
-            print("run: that approval is the control that stops a fork's code running in CI.")
     else:
         inert = [p for p in paths if p.endswith(INERT_SUFFIXES)]
         if len(inert) != len(paths):
@@ -1499,6 +1496,101 @@ def cmd_screen(pr: str) -> None:
                 f"{sorted(set(paths) - set(inert))}; failing closed, treat as DO NOT EXECUTE")
         print("\nVERDICT: INERT. Every changed file is read as text by a gate and never")
         print("executed. Building is unnecessary rather than merely permitted.")
+
+    _report_workflow_exposure(pr, paths)
+
+
+def _report_workflow_exposure(pr: str, paths: list[str]) -> None:
+    """Say whether approving this PR's queued workflow run is safe.
+
+    Approving a fork's run is the control that stops a fork's code executing in
+    CI with this repository's permissions, so the answer has to be visible on
+    every verdict, not only on DO NOT EXECUTE. A docs-only pull request is INERT
+    and its workflow run is exactly as dangerous as anyone else's if the branch
+    ever carried a workflow edit.
+
+    The head is not the whole question. On 2026-09-29 sysknife#527 arrived as one
+    commit touching Cargo.lock, and the branch had been force-pushed: the dropped
+    commit `441f163c` edited `.github/workflows/ci.yml`. Screening the head alone
+    reported nothing to be careful about, and the contributor's stated intent was
+    to restore that commit. A reviewer who had already approved a run on the
+    strength of a clean screen would have approved the next one by habit.
+    """
+    live = sorted(p for p in paths if p.startswith(".github/workflows/"))
+    dropped, unread = _force_pushed_workflow_commits(pr)
+
+    if live:
+        print("\nThis PR touches .github/workflows/. Do NOT approve its queued workflow")
+        print("run: that approval is the control that stops a fork's code running in CI.")
+        for p in live:
+            print(f"  {p}")
+    if dropped:
+        print("\nThis branch has been force-pushed over a commit that edited a workflow.")
+        print("The current head does not show it, and the author can restore it with one")
+        print("push. Re-screen before approving any run on this pull request, every time.")
+        for sha, files in dropped:
+            print(f"  {sha[:8]} dropped, touched: {', '.join(files)}")
+    if unread:
+        # Rule 6: a check that could not ask must refuse, not report silence as
+        # an all-clear. The whole point of this function is the case where the
+        # head looks clean.
+        print("\nThe force-push history could not be read, so nothing here says the")
+        print("branch never carried a workflow edit:")
+        print(f"  {unread}")
+        print("Treat the workflow-run approval as unsafe until you have read the timeline.")
+    if not live and not dropped and not unread:
+        print("\nNo workflow file in the head and none in this branch's force-push")
+        print("history, so approving its queued run risks only what the diff above says.")
+
+
+def _force_pushed_workflow_commits(pr: str) -> tuple[list[tuple[str, list[str]]], str]:
+    """Heads this branch pushed and then abandoned, that touched a workflow.
+
+    Returns the findings and, separately, why the answer may be incomplete. The
+    two are not the same: "asked, nothing was dropped" and "could not ask" look
+    identical from the outside, and only one of them is an all-clear.
+
+    Read from the workflow runs rather than the timeline. A
+    `head_ref_force_pushed` event carries `commit_id`, which is the commit the
+    ref points at *after* the push, so the timeline never names what was
+    dropped. Every push queues runs pinned to the head it pushed, including for
+    a fork, so a `head_sha` on this branch that is not in the pull request's
+    commits is a head that existed and no longer does. That is also the more
+    useful signal: the thing being decided is whether to approve a queued run,
+    and a queued run is exactly what pins one of these SHAs.
+    """
+    meta = gh_json("pr", "view", pr, "--json", "headRefName")
+    if meta is None or not meta.get("headRefName"):
+        return [], "could not read the pull request's head branch"
+    branch = meta["headRefName"]
+    runs = gh_json("api", f"repos/{SLUG}/actions/runs?branch={branch}&per_page=100")
+    if runs is None:
+        return [], f"could not list workflow runs for branch {branch}"
+    current = gh_json("api", f"repos/{SLUG}/pulls/{pr}/commits", "--paginate")
+    if current is None:
+        return [], "could not list the pull request's commits, so no head can be called dropped"
+    live_shas = {c["sha"] for c in current}
+    pending = {}
+    for r in runs.get("workflow_runs", []):
+        sha = r.get("head_sha")
+        if not sha or sha in live_shas:
+            continue
+        pending.setdefault(sha, set()).add(r.get("status", "?"))
+    findings, unreadable = [], []
+    for sha in pending:
+        commit = gh_json("api", f"repos/{SLUG}/commits/{sha}")
+        if commit is None:
+            unreadable.append(sha[:8])
+            continue
+        files = sorted(f["filename"] for f in commit.get("files", [])
+                       if f["filename"].startswith(".github/workflows/"))
+        if files:
+            findings.append((sha, files))
+    note = ""
+    if unreadable:
+        note = ("dropped head(s) " + ", ".join(unreadable)
+                + " are no longer readable, so what they touched is unknown")
+    return findings, note
 
 
 def cmd_start(skill: str) -> None:

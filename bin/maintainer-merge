@@ -611,7 +611,12 @@ apply_mutation() {  # $1 = extracted tree, $2 = sed expression
         rm -rf "$sums"; return 1
     fi
     ( cd "$work" && xargs -0 -r -a "$sums/list" sha256sum ) > "$sums/after" 2>/dev/null
-    awk 'NR==FNR { was[$2] = $1; next } was[$2] != $1' "$sums/before" "$sums/after" | wc -l
+    # Prints the changed paths, one per line, `./` stripped, so the caller can
+    # both count them and ask which part of the tree they are in. It used to
+    # print only the count, which answered "did the mutation apply" and not "did
+    # it apply to the code the receipt is about".
+    awk 'NR==FNR { was[$2] = $1; next } was[$2] != $1 { sub(/^\.\//, "", $2); print $2 }' \
+        "$sums/before" "$sums/after"
     rm -rf "$sums"
 }
 
@@ -1006,10 +1011,12 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     # text transform. Confirmed on this host by tests/run-tests.sh.
     # -type f as well as the refusal above: `sed -i` on a symlink replaces it
     # with the dereferenced content, so this must never see one.
-    local mutated_files
-    mutated_files="$(apply_mutation "$work" "$mutation")" \
+    local mutated_list
+    mutated_list="$(apply_mutation "$work" "$mutation")" \
         || die "mutation failed to apply, or used a sandboxed sed command (e/w/r are refused)"
-    if [ "${mutated_files:-0}" -lt 1 ]; then
+    local -a mutated=()
+    [ -n "$mutated_list" ] && mapfile -t mutated <<< "$mutated_list"
+    if [ "${#mutated[@]}" -lt 1 ]; then
         die "the mutation changed nothing, so this run says nothing about the guard.
 
   sed matched no line in any file this suite mutates:
@@ -1017,6 +1024,47 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
   Either the expression matches nothing, or the file it targets is outside that
   list. Re-run with a mutation that lands inside it. This is not a verdict about
   #$pr."
+    fi
+
+    # WHERE the mutation landed, not only that it landed.
+    #
+    # A suite's mutate glob is about file types, not about trust: sysknife's rust
+    # suite mutates '*.rs', which is every test file as well as every source
+    # file. So a mutation aimed at the contributor's own test satisfied every
+    # check above and earned a receipt, having proved that a test notices its own
+    # edit. That is the shape this gate exists to refuse, one level up: a guard
+    # whose proof is a parallel copy of its own logic.
+    #
+    # Observed twice in one session on 2026-09-29. A sysknife MCP boundary test
+    # called the sanitiser directly instead of the route, so removing the wiring
+    # left it green; and the same review flagged the identical shape in a
+    # contributor's pull request an hour earlier. Neither was caught by a test
+    # count or a diff review. Both would have been caught here.
+    #
+    # Only asked when the diff carries production code at all. A docs-only or
+    # test-only pull request has no production path to mutate, and the refusals
+    # in pick_suite already decide what a receipt may claim about those.
+    if [ "${#PROD_GLOBS[@]}" -gt 0 ]; then
+        local diff_has_prod=0 mutation_hit_prod=0 p
+        for p in "${path_list[@]}"; do
+            is_production "$p" && { diff_has_prod=1; break; }
+        done
+        for p in "${mutated[@]}"; do
+            is_production "$p" && { mutation_hit_prod=1; break; }
+        done
+        if [ "$diff_has_prod" = 1 ] && [ "$mutation_hit_prod" = 0 ]; then
+            die "the mutation landed only outside production code, so this run says
+  nothing about the guard.
+
+  changed by the mutation:
+$(printf '    %s\n' "${mutated[@]}")
+  none of which matches this profile's PROD_GLOBS:
+    ${PROD_GLOBS[*]}
+
+  A mutation inside a test proves the test notices its own edit. The receipt is
+  a claim about the production code the test is supposed to hold, so break that
+  instead and watch '$filter' go red. No receipt written."
+        fi
     fi
     run_in_container "$mut_log"; local mut_rc=$?
 

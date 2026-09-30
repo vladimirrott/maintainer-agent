@@ -2594,13 +2594,25 @@ echo "== the screen decides what may execute on this host =="
 # fork PR runs a stranger's code as this user and `build.rs` runs it at compile
 # time, so a screen that errs toward SAFE launders an unknown into a
 # reassurance. Every case here is driven through the real cmd_screen.
-screen_stub() {  # $1 = files json, $2 = changedFiles count, $3 = diff text
+# $4 = a head SHA this branch force-pushed away, or empty. $5 = that commit's
+# files json. The three calls after 'pr diff' are the force-push history check:
+# without answers for them every screen case would exercise only its
+# could-not-ask branch, and the all-clear it prints would be untested.
+screen_stub() {  # $1 = files json, $2 = changedFiles count, $3 = diff text, $4 = dropped sha, $5 = its files
+    local dropped="${4:-}" dropped_files="${5:-[]}"
+    local runs='{"workflow_runs":[{"head_sha":"abcdef1234567890","status":"completed"}]}'
+    [ -n "$dropped" ] && runs="{\"workflow_runs\":[{\"head_sha\":\"abcdef1234567890\",\"status\":\"completed\"},{\"head_sha\":\"$dropped\",\"status\":\"action_required\"}]}"
     make_stub gh "case \"\$*\" in
+      *'--json headRefName'*) printf '%s\n' '{\"headRefName\":\"feature\"}' ;;
       *'pr view'*) cat <<'J'
 {\"files\":$1,\"headRefOid\":\"abcdef1234567890\",\"author\":{\"login\":\"stranger\"},\"title\":\"t\",\"changedFiles\":$2}
 J
         ;;
       *'pr diff'*) printf '%s\n' '$3' ;;
+      *actions/runs*) printf '%s\n' '$runs' ;;
+      *pulls/*/commits*) printf '%s\n' '[{\"sha\":\"abcdef1234567890\"}]' ;;
+      *commits/$dropped) printf '%s\n' '{\"files\":$dropped_files}' ;;
+      *commits/*) printf '%s\n' '{\"files\":[]}' ;;
       *) exit 1 ;;
     esac"
 }
@@ -2632,6 +2644,36 @@ screen_case "a workflow change warns against approving its run" "Do NOT approve 
 
 screen_stub '[{"path":"scripts/x.sh"}]' 1 ''
 screen_case "a shell script is DO NOT EXECUTE (the gates run it)" "VERDICT: DO NOT EXECUTE"
+
+# A clean branch says so, rather than saying nothing. Silence and an all-clear
+# are the same on screen, and only one of them is true.
+screen_stub '[{"path":"scripts/x.sh"}]' 1 ''
+screen_case "a branch with no workflow history says approving its run is only what the diff says" \
+    "none in this branch's force-push"
+
+# The head is not the whole question. sysknife#527 on 2026-09-29 arrived as one
+# commit touching Cargo.lock, and its branch had been force-pushed over
+# 441f163c, which edited .github/workflows/ci.yml. Screening the head alone
+# reported nothing to be careful about, and the author's stated intent was to
+# restore that commit. Approving a run on the strength of that screen, and then
+# approving the next one by habit, is how a fork's workflow gets to run with
+# this repository's permissions.
+screen_stub '[{"path":"Cargo.lock"}]' 1 '' '441f163cf376346e' '[{"filename":".github/workflows/ci.yml"}]'
+screen_case "a workflow edit force-pushed away is still reported" \
+    "force-pushed over a commit that edited a workflow"
+screen_case "and the dropped head is named" "441f163c dropped"
+
+# The same history, with nothing dangerous in it, must not cry wolf.
+screen_stub '[{"path":"Cargo.lock"}]' 1 '' '441f163cf376346e' '[{"filename":"README.md"}]'
+screen_case "a force-push over an ordinary commit is not reported as a workflow risk" \
+    "none in this branch's force-push"
+
+# INERT pull requests get the judgement too. A docs-only change is inert and its
+# queued run is exactly as dangerous as anyone else's if the branch ever carried
+# a workflow edit; the warning used to print only under DO NOT EXECUTE.
+screen_stub '[{"path":"README.md"}]' 1 '' '441f163cf376346e' '[{"filename":".github/workflows/ci.yml"}]'
+screen_case "an INERT pull request is still screened for workflow exposure" \
+    "force-pushed over a commit that edited a workflow"
 
 # What DO NOT EXECUTE actually forbids, and what it does not.
 #
@@ -4023,6 +4065,70 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     grep -q 'THE GUARD DOES NOT BITE' <<<"$out" \
         && bad "a no-op mutation is still reported as a guard that does not bite" \
         || ok "and it is not blamed on the guard"
+
+    # WHERE the mutation landed. A suite's mutate glob is about file types, not
+    # about trust: sysknife's rust suite mutates '*.rs', which is every test file
+    # as well as every source file, and the shell suite mutates '*.sh' the same
+    # way. So a mutation aimed at the contributor's own test used to satisfy
+    # every check above and earn a receipt, having proved that a test notices its
+    # own edit.
+    #
+    # Observed twice in one sysknife session on 2026-09-29: an MCP boundary test
+    # called the sanitiser directly instead of the route, so deleting the wiring
+    # left it green, and the same review flagged the identical shape in a
+    # contributor's pull request an hour earlier. Neither showed up in a test
+    # count or a diff read.
+    mkdir -p "$vr/scripts"
+    printf '#!/usr/bin/env bash\nPROD_GUARD=on\necho "thing ran"\n[ "$PROD_GUARD" = on ] || exit 1\n' \
+        > "$vr/scripts/thing.sh"
+    # A separate entry point, because check.sh is shared with the cases below
+    # and overwriting it made one of them fail for a reason that had nothing to
+    # do with what it tests.
+    printf '#!/usr/bin/env bash\nTEST_MARKER=one\necho "prodcheck ran"\nbash scripts/thing.sh\n' \
+        > "$vr/prodcheck.sh"
+    git -C "$vr" add -A; git -C "$vr" commit -qm prod
+    verify_head_prod="$(git -C "$vr" rev-parse HEAD)"
+    git -C "$vr" update-ref "refs/pull/44/head" "$verify_head_prod"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) printf 'prodcheck.sh\nscripts/thing.sh\n';;
+    esac"
+    # scripts/* is production for the sysknife profile; check.sh at the root is
+    # not. A mutation that only reaches the test must be refused.
+    # PROFILE_DIR does not source profile.env, and the suite exports
+    # PROD_GLOBS="crates/*/src/*" globally, which nothing in this fixture
+    # matches. Declare the set this case is about, or the check under test is
+    # skipped and the assertion below passes for the wrong reason.
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate5" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          PROD_GLOBS="scripts/*" \
+          bash "$mg" verify 44 "$verify_head_prod" prodcheck.sh 's/TEST_MARKER=one/TEST_MARKER=two/' shell 2>&1)
+    grep -q 'landed only outside production code' <<<"$out" \
+        && ok "a mutation that only touches a test earns no receipt" \
+        || bad "a test-only mutation was accepted: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-400)"
+    grep -q 'receipt recorded' <<<"$out" \
+        && bad "a test-only mutation wrote a receipt" \
+        || ok "and no receipt was written for it"
+    # The refusal must name what it saw, or it is one more unexplained no.
+    grep -q 'prodcheck.sh' <<<"$out" \
+        && ok "the refusal names the file the mutation did reach" \
+        || bad "the refusal does not say what was mutated"
+    # And the same run, aimed at the production file, still works. Without this
+    # the guard above could be a blanket refusal and the test would not know.
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate6" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          PROD_GLOBS="scripts/*" \
+          bash "$mg" verify 44 "$verify_head_prod" prodcheck.sh 's/PROD_GUARD=on/PROD_GUARD=off/' shell 2>&1)
+    grep -q 'receipt recorded\|observed' <<<"$out" \
+        && ok "a mutation that breaks the production file still earns a receipt" \
+        || bad "the production mutation was refused: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    # Restore the stub the cases below expect.
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) echo check.sh;;
+    esac"
     # The shape that actually happened: the file exists, the sed matches it, and
     # the suite's mutate glob does not list it.
     printf 'the guard holds\n' > "$vr/NOTES.md"

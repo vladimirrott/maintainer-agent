@@ -2935,3 +2935,73 @@ break named below is in CI. An unset `SHIPPED_GLOBS` prints a warning instead of
 zero, because unset and untouched are the two answers a guard must never
 conflate. Three tests in `tests/run-tests.sh` drive a repository whose only
 change since its tag is outside the shipped set.
+
+## 99. A mutate glob is a file type, not a trust boundary
+
+`maintainer-merge verify` asked four questions before writing a receipt: did the
+test pass clean, did the mutation change at least one file, did the test fail
+mutated, and was the mutated run killed. It never asked *where* the mutation
+landed.
+
+A suite's `suite_mutate_glob` lists file types. sysknife's rust suite mutates
+`*.rs`, which is every test file as well as every source file; the shell suite
+mutates `*.sh` the same way. So a mutation aimed at the contributor's own test
+satisfied all four and earned a receipt, having proved that a test notices its
+own edit.
+
+Two instances in one sysknife session on 2026-09-29, both in work the reviewer
+was doing at the time rather than in a contribution:
+
+- An MCP boundary test called the sanitiser directly instead of driving the
+  route, so deleting the wiring from the route left all eight new tests green.
+  Only mutating the route found it, and the fix was to move the boundary into
+  the function the socket-backed test already drives.
+- A full-view renderer test used only short lines, so swapping an uncapped
+  per-line render back to the capped one changed nothing it asserted.
+
+The same review flagged the identical shape in a contributor's pull request an
+hour before making it twice. Reading a diff does not catch this. A test count
+does not catch this. The only thing that catches it is breaking the production
+code and watching the named test go red, which is what the gate is for.
+
+**Guard:** `cmd_verify` compares the files the mutation actually changed against
+the profile's `PROD_GLOBS`, and refuses when the diff carries production code and
+the mutation reached none of it. The refusal prints what it did change. Only
+asked when the diff has production code at all, because a docs-only pull request
+has nothing to mutate and `pick_suite` already decides what its receipt may
+claim. Two tests drive it: one mutation into a test file, refused, and one into
+the production file beside it, which still earns a receipt, because a guard that
+refuses everything is not a guard.
+
+## 100. The head is not the branch
+
+`maintainer screen` warned "do not approve its queued workflow run" when the
+pull request's files included `.github/workflows/`. It read `meta.files`, which
+is the current head's diff.
+
+sysknife#527 arrived as one commit touching `Cargo.lock`. Its branch had been
+force-pushed over `441f163c`, which edited `.github/workflows/ci.yml`, and the
+author's description still described that commit because they had written it and
+then pushed only the lockfile. Screening the head reported nothing to be careful
+about. The dropped commit's queued runs were still sitting in the approval
+queue, and the author intended to restore it.
+
+Approving a fork's workflow run is the control that stops a fork's code
+executing in CI with this repository's permissions. A reviewer who approves one
+run on a clean screen approves the next by habit.
+
+The timeline does not answer this. A `head_ref_force_pushed` event carries
+`commit_id`, which is the commit the ref points at *after* the push, so the
+event never names what was dropped. The workflow runs do: every push queues runs
+pinned to the head it pushed, including for a fork, so a `head_sha` on that
+branch that is not among the pull request's commits is a head that existed and
+no longer does. It is also the more useful signal, because a queued run is
+exactly what pins one of those SHAs.
+
+**Guard:** `screen` reports workflow exposure on every verdict, `INERT`
+included, and names any force-pushed head that touched a workflow. When it
+cannot read that history it says so and says to treat the approval as unsafe,
+because the whole value of this check is in the case where the head looks clean,
+and a check that goes quiet when it could not ask is worse there than no check.
+Five tests drive it, including one where the force-push history is innocent, so
+the guard cannot pass by crying wolf.

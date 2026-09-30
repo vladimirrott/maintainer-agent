@@ -19,6 +19,22 @@ fallback: it reviews by reading and says so in the review.
 
 Not executing is the strongest containment available and it is the default.
 
+`screen` also answers a second question on every verdict, including `INERT`:
+may this pull request's queued workflow run be approved? Approving a fork's run
+is what lets a fork's code execute in CI with this repository's permissions, so
+the answer is never "the diff looks harmless".
+
+It reads the branch's history, not only the head. sysknife#527 arrived as one
+commit touching `Cargo.lock`, and the branch had been force-pushed over a commit
+that edited `.github/workflows/ci.yml`. The head was clean and the author
+intended to restore that commit. `screen` finds those heads through the workflow
+runs each push queues, because the timeline's `head_ref_force_pushed` event
+names the commit the ref points at *after* the push and never what was dropped.
+
+When it cannot read that history it says so and tells you to treat the approval
+as unsafe, because a screen that goes quiet when it could not ask is the one
+failure this command exists to avoid.
+
 ## 2. When something must run, it runs like this
 
 Only `maintainer-merge verify` executes contributor code, and only inside a

@@ -10,6 +10,48 @@ middle digit.
 
 ## [Unreleased]
 
+Two guards, both from the same session's work on sysknife, and both about a
+check that answered a narrower question than the one being asked.
+
+### Fixed
+
+- **A mutation that lands only outside production code earns no receipt.**
+  `cmd_verify` asked whether the mutation changed a file, never which file. A
+  suite's `suite_mutate_glob` lists file types, so sysknife's rust suite mutates
+  `*.rs`, which is every test file as well as every source file. A mutation
+  aimed at the contributor's own test passed every check and minted a receipt,
+  having proved that a test notices its own edit. Observed twice on 2026-09-29
+  in the reviewer's own work: an MCP boundary test that called the sanitiser
+  directly rather than driving the route stayed green with the route's wiring
+  deleted, and a full-view renderer test used only short lines so a reverted
+  length cap changed nothing it asserted. `apply_mutation` now reports which
+  paths it changed instead of how many, and `cmd_verify` refuses when the diff
+  carries production code and the mutation reached none of it, printing what it
+  did change. Only asked when the diff has production code at all, because a
+  docs-only pull request has nothing to mutate and `pick_suite` already decides
+  what its receipt may claim. Two tests: one mutation into a test file, refused,
+  and one into the production file beside it, which still earns a receipt,
+  because a guard that refuses everything is not a guard
+  ([lesson 99](docs/lessons.md)).
+
+- **`screen` reports workflow exposure on every verdict, and reads the branch
+  rather than the head.** The warning against approving a queued workflow run
+  fired only under `DO NOT EXECUTE`, and only on `.github/workflows/` paths in
+  the current diff. sysknife#527 arrived as one commit touching `Cargo.lock`
+  over a branch force-pushed away from `441f163c`, which had edited
+  `.github/workflows/ci.yml`; its runs were still in the approval queue and the
+  author meant to restore it. The timeline cannot answer this, because a
+  `head_ref_force_pushed` event's `commit_id` is the commit the ref points at
+  after the push and never names what was dropped. The workflow runs can: every
+  push queues runs pinned to the head it pushed, so a `head_sha` on that branch
+  that is not among the pull request's commits is a head that existed and no
+  longer does. A docs-only change is `INERT` and its queued run is exactly as
+  dangerous as anyone else's, so the judgement now prints on every verdict, and
+  an unreadable history says so and says to treat the approval as unsafe rather
+  than going quiet. Five tests, one of them a force-push over an innocent commit
+  so the guard cannot pass by crying wolf ([lesson 100](docs/lessons.md)).
+
+
 ## [0.6.2] — 2026-09-23
 
 The gate telling a contributor their guard does not bite, when the mutation had
