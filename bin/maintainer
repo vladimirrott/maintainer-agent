@@ -195,14 +195,33 @@ _MENTION = re.compile(r"(?<![A-Za-z0-9\-._/])@([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[
 _CODE_SPAN = re.compile(r"```.*?```|`[^`]*`", re.S)
 
 
+def _login(name) -> str:
+    """A GitHub login in the one form two of them can be compared in.
+
+    GitHub logins are case-insensitive: `@TayfurYldz` and `tayfuryldz` are one
+    account, id 238304586. A mention is whatever case the maintainer typed, and
+    a login read from the API is the case the account registered, so comparing
+    the two as strings decided who owned an issue by typography. On sysknife#521
+    that refused to merge a contributor's own work on the issue offered to them,
+    and the same comparison against MAINTAINER_ACCOUNT failed open: typed in any
+    other case, every maintainer comment read as somebody else's and the gate
+    found no holders at all. Every login that enters this file goes through here.
+    """
+    return (name or "").strip().lower()
+
+
+def _owner() -> str:
+    return _login(_setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", ""))
+
+
 def _gh_mentions(body: str) -> set:
-    """The set of real GitHub handles mentioned in a comment body."""
+    """The set of real GitHub handles mentioned in a comment body, canonical."""
     stripped = _CODE_SPAN.sub(" ", body or "")
     out = set()
     for m in _MENTION.findall(stripped):
         if "--" in m:            # GitHub forbids consecutive hyphens
             continue
-        out.add(m)
+        out.add(_login(m))
     return out
 
 # Subcommands run.sh calls and a person does not. They are deliberately absent
@@ -816,11 +835,11 @@ def _past_contributors():
                    "--json", "author,mergedAt")
     if rows is None:
         return None
-    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    owner = _owner()
     out: dict = {}
     now = datetime.now(timezone.utc)
     for r in rows:
-        who = ((r.get("author") or {}).get("login")) or ""
+        who = _login((r.get("author") or {}).get("login"))
         if not who or who == owner:
             continue
         if "[bot]" in who or who.startswith("app/"):
@@ -855,10 +874,10 @@ def _issue_parties(number) -> dict:
     if comments is None:
         return {"holders": set(), "posted": set(), "comments": None,
                 "by_pr": {}, "prs_readable": False}
-    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    owner = _owner()
     live: dict = {}
     for c in comments:
-        if c.get("u") != owner:
+        if _login(c.get("u")) != owner:
             continue
         body = c.get("b") or ""
         for m in _gh_mentions(body):
@@ -873,12 +892,12 @@ def _issue_parties(number) -> dict:
         for pr in prs:
             text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
             if number in (int(m) for m in _CLOSES.findall(text)):
-                who = ((pr.get("author") or {}).get("login")) or ""
+                who = _login((pr.get("author") or {}).get("login"))
                 if who:
                     by_pr.setdefault(who, pr.get("number"))
     return {
         "holders": {m for m, still in live.items() if still},
-        "posted": {c.get("u") for c in comments if c.get("u") != owner},
+        "posted": {_login(c.get("u")) for c in comments if _login(c.get("u")) != owner},
         "comments": comments,
         "by_pr": by_pr,
         "prs_readable": prs is not None,
@@ -887,19 +906,19 @@ def _issue_parties(number) -> dict:
 
 def _claimant_idle_days(number: int, assignees: list, comments=None) -> int:
     """Days since the person who claimed this issue last said anything on it."""
-    who = {a["login"] for a in assignees}
+    who = {_login(a["login"]) for a in assignees}
     if comments is None:
         comments = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
                            "--jq", "[.[]|{u:.user.login,at:.created_at}]")
     if not comments:
         return -1
-    theirs = [c["at"] for c in comments if not who or c["u"] in who]
+    theirs = [c["at"] for c in comments if not who or _login(c["u"]) in who]
     if not theirs:
         # Nobody named has posted. Fall back to the newest comment from anyone
         # other than the maintainer, which is the claim itself in every case
         # this has seen.
-        owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
-        theirs = [c["at"] for c in comments if c["u"] != owner] or [c["at"] for c in comments]
+        owner = _owner()
+        theirs = [c["at"] for c in comments if _login(c["u"]) != owner] or [c["at"] for c in comments]
     try:
         last = max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in theirs)
     except ValueError:
@@ -1020,7 +1039,7 @@ def cmd_assign(number: str, who: str) -> None:
     """
     if not number.isdigit():
         raise SystemExit("maintainer: assign needs an issue number")
-    if not _gh_mentions("@" + who) == {who}:
+    if not _gh_mentions("@" + who) == {_login(who)}:
         raise SystemExit(f"maintainer: {who!r} is not a GitHub handle")
     post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
     if post != "on":
@@ -1033,8 +1052,9 @@ def cmd_assign(number: str, who: str) -> None:
                   "--jq", "[.assignees[].login]")
     if got is None:
         raise SystemExit(f"maintainer: assigned #{number}, then could not read it back")
-    if who in got:
-        print(f"#{number} assigned to {who}" + (f" (with {', '.join(x for x in got if x != who)})" if len(got) > 1 else ""))
+    if _login(who) in {_login(x) for x in got}:
+        others = [x for x in got if _login(x) != _login(who)]
+        print(f"#{number} assigned to {who}" + (f" (with {', '.join(others)})" if others else ""))
         return
     raise SystemExit(
         f"maintainer: #{number} still has {got or 'no assignees'} after asking for {who}.\n"
@@ -1063,7 +1083,7 @@ def cmd_release(number: str, who: str, reason: str) -> None:
     """
     if not number.isdigit():
         raise SystemExit("maintainer: release needs an issue number")
-    if _gh_mentions("@" + who) != {who}:
+    if _gh_mentions("@" + who) != {_login(who)}:
         raise SystemExit(f"maintainer: {who!r} is not a GitHub handle")
     reason = (reason or "").strip()
     if not reason:
@@ -1114,7 +1134,7 @@ def cmd_holders(number: str) -> None:
     """
     if not number.isdigit():
         raise SystemExit("maintainer: holders needs an issue number")
-    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    owner = _owner()
     parties = _issue_parties(number)
     if parties["comments"] is None:
         raise SystemExit(f"maintainer: could not read issue #{number}")
@@ -1144,7 +1164,7 @@ def cmd_offers() -> None:
                      "--json", "number,labels,assignees")
     if issues is None:
         raise SystemExit("maintainer: could not read the tracker")
-    owner = _setting("MAINTAINER_ACCOUNT", "GH_ACCOUNT", "")
+    owner = _owner()
     held: dict = {}
     free_nums: list = []
     # Which people hold an UNANSWERED offer on each issue. One issue with two
@@ -1175,7 +1195,7 @@ def cmd_offers() -> None:
     closed_by: dict = {}
     if _prs is not None:
         for pr in _prs:
-            who = ((pr.get("author") or {}).get("login")) or ""
+            who = _login((pr.get("author") or {}).get("login"))
             text = f"{pr.get('title') or ''}\n{pr.get('body') or ''}"
             for m in _CLOSES.findall(text):
                 closed_by.setdefault(int(m), (pr.get("number"), who))
@@ -1209,7 +1229,7 @@ def cmd_offers() -> None:
         # rather than guessing. Only when GitHub has no assignee to settle it.
         crowded = 0
         for c in comments:
-            if c["u"] != owner:
+            if _login(c["u"]) != owner:
                 continue
             body = c["b"] or ""
             here = _gh_mentions(body)
@@ -1231,7 +1251,7 @@ def cmd_offers() -> None:
         # their old comments are not a second party turning up unannounced.
         addressed = set(mentioned)
         mentioned = {m for m, live in mentioned.items() if live}
-        posted = {c["u"] for c in comments}
+        posted = {_login(c["u"]) for c in comments}
         outsiders = posted - addressed - {owner}
         if mentioned and outsiders:
             contention_on[i["number"]] = (sorted(mentioned), sorted(outsiders))
@@ -1254,7 +1274,7 @@ def cmd_offers() -> None:
         # Three ways to hold one issue, all counted here: the maintainer pointed
         # you at it, GitHub says it is assigned to you, or you have a pull
         # request open against it.
-        assigned = {a.get("login") for a in (i.get("assignees") or []) if a.get("login")}
+        assigned = {_login(a.get("login")) for a in (i.get("assignees") or []) if a.get("login")}
         assigned.discard(owner)
         if crowded > 1 and not assigned and not (taken and taken[1]):
             ambiguous_on[i["number"]] = crowded
@@ -1913,7 +1933,7 @@ def cmd_file_issue(args: list[str]) -> None:
                 f"(exit {got.returncode}); refusing to file an issue under a name "
                 f"nothing confirmed.\n"
                 f"            {(got.stderr or '').strip()[:200]}")
-        if who != account:
+        if _login(who) != _login(account):
             raise SystemExit(f"maintainer file-issue: gh is '{who}', not {account}; refusing to file")
 
     cmd = ["gh", "issue", "create", "--repo", SLUG, "--title", title, "--body", full_body]

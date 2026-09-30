@@ -102,6 +102,10 @@ pr_or_die() {  # $1 = the pr argument -> echoes it back, or dies
     printf '%s' "$1"
 }
 
+# One name per line in, "a, b" out. Splicing `tr '\n' ' '` into a sentence
+# left nothing after the last name, so a refusal read "TayfurYldzwas pointed at".
+join_names() { paste -sd, - <<<"$1" | sed 's/,/, /g'; }
+
 # One field out of a receipt, read with argv rather than string interpolation.
 # json.load(open(sys.argv[1])) cannot be escaped by the filename the way
 # open('$receipt') can, and reading a field in one process this way beats
@@ -158,7 +162,10 @@ PYEOF
 identity() {
     gh auth switch --hostname github.com --user "$ACCOUNT" >/dev/null 2>&1
     local who; who="$(gh api user --jq .login 2>/dev/null)"
-    [ "$who" = "$ACCOUNT" ] || die "gh is authenticated as '${who:-unknown}', not $ACCOUNT"
+    # Case-insensitive, as GitHub is: a login differing only in case is the
+    # same account, and no two accounts differ only in case, so this refuses
+    # exactly the accounts it refused before and no longer refuses the right one.
+    [ "${who,,}" = "${ACCOUNT,,}" ] || die "gh is authenticated as '${who:-unknown}', not $ACCOUNT"
 }
 
 # `receipt` records a claim. `verify` produces one by running the mutation and
@@ -1496,8 +1503,13 @@ cmd_merge() {
   the gate refuses rather than assuming the answer is nobody."
         fi
         [ -n "$holders" ] || continue
-        printf '%s\n' "$holders" | grep -qxF "$author" && continue
-        die "#$pr closes #$iss, and $(printf '%s' "$holders" | tr '\n' ' ')was pointed at #$iss
+        # GitHub logins are case-insensitive and a mention is whatever case
+        # the maintainer typed: #519 was offered to @TayfurYldz and #521's
+        # author is tayfuryldz, one account, and an exact match refused their
+        # own work. A herestring, because `printf | grep -q` reports the
+        # pipe's status rather than the match (MISTAKES 2).
+        grep -qixF -- "$author" <<<"$holders" && continue
+        die "#$pr closes #$iss, and $(join_names "$holders") was pointed at #$iss
   by the maintainer and has not been released from it. $author was not.
 
   Somebody was told that issue was theirs, in public, where other contributors
@@ -1549,9 +1561,9 @@ cmd_merge() {
   them means somebody's name is on this issue and I cannot see it."
             fi
             if [ -n "$holders_a" ]; then
-                printf '%s\n' "$holders_a" | grep -qxF "$author" && continue
+                grep -qixF -- "$author" <<<"$holders_a" && continue
                 die "#$pr closes #$iss, which carries the '$claim_label' label and is
-  assigned to $(printf '%s' "$holders_a" | tr '\n' ' '), not to $author.
+  assigned to $(join_names "$holders_a"), not to $author.
 
   Merging this takes their work away. Talk to both before it lands, and if the
   assignment is stale, unassign it on the thread first so the record matches."
@@ -1574,11 +1586,13 @@ cmd_merge() {
   A reserved issue with a second voice on it is the case a human has to look
   at, and I cannot tell whether this is one."
             fi
-            others="$(printf '%s\n' "$others_raw" \
-                      | grep -vxF "${MAINTAINER_ACCOUNT:-}" | grep -vxF "$author" || true)"
+            # MAINTAINER_ACCOUNT is typed by a person and these logins come
+            # from the API, so an exact match counted the maintainer's own
+            # comments as a second contributor's.
+            others="$(grep -vixF -e "${MAINTAINER_ACCOUNT:-}" -e "$author" <<<"$others_raw" || true)"
             [ -z "$others" ] && continue
             die "#$pr closes #$iss, which carries the '$claim_label' label, has no
-  assignee, and $(printf '%s' "$others" | tr '\n' ' ')also posted there besides $author.
+  assignee, and $(join_names "$others") also posted there besides $author.
 
   Merging this takes their work away, and the label is public: other
   contributors read it and stayed off the issue. Talk to both of them first.

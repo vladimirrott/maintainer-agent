@@ -110,6 +110,28 @@ gate_test() {  # $1 = what `gh api user` reports, $2 = expected rc, $3 = message
 gate_test "someone-else" 1  "refusing to run"
 gate_test ""             75 "could not reach"
 
+# GitHub logins are case-insensitive, and no two accounts differ only in case.
+# So an API answer of `VladimirRott` for a profile naming `vladimirrott` is the
+# right account, and both identity checks refused it as the wrong one. The
+# refusal of a genuinely different account is asserted above and must still
+# hold; this is the other direction.
+make_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0;;
+  *'auth token'*) echo PINNEDTOKEN;;
+  *'api user'*) echo VladimirRott;;
+esac"
+pin_repo="$stub_dir/pin-repo-case"; rm -rf "$pin_repo"; git init -q -b main "$pin_repo"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_STATE_DIR="$stub_dir/pin-state-case" MAINTAINER_REPO_PATH="$pin_repo" \
+    MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1)
+if ! grep -q 'refusing to run\|could not pin\|resolves to' <<<"$out" \
+   && grep -q 'refresh failed' <<<"$out"; then
+    ok "a login differing only in case passes both identity checks"
+else
+    bad "the right account in another case was refused: $(printf '%s' "$out"|tr '\n' ' '|cut -c1-110)"
+fi
+
 # The run pins its identity by TOKEN, not just by the active-account switch. The
 # keyring holds more than one account, one of them a work account, and the active
 # one flipped mid-run and posted to a personal repo under the wrong name. With
@@ -5813,7 +5835,7 @@ echo "== the gate reads the thread, not only the label =="
 # label: two sources of truth for one fact, and the fragile one is the one a
 # human has to remember. The gate now asks `maintainer holders`, which is the
 # same derivation `offers` uses, rather than carrying a second copy of it.
-thread_gh() {  # $1 = JSON array of {u,b} for the comments API
+thread_gh() {  # $1 = JSON array of {u,b} for the comments API, $2 = PR author (default newcomer)
     cat > "$stub_dir/gh" <<GHEOF
 #!/usr/bin/env bash
 case "\$*" in
@@ -5821,7 +5843,7 @@ case "\$*" in
   *'api user'*) echo testuser;;
   *reviewDecision*) echo APPROVED;;
   *closingIssuesReferences*) echo 355;;
-  *'pr view'*author*) echo newcomer;;
+  *'pr view'*author*) echo ${2:-newcomer};;
   *issues/355/comments*) echo '$1';;
   *'issue view'*labels*) echo null;;
   *'issue view'*comments*) echo 0;;
@@ -5869,6 +5891,65 @@ out="$(cl_merge)"
 grep -q 'was pointed at #355' <<<"$out" \
     && bad "the thread check fires when there is no holder" \
     || ok "an issue nobody was pointed at is not blocked"
+
+# GitHub logins are case-insensitive, and a mention is whatever case the
+# maintainer typed. sysknife#521, 2026-09-30: #519 was offered to
+# `@TayfurYldz`, the pull request's author came back from the API as
+# `tayfuryldz`, and the gate refused to merge the offered person's own work
+# because it compared the two strings exactly. Same account, id 238304586.
+# Each case below changes the case on one side of one comparison.
+thread_gh '[{"u":"testuser","b":"@NewComer this one is yours"}]'
+out="$(cl_merge)"
+grep -q 'was pointed at #355' <<<"$out" \
+    && bad "the person offered the issue is refused because the offer spelled their handle in another case" \
+    || ok "an offer to @NewComer is the same person as the author newcomer"
+
+# A release has to retract the offer it answers. Keyed by the handle as typed,
+# `@Holder yours` and `@holder releasing` were two people, so the release
+# retracted nothing and the offer stood for ever.
+thread_gh '[{"u":"testuser","b":"@Holder yours"},{"u":"testuser","b":"@holder releasing <!-- maintainer: claim-released -->"}]'
+out="$(cl_merge)"
+grep -q 'was pointed at #355' <<<"$out" \
+    && bad "a release spelled in another case left the offer standing" \
+    || ok "a release retracts an offer whatever case either one used"
+
+# The other boundary. MAINTAINER_ACCOUNT is typed by a person and the comment's
+# author comes from the API. Compared exactly, every maintainer comment reads as
+# somebody else's, the gate finds no holders, and it lets the merge through:
+# this one fails OPEN, which is the direction that costs somebody their work.
+thread_gh '[{"u":"testuser","b":"@holder this one is yours"}]'
+out="$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=TestUser \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
+    MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$mg" merge 1 2>&1)"
+grep -q 'was pointed at #355' <<<"$out" \
+    && ok "the maintainer's own offers still count when the configured account is in another case" \
+    || bad "a MAINTAINER_ACCOUNT in another case hid every offer, and the gate merged over one"
+
+# And the refusal has to be readable. The holder list was printed with no
+# separator after the last name, so the message read "TayfurYldzwas pointed at".
+thread_gh '[{"u":"testuser","b":"@holder this one is yours"}]'
+out="$(cl_merge)"
+grep -q 'holder was pointed at #355' <<<"$out" \
+    && ok "the refusal separates the holder's name from the sentence after it" \
+    || bad "the refusal runs the handle into the next word: $(grep -o '[a-z]*was pointed at' <<<"$out")"
+
+# The other side of the same comparison. Mentions are canonicalised to lower
+# case at the source, so the gate's match against the author is the one place
+# left where a login keeps the case it was registered in. QinXi-ai is a real
+# contributor on sysknife: offered as @qinxi-ai, their pull request would have
+# been refused as somebody else's.
+thread_gh '[{"u":"testuser","b":"@newcomer this one is yours"}]' NewComer
+out="$(cl_merge)"
+grep -q 'was pointed at #355' <<<"$out" \
+    && bad "an author registered with capitals is refused the issue offered to them in lower case" \
+    || ok "the author NewComer is the person offered it as @newcomer"
+
+# Two holders, so the list itself is on show.
+thread_gh '[{"u":"testuser","b":"@alpha this one is yours"},{"u":"testuser","b":"@beta this one too"}]'
+out="$(cl_merge)"
+grep -q 'alpha, beta was pointed at #355' <<<"$out" \
+    && ok "a refusal naming two holders separates them" \
+    || bad "two holders ran together: $(grep -o '[a-z, ]*was pointed at' <<<"$out")"
 
 # A labelled issue WITH an assignee: posting on it is not the same as being the
 # person it was given to. The old check let any author through who had commented,

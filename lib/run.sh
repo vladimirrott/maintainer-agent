@@ -421,7 +421,8 @@ if [ -z "$gh_login" ]; then
     alert_transient "gh could not reach GitHub in $gh_tries tries, so the identity was never verified and nothing ran. Check the network, not the token. See $log"
     exit 75
 fi
-if [ "$gh_login" != "$GH_ACCOUNT" ]; then
+# Case-insensitive, as GitHub logins are. See maintainer-merge.
+if [ "${gh_login,,}" != "${GH_ACCOUNT,,}" ]; then
     alert "gh is authenticated as '$gh_login', not $GH_ACCOUNT; refusing to run. See $log"
     exit 1
 fi
@@ -481,7 +482,7 @@ if [ "$pinned_rc" -ne 0 ] || [ -z "$pinned_login" ]; then
     alert_transient "the pinned token could not be resolved to an account (gh exited $pinned_rc), so this run's identity was never confirmed and nothing ran. See $log"
     exit 75
 fi
-if [ "$pinned_login" != "$GH_ACCOUNT" ]; then
+if [ "${pinned_login,,}" != "${GH_ACCOUNT,,}" ]; then
     alert "the pinned token resolves to '$pinned_login', not $GH_ACCOUNT; refusing to run. See $log"
     exit 1
 fi

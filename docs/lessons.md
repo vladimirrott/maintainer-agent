@@ -3060,3 +3060,28 @@ clean bump, it is a check that did not run.
 against the classifier's declared count. Mutation-proved in both directions:
 removing the `|| die` alone leaves the suite green, because the count check
 catches it; removing both mints the receipt and the test goes red.
+
+## 103. Two strings that name one account
+
+GitHub logins are case-insensitive, and nothing in this repository knew. A
+mention is whatever the maintainer typed; a login from the API is the case the
+account registered. sysknife#519 was offered to `@TayfurYldz` and #521 was
+authored by `tayfuryldz`, one account, and the gate refused to merge the offered
+person's own work.
+
+The instance was one line. The class was about twenty: every place a mention met
+an API login, and every place `MAINTAINER_ACCOUNT` met one. Most failed closed
+and looked like a stubborn gate. One failed open, which is the one that matters:
+`MAINTAINER_ACCOUNT` in any other case made every maintainer comment read as a
+stranger's, `holders` found nobody, and the gate merged over a live offer. Two
+more were quiet: a release spelled in another case retracted nothing, and
+`assign` reported its own success as GitHub having dropped the assignee, which
+would have told me not to tell a contributor something true.
+
+**Guard:** one `_login()` for every login that enters `bin/maintainer`, mentions
+canonicalised where they are parsed, and case-insensitive matches in the gate and
+all five identity checks. Two of the seven tests were written after the
+mutations: with mentions lowercased at the source, a lowercase stub author could
+not tell a case-insensitive match from an exact one, and a single holder could
+not tell a list joiner from a space in the template. A mutation that survives is
+a test that is missing, not a guard that is fine.

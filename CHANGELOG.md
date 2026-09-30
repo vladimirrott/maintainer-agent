@@ -31,6 +31,26 @@ middle digit.
 
 ### Fixed
 
+- **A GitHub login is compared the way GitHub compares it: without case.**
+  sysknife#519 was offered to `@TayfurYldz`, the pull request that closed it
+  came back from the API authored by `tayfuryldz`, and the gate refused to
+  merge the offered person's own work because it compared the two strings
+  exactly. They are one account, id 238304586. The same comparison ran about
+  twenty times across the offer tracker, the gate and the identity checks, and
+  one of them failed open: with `MAINTAINER_ACCOUNT` typed in any case other
+  than the API's, every maintainer comment read as somebody else's, `holders`
+  found nobody, and the gate let a merge through over a live offer. A release
+  spelled in another case from its offer retracted nothing, and `assign` read
+  its own successful assignment back as GitHub having dropped it. Mentions are
+  canonicalised where they are parsed, every login read from the API goes
+  through one `_login()`, and the five identity guards compare
+  case-insensitively, which refuses exactly the accounts they refused before
+  because no two GitHub accounts differ only in case. The refusal also printed
+  its holder list with nothing after the last name, so it read
+  `TayfurYldzwas pointed at`. Seven tests, each mutation-proved; two of them
+  exist because the first five could not tell a lowercased source from a
+  case-insensitive match ([lesson 103](docs/lessons.md)).
+
 - **A verifier that inspected nothing no longer looks like one with nothing to
   inspect.** `verify-deps` read its action pins with
   `while ... done < <(python3 -c ...)`, and process substitution reports the

@@ -139,7 +139,7 @@ if command -v gh >/dev/null; then
     want="${GH_ACCOUNT:-}"
     if [ -z "$want" ]; then
         red "the profile names no GH_ACCOUNT" "set it in profile.env; a run refuses to start without one"
-    elif [ "$who" = "$want" ]; then green "gh is $who"
+    elif [ "${who,,}" = "${want,,}" ]; then green "gh is $who"
     elif [ -z "$who" ]; then red "gh is not authenticated" "gh auth login"
     else yellow "gh is '$who', not '$want'" "run.sh switches automatically, but check ~/.config/gh/hosts.yml"; fi
 else red "gh not installed" "install the GitHub CLI"; fi
