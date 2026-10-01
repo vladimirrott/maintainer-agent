@@ -38,6 +38,10 @@ Invoke the `sysknife-issues` skill and follow it. Read
    2026-09-04 and a single run had already made three offers to one person.
    Somebody who holds nothing does not appear in that table at all; that is what
    an eligible person looks like.
+5. **Run `maintainer stale 9` and `maintainer settle` every run.** `stale` names
+   holds nobody has touched for nine days; free each with `maintainer release`,
+   which also unassigns and lifts the claim label. `settle` assigns every offer
+   whose holder has posted since, the first moment GitHub accepts it.
 
    It also names the issues themselves. **Offer only from the `free to offer`
    list on the first line**, and never an issue that appears under
