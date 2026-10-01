@@ -10,6 +10,15 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-10-01
+
+The tool learning to hand work out the way the tracker actually allows. An
+offer on a fresh issue cannot be an assignment, so offers now reserve the issue
+with a label, `settle` assigns once the holder speaks, and `stale` finds the
+holds nobody touched. Moves the middle digit: `file-issue` now refuses when
+it cannot read the tracker, and `release` now unassigns, so two calls that
+used to succeed one way now behave another.
+
 ### Added
 
 - **`maintainer settle` turns answered offers into assignments, and
@@ -67,8 +76,6 @@ middle digit.
   every Dockerfile for being a Dockerfile, a bare `"verdict": "refused"` passed
   for a code path the test was not about ([lesson 101](docs/lessons.md)).
 
-### Fixed
-
 - **The docs-coverage check matches whole command names.** It searched the docs
   for each command as a substring, so `maintainer offer` read as documented
   because `maintainer offers` is. It now needs a word boundary, which found
@@ -108,8 +115,6 @@ middle digit.
 
 Two guards, both from the same session's work on sysknife, and both about a
 check that answered a narrower question than the one being asked.
-
-### Fixed
 
 - **A mutation that lands only outside production code earns no receipt.**
   `cmd_verify` asked whether the mutation changed a file, never which file. A
