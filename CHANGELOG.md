@@ -12,6 +12,21 @@ middle digit.
 
 ### Added
 
+- **`maintainer offer <issue> <user> <text>` posts an offer on the issue's own
+  thread, and only when nobody holds it.** `holders` and `offers` read an
+  issue's thread, and until now an offer was whatever prose the maintainer typed
+  wherever they were typing it. On 2026-10-01 three sysknife offers lived only in
+  pull-request reviews (#530 on #528, #474 on #514, #411 on #515), and two were
+  offered again within hours: #474 to a second contributor while the first held
+  it, and #411 five hours after its holder had accepted it on #411 itself.
+  `offer` refuses an issue somebody holds, one an open pull request closes, one
+  that is reserved, assigned or claimed, anyone who already holds an open offer,
+  and text naming a second person. It refuses when the open pull requests cannot
+  be read, and reads the comment back. `offers` and `offer` share one
+  `_offer_ledger`, so the refusal and the printout cannot disagree. Seven tests,
+  two of them pinned to their reason because they passed while the command did
+  not exist yet ([lesson 104](docs/lessons.md)).
+
 - **A dependency bump may now be a base-image digest bump.**
   `classify_dependency_bump.py` knew Cargo, npm and GitHub Actions, and answered
   `Dockerfile is not dependency metadata` for anything else. sysknife pins its
@@ -30,6 +45,11 @@ middle digit.
   for a code path the test was not about ([lesson 101](docs/lessons.md)).
 
 ### Fixed
+
+- **The docs-coverage check matches whole command names.** It searched the docs
+  for each command as a substring, so `maintainer offer` read as documented
+  because `maintainer offers` is. It now needs a word boundary, which found
+  `offer` and nothing else.
 
 - **A GitHub login is compared the way GitHub compares it: without case.**
   sysknife#519 was offered to `@TayfurYldz`, the pull request that closed it

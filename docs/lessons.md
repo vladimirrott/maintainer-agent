@@ -3085,3 +3085,28 @@ mutations: with mentions lowercased at the source, a lowercase stub author could
 not tell a case-insensitive match from an exact one, and a single holder could
 not tell a list joiner from a space in the template. A mutation that survives is
 a test that is missing, not a guard that is fine.
+
+## 104. An offer the tool cannot see is an offer the tool will repeat
+
+`holders` and `offers` derive who holds an issue from that issue's own thread.
+That was the right source, and I kept making offers somewhere else. A review
+ends with "if you want another one, #474 is next door", and the review is on the
+pull request, so the offer lives on the pull request. On 2026-10-01 there were
+three: #530 offered on #528, #474 on #514, #411 on #515. The tool saw none of
+them. Within hours I offered #474 to a second contributor while the first still
+held it, and #411 five hours after its holder had accepted it, on #411 itself,
+in a comment the tool also did not count, because only a maintainer's mention
+reads as an offer.
+
+The fix that would not have held is a parser for offers in prose on other
+threads. "#356 describes the same thing one crate over" names an issue and
+offers nothing, and a tool guessing at intent across every thread would block
+real merges on phantom holds. The fix that holds is making the right place the
+easy place: one command that posts the offer on the issue, after the same ledger
+`offers` prints says the issue and the person are both free.
+
+**Guard:** `maintainer offer`, sharing `_offer_ledger` with `offers`, and the
+review skill now says the offer itself goes through it. Two of its seven tests
+passed before the command existed, since "refused, nothing posted" is also what a
+usage error looks like, so each refusal asserts its own reason. The same day the
+docs-coverage test passed `offer` as documented because `offers` contains it.

@@ -1119,6 +1119,74 @@ def cmd_release(number: str, who: str, reason: str) -> None:
         f"            still counts {who} as holding it.")
 
 
+def cmd_offer(number: str, who: str, text: str) -> None:
+    """Offer one issue to one person, on that issue's own thread.
+
+    `holders` and `offers` read an issue's own thread, and until this existed an
+    offer was whatever prose the maintainer typed, wherever they were typing it.
+    On 2026-10-01 three offers on sysknife lived only on pull-request threads:
+    #530 on #528, #474 on #514, #411 on #515. The tool saw none of them, and two
+    were offered again within hours, #474 to a second contributor while the
+    first still held it and #411 five hours after its holder had accepted.
+
+    So the offer is posted where the tool reads, and only after the ledger says
+    the issue is free and the person holds nothing. A review can still point at
+    it; the offer itself lives on the issue.
+    """
+    if not number.isdigit():
+        raise SystemExit("maintainer: offer needs an issue number")
+    if _gh_mentions("@" + who) != {_login(who)}:
+        raise SystemExit(f"maintainer: {who!r} is not a GitHub handle")
+    text = (text or "").strip()
+    if not text:
+        raise SystemExit("maintainer: offer needs a sentence saying why it fits them")
+    if _gh_mentions(text):
+        raise SystemExit(
+            f"maintainer: the offer names {', '.join('@' + m for m in sorted(_gh_mentions(text)))}.\n"
+            f"            An offer names one person. A comment naming two is the\n"
+            f"            shape `offers` reports as AMBIGUOUS, because nobody can tell\n"
+            f"            from it who holds the issue.")
+    ledger = _offer_ledger()
+    n, me = int(number), _login(who)
+    if ledger["prs"] is None:
+        # Rule 6: could not ask is not permission.
+        raise SystemExit(
+            f"maintainer: could not read the open pull requests, so I cannot tell\n"
+            f"            whether somebody is already fixing #{n}. Not offering it.")
+    if n in ledger["closed_by"]:
+        pr, author = ledger["closed_by"][n]
+        raise SystemExit(f"maintainer: #{n} is not free: PR #{pr} by {author} already closes it.")
+    holding = sorted(w for w, rows in ledger["held"].items() if any(i == n for i, _ in rows))
+    if holding:
+        raise SystemExit(
+            f"maintainer: #{n} is not free: {', '.join('@' + w for w in holding)} already holds it.\n"
+            f"            Release them on #{n} first (`maintainer release`) if that hold is stale.")
+    if n not in ledger["free_nums"]:
+        raise SystemExit(
+            f"maintainer: #{n} is not free to offer: it is closed, reserved, assigned or\n"
+            f"            claimed. `maintainer offers` names what is.")
+    mine = ledger["held"].get(me, [])
+    if mine:
+        raise SystemExit(
+            f"maintainer: {who} already holds {', '.join('#%d' % i for i, _ in mine)}. The rule is one\n"
+            f"            open offer per person, because a second is answered at zero.")
+    body = f"@{who} {text}"
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    if post != "on":
+        print(f"would offer (POST={post or 'off'}): #{n} to {who}")
+        print(f"  body: {body!r}")
+        return
+    _spawn(("gh", "api", "-X", "POST", f"repos/{SLUG}/issues/{n}/comments",
+            "-f", f"body={body}"), cwd=REPO, check=False)
+    got = gh_json("api", f"repos/{SLUG}/issues/{n}/comments", "--jq", "[.[].body]") or []
+    if any(f"@{who}" in b and text in b for b in got):
+        print(f"#{n} offered to {who}")
+        return
+    raise SystemExit(
+        f"maintainer: posted the offer on #{n} and could not read it back. Do not\n"
+        f"            tell {who} it is theirs until a comment on #{n} names them.")
+
+
 def cmd_holders(number: str) -> None:
     """Print who the maintainer has pointed at one issue, one handle per line.
 
@@ -1142,8 +1210,8 @@ def cmd_holders(number: str) -> None:
         print(who)
 
 
-def cmd_offers() -> None:
-    """Who can actually be offered an issue, computed rather than remembered.
+def _offer_ledger() -> dict:
+    """Who holds which open issue, and which are free: the arithmetic `offers` prints.
 
     The rule is one open offer per person, and it exists because it was
     measured: in a batch of thirteen offers, five people received two each and
@@ -1333,6 +1401,25 @@ def cmd_offers() -> None:
     # Naming them, not counting them. A campaign that has to pick issues cannot
     # pick from an integer, so the 2026-09-07 batch picked by hand and offered
     # #267 to a second person while the first still held it.
+    return {
+        "issues": issues, "held": held, "free_nums": sorted(free_nums),
+        "unanswered_on": unanswered_on, "contention_on": contention_on,
+        "ambiguous_on": ambiguous_on, "superseded_on": superseded_on,
+        "closed_by": closed_by, "prs": _prs, "reserved": reserved,
+    }
+
+
+def cmd_offers() -> None:
+    """Print the ledger: what is free, who holds what, and who can take one.
+
+    The derivation lives in `_offer_ledger` so `offer` can refuse a double
+    booking from the same arithmetic this prints, rather than from a copy of it.
+    """
+    ledger = _offer_ledger()
+    issues, held, free_nums = ledger["issues"], ledger["held"], ledger["free_nums"]
+    unanswered_on, contention_on = ledger["unanswered_on"], ledger["contention_on"]
+    ambiguous_on, superseded_on = ledger["ambiguous_on"], ledger["superseded_on"]
+    closed_by, _prs, reserved = ledger["closed_by"], ledger["prs"], ledger["reserved"]
     free_nums.sort()
     print(f"{len(free_nums)} issue(s) free to offer: "
           f"{', '.join('#%d' % n for n in free_nums) or 'none'}")
@@ -2219,6 +2306,8 @@ def main() -> None:
         cmd_assign(sys.argv[2], sys.argv[3])
     elif cmd == "release" and len(sys.argv) == 5:
         cmd_release(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif cmd == "offer" and len(sys.argv) == 5:
+        cmd_offer(sys.argv[2], sys.argv[3], sys.argv[4])
     elif cmd == "holders" and len(sys.argv) == 3:
         cmd_holders(sys.argv[2])
     elif cmd == "offers":

@@ -1639,8 +1639,10 @@ for f, pat in (("bin/maintainer-merge", r'^\s+(receipt|verify|merge|show)\)'),
         cmds.add(f"{tool} {m}")
 docs = "\n".join(p.read_text() for p in
                   [root / "README.md", root / "CONTRIBUTING.md"] + list((root / "docs").rglob("*.md")))
+# Whole words: as a substring, `maintainer offer` was "documented" by every
+# mention of `maintainer offers`, and shipped with no entry of its own.
 missing = sorted(c for c in cmds - internal
-                 if (c if " " in c else f"maintainer {c}") not in docs)
+                 if not re.search(r"\b" + re.escape(c if " " in c else f"maintainer {c}") + r"\b", docs))
 # An internal command must not be advertised where a person is told what to
 # type. Narrative prose legitimately discusses internals: docs/lessons.md
 # explains what `maintainer start` computes, and the first version of this check
@@ -5096,6 +5098,83 @@ grep -qE '^newbie +1' <<<"$out" \
 grep -qE '^veteran ' <<<"$out" \
     && bad "the released handle is still charged with the issue" \
     || ok "and the released handle is not charged with it"
+
+echo "== offer posts on the issue's own thread, and refuses a double booking =="
+# 2026-10-01, sysknife: three offers made in one day lived only in prose on a
+# pull request's thread (#530 on #528, #474 on #514, #411 on #515). `holders`
+# reads the issue's thread, so it saw none of them, and two of the three were
+# offered again to somebody else within hours: #474 to a second contributor
+# while the first still held it, and #411 five hours after its holder had
+# accepted it. An offer has to be written where the tool reads, by the tool
+# that knows who is already holding what.
+offer_gh() {  # $1 = issue list JSON, $2 = #40's comments JSON, $3 = open PRs JSON or "FAIL"
+    rm -f "$ofd/posted40"
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'issue list'*) echo '$1';;
+  *'pr list'*) [ '$3' = FAIL ] && exit 1; echo '$3';;
+  *'-X POST'*issues/40/comments*) printf '%s\n' "\$*" > "$ofd/posted40"; echo '{}';;
+  *issues/40/comments*'[.[].body]'*) [ -f "$ofd/posted40" ] && sed -n 's/.*body=//p' "$ofd/posted40" | python3 -c 'import json,sys;print(json.dumps([sys.stdin.read().strip()]))' || echo '[]';;
+  *issues/40/comments*) echo '$2';;
+  *issues/41/comments*) echo '[{"u":"owner","b":"@cara this one is yours"}]';;
+  *issues/*/comments*) echo '[]';;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+}
+offer() {  # $@ = arguments after `offer`; POST defaults to on
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$ofd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+        MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=of MAINTAINER_POST="${OFFER_POST:-on}" \
+        python3 "$root/bin/maintainer" offer "$@" 2>&1
+}
+free40='[{"number":40,"labels":[],"assignees":[]}]'
+
+offer_gh "$free40" '[]' '[]'
+out=$(offer 40 dana "this one fits what you did on #12."); rc=$?
+if [ "$rc" = 0 ] && grep -q '@dana' "$ofd/posted40" 2>/dev/null && grep -q 'offered to dana' <<<"$out"; then
+    ok "a free issue is offered on its own thread, and the offer is read back"
+else
+    bad "a clean offer did not land on #40 (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-120)"
+fi
+
+offer_gh "$free40" '[{"u":"owner","b":"@ana this one is yours"}]' '[]'
+out=$(offer 40 dana "yours if you want it."); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] && grep -q 'ana' <<<"$out" \
+    && ok "an issue somebody was already offered is refused, naming them" \
+    || bad "a second person was offered an issue already offered to ana (rc=$rc)"
+
+offer_gh '[{"number":40,"labels":[],"assignees":[]},{"number":41,"labels":[],"assignees":[]}]' '[]' '[]'
+out=$(offer 40 cara "yours if you want it."); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] && grep -q '#41' <<<"$out" \
+    && ok "somebody already holding an open offer is not handed a second" \
+    || bad "cara holds #41 and was offered #40 as well (rc=$rc)"
+
+offer_gh "$free40" '[]' '[{"number":77,"author":{"login":"erin"},"title":"fix","body":"Closes #40"}]'
+out=$(offer 40 dana "yours if you want it."); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] && grep -q '#77' <<<"$out" \
+    && ok "an issue an open pull request already closes is refused, naming the PR" \
+    || bad "an issue with an open PR against it was offered (rc=$rc)"
+
+# Rule 6: could not ask is not permission. Unreadable pull requests mean an
+# issue somebody is already fixing cannot be told apart from a free one.
+offer_gh "$free40" '[]' 'FAIL'
+out=$(offer 40 dana "yours if you want it."); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] && grep -q 'could not read the open pull requests' <<<"$out" \
+    && ok "an offer refuses when the open pull requests cannot be read" \
+    || bad "an offer went out without knowing whether somebody had a PR for it (rc=$rc)"
+
+offer_gh "$free40" '[]' '[]'
+out=$(offer 40 dana "you and @erin could pair on it."); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] && grep -q '@erin' <<<"$out" \
+    && ok "an offer that names a second person is refused" \
+    || bad "an offer naming two people went out, which is the AMBIGUOUS shape (rc=$rc)"
+
+offer_gh "$free40" '[]' '[]'
+out=$(OFFER_POST=off offer 40 dana "yours if you want it."); rc=$?
+[ "$rc" = 0 ] && [ ! -f "$ofd/posted40" ] && grep -q 'would offer' <<<"$out" \
+    && ok "with POST off it says what it would post and posts nothing" \
+    || bad "POST=off still posted, or said nothing (rc=$rc)"
 
 echo "== release writes the marker that offers reads =="
 # The marker that retracts an offer has existed since the release/offer
