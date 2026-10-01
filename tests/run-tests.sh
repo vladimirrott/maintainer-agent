@@ -5218,6 +5218,178 @@ grep -qi 'would release' <<<"$out" \
     && ok "and says what it would have posted" \
     || bad "the rehearsal says nothing: $out"
 
+echo "== file-issue --dry-run rehearses even where posting is on =="
+# 2026-10-01, sysknife: I ran `maintainer file-issue --title x` to see what it
+# would do, on a profile with POST=on, and it filed sysknife#542 titled "x" for
+# real. The only rehearsal was POST=off, which is a profile setting, not
+# something a person checking one command reaches for. A dry run has to be a
+# flag on the command, and it has to win over the profile.
+fid="$stub_dir/fileissue"; mkdir -p "$fid"; rm -f "$fid/created"
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'issue create'*) touch "$fid/created"; echo 'https://github.com/o/r/issues/9';;
+  *'issue list'*) echo '[]';;
+  *'api user'*) echo owner;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$fid" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=fiss MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" file-issue --dry-run --title "probe" --body "b" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ ! -f "$fid/created" ] && grep -q 'would file' <<<"$out" \
+    && ok "--dry-run prints what it would file and files nothing, with POST=on" \
+    || bad "--dry-run filed an issue or failed (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-120)"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$fid" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=fiss MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" file-issue --title "probe" --body "b" 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -f "$fid/created" ] \
+    && ok "and without the flag the same call files, so the flag is what stopped it" \
+    || bad "the control case did not file (rc=$rc), so the dry-run assertion proves nothing"
+
+echo "== file-issue refuses when it cannot read the tracker to deduplicate =="
+# Rule 6. `_existing_finding` returned None for an unreadable tracker, which is
+# the answer for "no duplicate", so a gh failure filed the same finding twice.
+rm -f "$fid/created"
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'issue create'*) touch "$fid/created"; echo 'https://github.com/o/r/issues/9';;
+  *'issue list'*) exit 1;;
+  *'api user'*) echo owner;;
+esac
+GHEOF
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$fid" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=fiss MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" file-issue --title "probe" --body "b" 2>&1); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$fid/created" ] && grep -q 'could not read the tracker' <<<"$out" \
+    && ok "an unreadable tracker stops the filing instead of reading as no duplicate" \
+    || bad "file-issue filed without knowing whether the finding was already filed (rc=$rc)"
+
+echo "== offer --second lets the maintainer decide, and still refuses a taken issue =="
+# 2026-10-01: the maintainer asked for half of a 22-issue batch to go to one
+# contributor. The one-offer rule refused, so the offers went out as bare gh
+# comments, which is the thing `offer` exists to stop: no read-back, no label,
+# no check that the issue was free. The rule stays the default. Overriding it
+# is a decision a person makes per call, and the other checks still hold.
+offer_gh '[{"number":40,"labels":[],"assignees":[]},{"number":41,"labels":[],"assignees":[]}]' '[]' '[]'
+out=$(offer 40 cara "yours too, if you want it." --second); rc=$?
+[ "$rc" = 0 ] && grep -q '@cara' "$ofd/posted40" 2>/dev/null \
+    && ok "--second offers a person who already holds one" \
+    || bad "--second did not post (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-120)"
+offer_gh "$free40" '[{"u":"owner","b":"@ana this one is yours"}]' '[]'
+out=$(offer 40 dana "yours if you want it." --second); rc=$?
+[ "$rc" != 0 ] && [ ! -f "$ofd/posted40" ] \
+    && ok "--second does not let an issue somebody else holds be offered" \
+    || bad "--second double-booked #40 over ana (rc=$rc)"
+
+echo "== an offer reserves the issue with the claim label =="
+# GitHub drops an assignee who is not a collaborator and has not posted on the
+# issue, so a fresh issue cannot be assigned to the person it was offered to.
+# The label is the only reservation anybody else sees on the tracker.
+offer_gh "$free40" '[]' '[]'
+cat >> "$stub_dir/gh" <<GHEOF
+GHEOF
+python3 - "$stub_dir/gh" "$ofd" <<'PY'
+import sys
+p, d = sys.argv[1], sys.argv[2]
+s = open(p).read()
+s = s.replace('case "$*" in\n', 'case "$*" in\n  *\'issue edit 40\'*\'--add-label claimed\'*) touch "%s/labelled40"; echo ok;;\n' % d, 1)
+open(p, 'w').write(s)
+PY
+rm -f "$ofd/labelled40"
+out=$(CLAIM_LABEL=claimed offer 40 dana "this one fits what you did on #12."); rc=$?
+[ "$rc" = 0 ] && [ -f "$ofd/labelled40" ] && grep -q 'claimed' <<<"$out" \
+    && ok "the offered issue gets the claim label, and the output says so" \
+    || bad "the offer left the issue unlabelled (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-120)"
+
+echo "== settle assigns an offer once its holder has posted on the issue =="
+# The moment GitHub will accept the assignment is the holder's first comment on
+# that issue. Nothing watched for it, so answered offers sat unassigned and the
+# dashboard showed nobody on them.
+std="$stub_dir/settle"; mkdir -p "$std"; rm -f "$std"/assigned*
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'pr list'*) echo '[]';;
+  *'issue list'*) echo '[{"number":50,"labels":[],"assignees":[]},{"number":51,"labels":[],"assignees":[]},{"number":52,"labels":[],"assignees":[{"login":"gus"}]}]';;
+  *'-X POST'*issues/50/assignees*) touch "$std/assigned50"; echo '{}';;
+  *'-X POST'*issues/51/assignees*) touch "$std/assigned51"; echo '{}';;
+  *'-X POST'*issues/52/assignees*) touch "$std/assigned52"; echo '{}';;
+  *issues/50*'.assignees'*) [ -f "$std/assigned50" ] && echo '["fay"]' || echo '[]';;
+  *issues/50/comments*) echo '[{"u":"owner","b":"@fay this one is yours"},{"u":"fay","b":"on it"}]';;
+  *issues/51/comments*) echo '[{"u":"owner","b":"@hal this one is yours"}]';;
+  *issues/52/comments*) echo '[{"u":"owner","b":"@gus this one is yours"},{"u":"gus","b":"thanks"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$std" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=st MAINTAINER_POST=on \
+      python3 "$root/bin/maintainer" settle 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -f "$std/assigned50" ] && grep -q '#50 assigned to fay' <<<"$out" \
+    && ok "an answered offer is assigned, and read back" \
+    || bad "settle did not assign #50 to fay (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-140)"
+[ ! -f "$std/assigned51" ] \
+    && ok "an unanswered offer is left alone, because GitHub would drop the assignee" \
+    || bad "settle tried to assign an offer nobody answered"
+[ ! -f "$std/assigned52" ] \
+    && ok "an issue already assigned to its holder is not assigned again" \
+    || bad "settle re-assigned an issue that already had its holder"
+
+echo "== stale names holds nobody has touched for N days =="
+# 2026-10-01: three holds were nine or more days old with nothing from their
+# holders (#440 assigned on 09-16, #428 and #433 offered on 09-15), and finding
+# them took a timeline read per issue by hand.
+std2="$stub_dir/stale"; mkdir -p "$std2"
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'pr list'*) echo '[{"number":90,"author":{"login":"ivy"},"title":"fix","body":"Closes #62"}]';;
+  *'issue list'*) echo '[{"number":60,"labels":[],"assignees":[]},{"number":61,"labels":[],"assignees":[]},{"number":62,"labels":[],"assignees":[]}]';;
+  *issues/60/comments*'created_at'*) echo '[{"u":"owner","b":"@jo this one is yours","t":"2026-01-01T00:00:00Z"}]';;
+  *issues/61/comments*'created_at'*) echo '[{"u":"owner","b":"@kim this one is yours","t":"2026-01-01T00:00:00Z"},{"u":"kim","b":"started","t":"2099-01-01T00:00:00Z"}]';;
+  *issues/62/comments*'created_at'*) echo '[{"u":"owner","b":"@ivy this one is yours","t":"2026-01-01T00:00:00Z"}]';;
+  *issues/60/comments*) echo '[{"u":"owner","b":"@jo this one is yours"}]';;
+  *issues/61/comments*) echo '[{"u":"owner","b":"@kim this one is yours"},{"u":"kim","b":"started"}]';;
+  *issues/62/comments*) echo '[{"u":"owner","b":"@ivy this one is yours"}]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$std2" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=st \
+      python3 "$root/bin/maintainer" stale 9 2>&1); rc=$?
+grep -qE 'STALE #60 +jo' <<<"$out" \
+    && ok "an offer untouched for longer than N days is named" \
+    || bad "the untouched hold on #60 was not reported (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-140)"
+grep -q '#61' <<<"$out" \
+    && bad "a holder who posted recently was reported stale" \
+    || ok "a holder who posted since is not stale"
+grep -q '#62' <<<"$out" \
+    && bad "a holder with an open pull request was reported stale" \
+    || ok "a holder with an open pull request is not stale"
+
+echo "== release unassigns the person and lifts the claim label =="
+# #440 on 2026-10-01: the release comment went out, and the assignee and the
+# claimed label stayed until I removed both by hand. A release that leaves the
+# person assigned tells the tracker they still hold it.
+rld="$stub_dir/release"; mkdir -p "$rld"; rm -f "$rld"/*
+cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+case "\$*" in
+  *'-X POST'*issues/70/comments*) printf '%s\n' "\$*" > "$rld/posted"; echo '{}';;
+  *issues/70/comments*'[.[].body]'*) [ -f "$rld/posted" ] && echo '["@lee freeing this. <!-- maintainer: claim-released -->"]' || echo '[]';;
+  *'issue edit 70'*'--remove-assignee lee'*'--remove-label claimed'*) touch "$rld/unassigned"; echo ok;;
+  *issues/70*'.assignees'*) [ -f "$rld/unassigned" ] && echo '[]' || echo '["lee"]';;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$rld" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+      MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=rl MAINTAINER_POST=on CLAIM_LABEL=claimed \
+      python3 "$root/bin/maintainer" release 70 lee "freeing this." 2>&1); rc=$?
+[ "$rc" = 0 ] && [ -f "$rld/unassigned" ] && grep -q 'unassigned' <<<"$out" \
+    && ok "a release of an assigned person unassigns them and removes the claim label" \
+    || bad "the released person is still assigned (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-140)"
+
 echo "== an issue with an open pull request closing it is not free to offer =="
 # The 2026-09-07 20:09 issues run reported it in its own process notes:
 # "`maintainer offers` cannot see pull request threads ... #371 was printed as

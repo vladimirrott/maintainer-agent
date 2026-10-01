@@ -12,6 +12,29 @@ middle digit.
 
 ### Added
 
+- **`maintainer settle` turns answered offers into assignments, and
+  `maintainer stale [days]` names cold holds.** GitHub drops an assignee who is
+  not a collaborator and has not posted on the issue, so the 22 issues filed on
+  sysknife on 2026-10-01 could be offered and not assigned. `settle` assigns each
+  answered offer and reads it back. `stale` replaces the per-issue timeline read
+  that found #440, #428 and #433 nine or more days cold ([lesson 106](docs/lessons.md)).
+- **`maintainer offer` applies the claim label, and takes `--second`.** The
+  label is the reservation other people see while the assignment is impossible.
+  `--second` is the maintainer overriding the one-offer rule per call; on
+  2026-10-01 the rule refused a requested batch and the offers went out as bare
+  `gh` comments with no read-back ([lesson 106](docs/lessons.md)).
+- **`maintainer file-issue --dry-run`.** A rehearsal had to be `POST=off`, a
+  profile setting, and a "what does this do" call on sysknife filed #542 titled
+  "x" ([lesson 105](docs/lessons.md)).
+
+### Fixed
+
+- **`file-issue` stops when it cannot read the tracker.** `_existing_finding`
+  returned `None` for a failed read, which is also the answer for "no
+  duplicate", so a `gh` failure filed the finding twice.
+- **`release` unassigns the person and removes the claim label.** The comment
+  alone left #440 assigned and labelled until both were removed by hand.
+
 - **`maintainer offer <issue> <user> <text>` posts an offer on the issue's own
   thread, and only when nobody holds it.** `holders` and `offers` read an
   issue's thread, and until now an offer was whatever prose the maintainer typed

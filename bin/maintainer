@@ -1111,15 +1111,33 @@ def cmd_release(number: str, who: str, reason: str) -> None:
     got = gh_json("api", f"repos/{SLUG}/issues/{number}/comments",
                   "--jq", "[.[].body]") or []
     if any(RELEASE_MARKER in b and f"@{who}" in b for b in got):
-        print(f"#{number} released from {who}")
-        return
+        # A release that leaves the person assigned tells the tracker they still
+        # hold it. #440 on sysknife 2026-10-01 kept its assignee and its claim
+        # label until both were removed by hand.
+        assignees = gh_json("api", f"repos/{SLUG}/issues/{number}", "--jq", "[.assignees[].login]")
+        if assignees is None:
+            raise SystemExit(f"maintainer: released #{number} from {who}, then could not read its assignees.\n"
+                             f"            Check by hand that {who} is no longer assigned.")
+        if _login(who) not in {_login(a) for a in assignees}:
+            print(f"#{number} released from {who}")
+            return
+        cmd = ["gh", "issue", "edit", number, "--repo", SLUG, "--remove-assignee", who]
+        label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
+        if label:
+            cmd += ["--remove-label", label]
+        _spawn(tuple(cmd), cwd=REPO, check=False)
+        after = gh_json("api", f"repos/{SLUG}/issues/{number}", "--jq", "[.assignees[].login]")
+        if after is not None and _login(who) not in {_login(a) for a in after}:
+            print(f"#{number} released from {who}, and unassigned" + (f" ({label} removed)" if label else ""))
+            return
+        raise SystemExit(f"maintainer: released #{number} in a comment, but {who} is still assigned.")
     raise SystemExit(
         f"maintainer: posted the release on #{number} and could not read it back.\n"
         f"            Until a comment on that issue carries the marker, `offers`\n"
         f"            still counts {who} as holding it.")
 
 
-def cmd_offer(number: str, who: str, text: str) -> None:
+def cmd_offer(number: str, who: str, text: str, second: bool = False) -> None:
     """Offer one issue to one person, on that issue's own thread.
 
     `holders` and `offers` read an issue's own thread, and until this existed an
@@ -1166,7 +1184,14 @@ def cmd_offer(number: str, who: str, text: str) -> None:
             f"maintainer: #{n} is not free to offer: it is closed, reserved, assigned or\n"
             f"            claimed. `maintainer offers` names what is.")
     mine = ledger["held"].get(me, [])
-    if mine:
+    # --second is the maintainer deciding, per call, that this person gets
+    # another. 2026-10-01: half of a 22-issue batch was asked for one
+    # contributor, the rule refused, and the offers went out as bare gh comments
+    # with no read-back and no label. The rule stays the default; the issue-side
+    # checks above hold either way.
+    if mine and second:
+        print(f"note: {who} already holds {', '.join('#%d' % i for i, _ in mine)}; offering a second because you said --second")
+    elif mine:
         raise SystemExit(
             f"maintainer: {who} already holds {', '.join('#%d' % i for i, _ in mine)}. The rule is one\n"
             f"            open offer per person, because a second is answered at zero.")
@@ -1180,11 +1205,106 @@ def cmd_offer(number: str, who: str, text: str) -> None:
             "-f", f"body={body}"), cwd=REPO, check=False)
     got = gh_json("api", f"repos/{SLUG}/issues/{n}/comments", "--jq", "[.[].body]") or []
     if any(f"@{who}" in b and text in b for b in got):
+        # GitHub drops an assignee who is not a collaborator and has not posted
+        # on the issue, so a fresh offer cannot be an assignment. The label is
+        # the reservation everybody else sees; `settle` assigns once they post.
+        label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
+        if label:
+            lp = _spawn(("gh", "issue", "edit", str(n), "--repo", SLUG, "--add-label", label),
+                        cwd=REPO, check=False)
+            if lp.returncode != 0:
+                print(f"#{n} offered to {who}, but the '{label}' label did not apply:"
+                      f" {(lp.stderr or lp.stdout or '').strip()[:160]}")
+                return
+            print(f"#{n} offered to {who} (labelled {label})")
+            return
         print(f"#{n} offered to {who}")
         return
     raise SystemExit(
         f"maintainer: posted the offer on #{n} and could not read it back. Do not\n"
         f"            tell {who} it is theirs until a comment on #{n} names them.")
+
+
+def cmd_settle() -> None:
+    """Assign every answered offer whose holder GitHub will now accept.
+
+    GitHub drops an assignee who is not a collaborator and has not posted on the
+    issue, so an offer on a fresh issue cannot be an assignment. The holder's
+    first comment is the moment it can be, and nothing watched for it: answered
+    offers sat with no assignee, and the tracker showed nobody on them.
+    """
+    ledger = _offer_ledger()
+    assignees_of = {
+        i["number"]: {_login(a.get("login")) for a in (i.get("assignees") or []) if a.get("login")}
+        for i in ledger["issues"]
+    }
+    todo = sorted((n, who) for who, rows in ledger["held"].items()
+                  for n, state in rows
+                  if state == "answered" and who not in assignees_of.get(n, set()))
+    if not todo:
+        print("nothing to settle: every answered offer is already assigned to its holder.")
+        return
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    failed = []
+    for n, who in todo:
+        if post != "on":
+            print(f"would assign (POST={post or 'off'}): #{n} to {who}")
+            continue
+        _spawn(("gh", "api", "-X", "POST", f"repos/{SLUG}/issues/{n}/assignees",
+                "-f", f"assignees[]={who}"), cwd=REPO, check=False)
+        got = gh_json("api", f"repos/{SLUG}/issues/{n}", "--jq", "[.assignees[].login]")
+        if got is not None and who in {_login(x) for x in got}:
+            print(f"#{n} assigned to {who}")
+        else:
+            failed.append((n, who))
+            print(f"#{n} NOT assigned to {who}: GitHub dropped it, or it could not be read back")
+    if failed:
+        raise SystemExit(1)
+
+
+def cmd_stale(days: int) -> None:
+    """Name every hold nobody has touched for `days` days. Read-only.
+
+    A hold is touched by the holder posting on the issue, or by the maintainer
+    mentioning them there; an open pull request by the holder that closes the
+    issue means they are working, whatever the thread says. On sysknife
+    2026-10-01 three holds were nine or more days cold (#440 assigned on 09-16,
+    #428 and #433 offered on 09-15), and finding them took a timeline read per
+    issue by hand.
+    """
+    ledger = _offer_ledger()
+    owner = _owner()
+    now = datetime.now(timezone.utc)
+    cold, undated = [], []
+    for who, rows in sorted(ledger["held"].items()):
+        for n, state in rows:
+            pr = ledger["closed_by"].get(n)
+            if pr and pr[1] == who:
+                continue
+            comments = gh_json("api", f"repos/{SLUG}/issues/{n}/comments",
+                               "--jq", "[.[]|{u:.user.login,b:.body,t:.created_at}]")
+            if comments is None:
+                # Rule 6: an unreadable thread is not a cold one, and not a warm one.
+                raise SystemExit(f"maintainer: could not read #{n}, so I cannot say how cold it is")
+            times = [c["t"] for c in comments
+                     if _login(c["u"]) == who
+                     or (_login(c["u"]) == owner and who in _gh_mentions(c.get("b") or ""))]
+            if not times:
+                undated.append((n, who))
+                continue
+            last = max(datetime.fromisoformat(t.replace("Z", "+00:00")) for t in times)
+            age = (now - last).days
+            if age >= days:
+                cold.append((age, n, who, state))
+    for age, n, who, state in sorted(cold, reverse=True):
+        print(f"STALE #{n:<5} {who:<20} {age}d since anyone touched it ({state})")
+    for n, who in undated:
+        print(f"UNDATED #{n:<5} {who:<20} held by assignment with no comment to date it")
+    if cold:
+        print(f"\n{len(cold)} hold(s) older than {days} days. Free one with:\n"
+              f"  maintainer release <issue> <who> '<a sentence they will read>'")
+    else:
+        print(f"no hold is older than {days} days.")
 
 
 def cmd_holders(number: str) -> None:
@@ -1943,6 +2063,11 @@ def _existing_finding(marker: str):
     """
     issues = gh_json("issue", "list", "--repo", SLUG, "--state", "all",
                      "--limit", "300", "--json", "number,state,title,body")
+    # Rule 6: None is "could not ask", and returning it here read as "no
+    # duplicate", so a gh failure filed the same finding a second time.
+    if issues is None:
+        raise SystemExit("maintainer file-issue: could not read the tracker, so I cannot tell\n"
+                         "            whether this finding is already filed. Nothing was filed.")
     if not issues:
         return None
     for i in issues:
@@ -1960,9 +2085,11 @@ def cmd_file_issue(args: list[str]) -> None:
     """
     title = body = body_file = fp_arg = ""
     labels: list[str] = []
+    dry_run = False
     it = iter(args)
     for a in it:
-        if a == "--title": title = next(it, "")
+        if a == "--dry-run": dry_run = True
+        elif a == "--title": title = next(it, "")
         elif a == "--body": body = next(it, "")
         elif a == "--body-file": body_file = next(it, "")
         elif a == "--fingerprint": fp_arg = next(it, "")
@@ -1993,8 +2120,13 @@ def cmd_file_issue(args: list[str]) -> None:
 
     full_body = body.rstrip() + "\n\n" + marker + "\n"
     post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
-    if post != "on":
-        print(f"would file (POST={post or 'off'}): {title}  [{fp}]")
+    # A flag on the command, because POST is a profile setting and a person
+    # checking what one call does does not go and edit the profile first. On
+    # sysknife 2026-10-01 a "let me see what this does" call filed #542, titled
+    # "x", on a profile with POST=on.
+    if dry_run or post != "on":
+        why = "--dry-run" if dry_run else f"POST={post or 'off'}"
+        print(f"would file ({why}): {title}  [{fp}]")
         for label in labels:
             print(f"  label: {label}")
         print("  rehearsal: nothing was posted.")
@@ -2308,6 +2440,12 @@ def main() -> None:
         cmd_release(sys.argv[2], sys.argv[3], sys.argv[4])
     elif cmd == "offer" and len(sys.argv) == 5:
         cmd_offer(sys.argv[2], sys.argv[3], sys.argv[4])
+    elif cmd == "offer" and len(sys.argv) == 6 and sys.argv[5] == "--second":
+        cmd_offer(sys.argv[2], sys.argv[3], sys.argv[4], second=True)
+    elif cmd == "settle":
+        cmd_settle()
+    elif cmd == "stale" and len(sys.argv) <= 3:
+        cmd_stale(int(sys.argv[2]) if len(sys.argv) == 3 else 9)
     elif cmd == "holders" and len(sys.argv) == 3:
         cmd_holders(sys.argv[2])
     elif cmd == "offers":

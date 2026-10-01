@@ -3110,3 +3110,43 @@ review skill now says the offer itself goes through it. Two of its seven tests
 passed before the command existed, since "refused, nothing posted" is also what a
 usage error looks like, so each refusal asserts its own reason. The same day the
 docs-coverage test passed `offer` as documented because `offers` contains it.
+
+## 105. A rehearsal that lives in the profile is not a rehearsal
+
+I wanted to see what `maintainer file-issue` would do with a body file, so I ran
+it with `--title x`. The sysknife profile posts, so it filed sysknife#542 titled
+"x", and I renamed it seconds later. The tool had a rehearsal mode, `POST=off`,
+and it was the wrong shape: a setting you change in a file before a run, when
+the moment you want a rehearsal is the moment you are about to type one command.
+
+The same read turned up the second defect. Deduplication asked the tracker for
+every issue and treated an empty answer and a failed answer alike, so a `gh`
+failure meant "no duplicate", and the finding was filed again.
+
+**Guard:** `file-issue --dry-run`, tested with `POST=on` and with a control run
+that files, so the test proves the flag stopped it. An unreadable tracker now
+refuses, and a test pins the refusal and that nothing was created.
+
+## 106. An offer is not an assignment until the holder speaks
+
+Twenty-two issues went out on 2026-10-01 with an offer each, and none could be
+assigned: GitHub drops an assignee who is not a collaborator and has not posted
+on that issue, and on a fresh issue nobody has. `maintainer assign` already
+refused to claim it worked. Nothing turned the offer into an assignment later,
+and nothing reserved the issue in the meantime except the comment.
+
+The same batch broke the one-offer rule on request. The maintainer asked for half
+the batch to go to one contributor, `offer` refused, and the offers went out as
+bare `gh api` comments, which skipped the read-back, the label and the free-issue
+checks the command exists for. A rule a person can only get past by leaving the
+tool teaches them to leave the tool.
+
+The sweep for cold holds was the third gap. Finding that #440 had been assigned
+for fifteen days and #428 and #433 offered for sixteen, all silent, took a
+timeline read per issue.
+
+**Guard:** `offer` applies `CLAIM_LABEL` and takes `--second`; `settle` assigns
+each answered offer and reads it back; `stale [days]` names cold holds;
+`release` unassigns and lifts the label. Seven tests, each with the case that
+must be left alone (an unanswered offer, an already-assigned holder, a holder
+who posted recently, one with an open pull request).
