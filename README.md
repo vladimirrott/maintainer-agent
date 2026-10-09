@@ -357,7 +357,7 @@ each one asks you to trust.
 
 ## Where it runs
 
-One machine, five user timers, two profiles, both posting to GitHub as
+One machine, six user timers, two profiles, both posting to GitHub as
 `vladimirrott`.
 
 | Profile | Repository | Tasks | Cadence |
@@ -367,11 +367,13 @@ One machine, five user timers, two profiles, both posting to GitHub as
 | | | `ci` | every 3 days |
 | | | `audit` | every 5 days |
 | `magent` | this repository | `review` | daily |
+| | | `issues` | every 2 days |
 
-`magent` declares an `issues` task too and ships
-`maintainer@magent-issues.timer`, left `disabled`: this repository files its
-own findings through the review task, and a second unattended writer on the
-same small tracker would duplicate them.
+Both `magent` timers are enabled, `maintainer@magent-review.timer` and
+`maintainer@magent-issues.timer`, so this repository's tracker has two
+unattended writers: the review task files its findings through
+`maintainer file-issue`, and the issues task files and places issues on its
+own cadence. `maintainer status` shows each task's last run.
 
 Each profile reviews a checkout it owns under
 `~/.local/state/<profile>-maint/checkout`, cloned from `REPO_ORIGIN` on first
