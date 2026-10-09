@@ -1,4 +1,6 @@
-<img src="assets/logo.svg" width="84" align="right" alt="">
+<p align="center">
+  <img src="assets/logo.svg" width="160" alt="maintainer-agent mark: two bars and a check, drawn in characters">
+</p>
 
 # maintainer-agent
 

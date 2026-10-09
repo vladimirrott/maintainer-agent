@@ -2960,6 +2960,50 @@ for m in bad:
     print("  " + m)
 sys.exit(1 if bad else 0)
 PYEOF
+# assets/README.md promises every pixel that matters sits at least 130px from
+# an edge; GitHub's own template asks for 80. Decode the PNG with zlib alone
+# (same reason as above) and measure where the non-background pixels are.
+python3 - "$root/assets/social-preview.png" <<'PYEOF' && ok "social preview content keeps 130px clear of every edge" || bad "social preview content runs into the area GitHub crops"
+import struct, sys, zlib
+b = open(sys.argv[1], "rb").read()
+w, h, depth, ctype = struct.unpack(">IIBB", b[16:26])
+if depth != 8 or ctype not in (2, 6):
+    print(f"  unexpected PNG format depth={depth} type={ctype}"); sys.exit(1)
+bpp = 3 if ctype == 2 else 4
+idat, i = b"", 8
+while i < len(b):
+    n, kind = struct.unpack(">I4s", b[i:i + 8])
+    if kind == b"IDAT":
+        idat += b[i + 8:i + 8 + n]
+    i += 12 + n
+raw, stride, prev, rows, o = zlib.decompress(idat), w * bpp, bytearray(w * bpp), [], 0
+for _ in range(h):
+    f, line, o = raw[o], bytearray(raw[o + 1:o + 1 + stride]), o + 1 + stride
+    for x in range(stride):
+        a = line[x - bpp] if x >= bpp else 0
+        c = prev[x - bpp] if x >= bpp else 0
+        if f == 1: line[x] = (line[x] + a) & 255
+        elif f == 2: line[x] = (line[x] + prev[x]) & 255
+        elif f == 3: line[x] = (line[x] + (a + prev[x]) // 2) & 255
+        elif f == 4:
+            p = a + prev[x] - c
+            pa, pb, pc = abs(p - a), abs(p - prev[x]), abs(p - c)
+            line[x] = (line[x] + (a if pa <= pb and pa <= pc else prev[x] if pb <= pc else c)) & 255
+    rows.append(line); prev = line
+bg = rows[0][0:3]
+xs, ys = [], []
+for y, row in enumerate(rows):
+    for x in range(w):
+        if max(abs(row[x * bpp + k] - bg[k]) for k in range(3)) > 12:
+            xs.append(x); ys.append(y)
+if not xs:
+    print("  the preview is blank"); sys.exit(1)
+m = 130
+box = (min(xs), min(ys), max(xs), max(ys))
+if box[0] < m or box[1] < m or box[2] > w - 1 - m or box[3] > h - 1 - m:
+    print(f"  content spans x {box[0]}..{box[2]}, y {box[1]}..{box[3]}; wanted inside {m}..{w - 1 - m}, {m}..{h - 1 - m}")
+    sys.exit(1)
+PYEOF
 [ -f "$root/assets/logo.svg" ] && ok "the mark is in the tree" || bad "assets/logo.svg is missing"
 grep -q 'assets/logo.svg' "$root/README.md" && ok "the README shows the mark" || bad "the README does not reference the mark"
 # The PNG is generated from the SVG. If someone edits the PNG alone the two

@@ -14,7 +14,9 @@ the same silhouette.
 
 `social-preview.png` is 1280x640, which is what GitHub recommends (minimum
 640x320, maximum 1MB), cropped to 2:1. Every pixel that matters sits at least
-130px from an edge, well clear of the 50px GitHub warns about.
+130px from an edge, clear of the 80px border in GitHub's
+repository card template. `tests/run-tests.sh` decodes the PNG and fails if
+anything drifts inside that margin.
 
 Setting it is a **web UI step and has no API**: Settings, General, Social
 preview, Upload an image. Regenerate the PNG from the SVG rather than editing it:

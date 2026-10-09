@@ -1,5 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640">
   <rect width="1280" height="640" fill="#14171c"/>
+  <g transform="translate(60 30)">
   <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace" font-size="30.0"
      text-rendering="geometricPrecision">
     <text x="96" y="150.0" fill="#e8e6e1" xml:space="preserve">██ ██            </text>
@@ -20,11 +21,12 @@
     <text x="96" y="364.2" fill="#e0a44c" xml:space="preserve">        ╲╱       </text>
   </g>
   <g font-family="DejaVu Sans Mono, Menlo, Consolas, monospace">
-    <text x="376" y="248" font-size="62" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
-    <text x="380" y="300" font-size="26" fill="#8a919c">an unattended maintainer for one repository</text>
+    <text x="400" y="248" font-size="62" font-weight="bold" fill="#e8e6e1">maintainer-agent</text>
+    <text x="404" y="300" font-size="26" fill="#8a919c">an unattended maintainer for one repository</text>
 
-    <text x="380" y="378" font-size="26" fill="#c96a5f" xml:space="preserve">- merged because the board was green</text>
-    <text x="380" y="416" font-size="26" fill="#7ba86b" xml:space="preserve">+ merged because the guard went red</text>
-    <text x="380" y="454" font-size="26" fill="#7ba86b" xml:space="preserve">+   when I took the fix away</text>
+    <text x="404" y="378" font-size="26" fill="#c96a5f" xml:space="preserve">- merged because the board was green</text>
+    <text x="404" y="416" font-size="26" fill="#7ba86b" xml:space="preserve">+ merged because the guard went red</text>
+    <text x="404" y="454" font-size="26" fill="#7ba86b" xml:space="preserve">+   when I took the fix away</text>
   </g>
+</g>
 </svg>
