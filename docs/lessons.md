@@ -3150,3 +3150,23 @@ each answered offer and reads it back; `stale [days]` names cold holds;
 `release` unassigns and lifts the label. Seven tests, each with the case that
 must be left alone (an unanswered offer, an already-assigned holder, a holder
 who posted recently, one with an open pull request).
+
+## 107. A pin the gate cannot read is a pin a person reads instead
+
+sysknife#577 made `dtolnay/rust-toolchain` the one action allowed to track a
+branch, commented `# stable (branch)`, and made the repository's own verifier
+check that the pinned SHA is reachable from `stable`. The same day Dependabot
+opened #599, a group bump of seven pins. `verify-deps` refused it with "a
+workflow line changed that is not an action pin": the classifier read a pin as
+`# <tag>` with no spaces, so the branch comment did not parse. The receipt was
+written by hand, from a run of the repository's verifier, and an asserted
+receipt is exactly what `verify-deps` exists to replace.
+
+It failed closed, which is the right direction. It also meant every future
+rust-toolchain bump would leave the gate and come back as a person's sentence.
+
+**Guard:** the classifier reports `# <branch> (branch)` pins with
+`"branch": true`, and `verify-deps` asks GitHub's compare of
+`<branch>...<sha>`: `identical` or `behind` passes, `ahead`, `diverged` or no
+answer refuses. Seven tests, two mutations (accept every compare status; drop
+the branch flag), both caught.
