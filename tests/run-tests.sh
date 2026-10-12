@@ -3449,6 +3449,30 @@ grep -q '"verdict": "dependency-bump"' <<<"$vout" \
     && ok "an action pin bump is a dependency bump and reports the pin to verify" \
     || bad "the pin bump was not reported for tag verification: $(tr -d '\n' <<<"$vout" | cut -c1-140)"
 
+# A pin that deliberately tracks a branch carries `# stable (branch)`, which is
+# not a tag, so the classifier used to refuse it as "not an action pin" and
+# every Dependabot group bump that touched dtolnay/rust-toolchain needed a hand
+# receipt (sysknife#599). It is a pin; it has to be reported as a branch pin so
+# the gate checks reachability instead of asking for a tag that does not exist.
+cat > "$dp/branch-pin.patch" <<'PATCH'
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -310,7 +310,7 @@ jobs:
+       - name: Set up Rust
+-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable (branch)
++        uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # stable (branch)
+PATCH
+vout="$(dep_case "$dp/branch-pin.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && grep -q '"branch": true' <<<"$vout" \
+    && grep -q '"tag": "stable"' <<<"$vout" \
+    && ok "a branch-tracking pin bump is a dependency bump reported as a branch pin" \
+    || bad "a '# stable (branch)' pin bump was not reported as a branch pin: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+grep -q '"branch": false' <<<"$(dep_case "$dp/pin.patch")" \
+    && ok "a tag pin is reported as not a branch pin" \
+    || bad "a tag pin carries no branch: false"
+
 cat > "$dp/pin-plus.patch" <<'PATCH'
 diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
 --- a/.github/workflows/ci.yml
@@ -3701,6 +3725,28 @@ if [ "$drc" != 0 ] && grep -q 'pin comment is not true' <<<"$dout" \
 else
     bad "a pin whose comment names the wrong tag earned a receipt (rc=$drc)"
 fi
+
+# A branch pin is true when the pinned commit is on the branch: GitHub's compare
+# of <branch>...<sha> says `identical` or `behind`. `ahead` or `diverged` means
+# the SHA is not on that branch, which is a false comment like any other.
+for st in behind identical; do
+    dout="$(dep_gate "$dp/branch-pin.patch" "$st")"; drc=$?
+    if [ "$drc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] \
+       && grep -q 'reachable from stable' <<<"$dout"; then
+        ok "verify-deps accepts a branch pin GitHub reports as $st"
+    else
+        bad "a branch pin reported $st earned no receipt (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+    fi
+done
+for st in ahead diverged ''; do
+    dout="$(dep_gate "$dp/branch-pin.patch" "$st")"; drc=$?
+    if [ "$drc" != 0 ] && grep -q 'not reachable from stable' <<<"$dout" \
+       && [ ! -f "$dep_state/receipts/9.json" ]; then
+        ok "verify-deps refuses a branch pin GitHub reports as '${st}'"
+    else
+        bad "a branch pin reported '${st}' earned a receipt (rc=$drc)"
+    fi
+done
 dout="$(dep_gate "$dp/code.patch" deadbeef)"; drc=$?
 if [ "$drc" != 0 ] && grep -qi 'not a pure dependency bump' <<<"$dout"; then
     ok "verify-deps sends a diff with source code back to the real gate"

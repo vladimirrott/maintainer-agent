@@ -283,7 +283,7 @@ $(printf '%s' "$verdict" | sed 's/^/    /')"
     pinlines="$(python3 -c '
 import json, sys
 for p in json.load(sys.stdin).get("pins", []):
-    print("\t".join((p["action"], p["sha"], p["tag"])))
+    print("\t".join((p["action"], p["sha"], p["tag"], "branch" if p.get("branch") else "tag")))
 ' <<<"$verdict")" || die "could not read the action pins out of the classifier verdict"
     imagelines="$(python3 -c '
 import json, sys
@@ -295,12 +295,30 @@ for i in json.load(sys.stdin).get("images", []):
     declared_images="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("images",[])))' <<<"$verdict")" \
         || die "could not count the base images the classifier declared"
 
-    local checked=0 action tag pinsha upstream repo
-    while IFS=$'\t' read -r action pinsha tag; do
+    local checked=0 action tag pinsha upstream repo pinkind status
+    while IFS=$'\t' read -r action pinsha tag pinkind; do
         [ -n "$action" ] || continue
         # `owner/repo/sub/dir@sha` is one action inside a repository; the tag
         # belongs to the repository.
         repo="${action%%/*}/$(cut -d/ -f2 <<<"$action")"
+        if [ "$pinkind" = branch ]; then
+            # `# stable (branch)`: the comment names a branch, so the claim is
+            # that the SHA is on it. Compare puts the pin at the head side:
+            # identical or behind means the branch contains it.
+            status="$(gh api "repos/$repo/compare/$tag...$pinsha" --jq .status 2>&1)" || \
+                die "could not ask GitHub whether $repo $pinsha is on $tag, so the pin is unverified:
+
+$(printf '%s' "$status" | sed 's/^/    /')"
+            case "$status" in
+                identical|behind) ;;
+                *) die "the pin comment is not true: $action is pinned to ${pinsha:0:12},
+  which is not reachable from $tag in $repo (compare says '${status}'). A
+  branch pin off its branch is a commit nobody on that branch published." ;;
+            esac
+            say "pin: $action ${pinsha:0:12} is reachable from $tag (GitHub agrees)"
+            checked=$((checked+1))
+            continue
+        fi
         upstream="$(gh api "repos/$repo/commits/$tag" --jq .sha 2>&1)" || \
             die "could not ask GitHub what $repo $tag is, so the pin is unverified:
 

@@ -38,8 +38,13 @@ NPM_REGISTRY = "registry.npmjs.org"
 # An action pinned to a floating tag is the defect this repository's own
 # verify-action-pins.sh exists to catch, so a diff that introduces one is not a
 # routine bump whatever Dependabot titled it.
+#
+# `# stable (branch)` marks a pin that tracks a branch on purpose. Its comment
+# names a branch, not a tag, so the caller proves the SHA is reachable from
+# that branch instead of asking what a tag points at.
 PIN = re.compile(
-    r"^\s*(?:-\s*)?uses:\s*(?P<action>[^@\s]+)@(?P<sha>[0-9a-f]{40})\s*#\s*(?P<tag>\S+)\s*$"
+    r"^\s*(?:-\s*)?uses:\s*(?P<action>[^@\s]+)@(?P<sha>[0-9a-f]{40})\s*#\s*(?P<tag>\S+)"
+    r"(?P<branch>\s+\(branch\))?\s*$"
 )
 
 # Lines a Cargo.lock bump is made of. Anything else in that file is somebody
@@ -240,7 +245,7 @@ def main():
                            text.strip())
                 if sign == "+":
                     pins.append({"action": match["action"], "sha": match["sha"],
-                                 "tag": match["tag"]})
+                                 "tag": match["tag"], "branch": bool(match["branch"])})
 
     json.dump({
         "verdict": "dependency-bump",
