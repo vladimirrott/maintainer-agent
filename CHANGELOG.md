@@ -10,6 +10,33 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-10-19
+
+Two fixes to gates that refused correctly and then told the human the wrong
+thing, or nothing they could act on.
+
+### Fixed
+
+- **A rejected GitHub token is reported as rejected, not as a wrong account.**
+  On a 401, `gh api user` prints GitHub's JSON error body on stdout, and the run
+  gate, the doctor and `maintainer-merge` all read that body as the login. The
+  alert named `'{ "message": "Bad credentials" ... }'` as the account. A 401 now
+  refuses on the first answer with the `gh auth login` fix; other failures keep
+  the retry-then-75 outage path ([lesson 108](docs/lessons.md)).
+- **`verify-deps` verifies branch-tracking action pins.** A pin commented
+  `# stable (branch)` was refused as "not an action pin", so every Dependabot
+  bump touching `dtolnay/rust-toolchain` needed a hand-written receipt
+  (sysknife#599). The gate now asks GitHub's compare whether the SHA is on that
+  branch: identical or behind passes, anything else refuses
+  ([lesson 107](docs/lessons.md)).
+
+### Changed
+
+- **The README mark is centred, and a test keeps the social preview inside its
+  130 px safe zone.** The old preview put content 95 px from an edge while the
+  asset notes claimed 130 px; `run-tests.sh` now decodes the PNG and fails on
+  anything inside the margin.
+
 ## [0.7.0] — 2026-10-01
 
 The tool learning to hand work out the way the tracker actually allows. An

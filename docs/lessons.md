@@ -3170,3 +3170,28 @@ rust-toolchain bump would leave the gate and come back as a person's sentence.
 `<branch>...<sha>`: `identical` or `behind` passes, `ahead`, `diverged` or no
 answer refuses. Seven tests, two mutations (accept every compare status; drop
 the branch flag), both caught.
+
+## 108. A rejected token printed an account name that was a JSON blob
+
+On 2026-10-19 the keyring token for `vladimirrott` stopped working. Every timer
+run refused, which was correct, and the alert read
+
+    gh is authenticated as '{ "message": "Bad credentials", ... }', not vladimirrott
+
+`gh api user --jq .login` prints GitHub's error body on stdout and exits 1 on a
+401. The gate captured stdout with `|| true` and never looked at the exit code,
+so the body became the login and the 401 became a wrong-account refusal. The
+doctor and `maintainer-merge` read the same command the same way. Lesson 66's
+split between "could not ask" and "asked, wrong answer" had a third case it did
+not name: "asked, and GitHub refused the credential".
+
+Each of the three needs a different fix. An outage needs a wait, a wrong account
+needs a switch, and a rejected token needs `gh auth login`. The alert has to
+name the right one, because the person reading it at a desk acts on that line.
+
+**Guard:** stdout counts as a login only on a zero exit. An `HTTP 401` on stderr
+refuses on the first answer, names the token as rejected and gives the
+`gh auth login` command; any other non-zero exit keeps the retry-then-75 outage
+path. Four tests, written first: two failed on the old gate, all four pass now.
+The doctor was then run against the real revoked token and printed
+`GitHub rejects the stored token for vladimirrott (HTTP 401)`.
