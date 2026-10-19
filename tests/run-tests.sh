@@ -248,6 +248,40 @@ PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
 [ "$(wc -l < "$wrong")" = 1 ] \
     && ok "and a wrong account is refused at once, never retried into" \
     || bad "the gate retried a wrong account $(wc -l < "$wrong") times"
+# A third emergency, and the gate reported it as the first. On 2026-10-19 the
+# keyring token for vladimirrott was revoked. `gh api user --jq .login` then
+# prints GitHub's JSON error body on STDOUT and exits 1, and the gate read
+# stdout without the exit code, so the alert said
+#   gh is authenticated as '{ "message": "Bad credentials", ... }', not vladimirrott
+# which names a JSON blob as an account. The fix is a re-login, not a wait and
+# not an account switch, so the alert must say that.
+rejected="$stub_dir/rejected"; rm -f "$rejected"
+cat > "$stub_dir/gh" <<GHSTUB
+#!/bin/sh
+case "\$*" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*)
+      echo x >> "$rejected"
+      printf '{\n  "message": "Bad credentials",\n  "status": "401"\n}'
+      echo 'gh: Bad credentials (HTTP 401)' >&2
+      exit 1 ;;
+esac
+GHSTUB
+chmod +x "$stub_dir/gh"
+out=$(PATH="$stub_dir:$PATH" HOME="$stub_dir" MAINTAINER_SETTINGS="$gate_settings" \
+    MAINTAINER_GH_TRIES=3 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review 2>&1); rc=$?
+[ "$rc" = 1 ] && ok "a rejected token is refused (1), not retried as an outage (75)" \
+    || bad "a rejected token exits $rc"
+grep -q 'Bad credentials\|authenticated as .{' <<<"$out" \
+    && bad "the alert quotes GitHub's error body as if it were a login: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)" \
+    || ok "and the alert does not quote the error body as an account"
+grep -q 'rejected' <<<"$out" && grep -q 'gh auth login' <<<"$out" \
+    && ok "and it says the token was rejected and how to log in again" \
+    || bad "the alert does not name the rejected token or the fix: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+[ "$(wc -l < "$rejected")" = 1 ] \
+    && ok "and a rejected token is asked about once, never retried into" \
+    || bad "the gate asked about a rejected token $(wc -l < "$rejected") times"
 
 
 

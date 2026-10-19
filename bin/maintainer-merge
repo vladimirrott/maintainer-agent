@@ -161,7 +161,9 @@ PYEOF
 
 identity() {
     gh auth switch --hostname github.com --user "$ACCOUNT" >/dev/null 2>&1
-    local who; who="$(gh api user --jq .login 2>/dev/null)"
+    local who rc=0; who="$(gh api user --jq .login 2>/dev/null)" || rc=$?
+    # On a 401 gh prints GitHub's JSON error body on stdout; that is not a login.
+    [ "$rc" -eq 0 ] || die "gh could not confirm an account (gh exited $rc); if the token was rejected, run gh auth login -h github.com as $ACCOUNT"
     # Case-insensitive, as GitHub is: a login differing only in case is the
     # same account, and no two accounts differ only in case, so this refuses
     # exactly the accounts it refused before and no longer refuses the right one.

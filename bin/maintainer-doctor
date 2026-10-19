@@ -135,10 +135,16 @@ head_ "GitHub identity"
 # Lesson 9: the active account changes under you, and a write under the wrong
 # one is worse than a refusal.
 if command -v gh >/dev/null; then
-    who=$(gh api user --jq .login 2>/dev/null)
+    # Only a zero exit makes stdout a login: on a 401 gh prints GitHub's JSON
+    # error body there, and this used to report that body as the account.
+    who_rc=0; who_err=""
+    who=$(gh api user --jq .login 2>/dev/null) || who_rc=$?
+    [ "$who_rc" -ne 0 ] && { who_err="$who"; who=""; }
     want="${GH_ACCOUNT:-}"
     if [ -z "$want" ]; then
         red "the profile names no GH_ACCOUNT" "set it in profile.env; a run refuses to start without one"
+    elif grep -q 'Bad credentials' <<<"$who_err"; then
+        red "GitHub rejects the stored token for $want (HTTP 401)" "gh auth login -h github.com, signed in as $want"
     elif [ "${who,,}" = "${want,,}" ]; then green "gh is $who"
     elif [ -z "$who" ]; then red "gh is not authenticated" "gh auth login"
     else yellow "gh is '$who', not '$want'" "run.sh switches automatically, but check ~/.config/gh/hosts.yml"; fi

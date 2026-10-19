@@ -404,10 +404,29 @@ gh auth switch --hostname github.com --user "$GH_ACCOUNT" >>"$log" 2>&1 || true
 # exists to prevent.
 gh_tries="${MAINTAINER_GH_TRIES:-3}"
 gh_backoff="${MAINTAINER_GH_BACKOFF:-20}"
+#
+# A rejected token is a third case. `gh api user` then prints GitHub's JSON
+# error body on stdout and exits 1, so stdout alone read as a login and the
+# alert named '{ "message": "Bad credentials", ... }' as the account. Only a
+# zero exit makes stdout a login. A 401 needs a re-login, so it is refused on
+# the first answer like a wrong account.
 gh_login=""
 attempt=1
 while :; do
-    gh_login="$(gh api user --jq .login 2>>"$log" || true)"
+    gh_err="$(mktemp)"
+    gh_rc=0
+    gh_login="$(gh api user --jq .login 2>"$gh_err")" || gh_rc=$?
+    cat "$gh_err" >>"$log"
+    if [ "$gh_rc" -ne 0 ]; then
+        if grep -q 'HTTP 401' "$gh_err"; then
+            rm -f "$gh_err"
+            printf '%s\n' "$gh_login" >>"$log"
+            alert "GitHub rejected the stored token for $GH_ACCOUNT (HTTP 401), so nothing ran. Log in again with: gh auth login -h github.com (as $GH_ACCOUNT). See $log"
+            exit 1
+        fi
+        gh_login=""
+    fi
+    rm -f "$gh_err"
     [ -n "$gh_login" ] && break
     [ "$attempt" -ge "$gh_tries" ] && break
     printf 'gh api user gave no answer (try %s of %s); retrying\n' "$attempt" "$gh_tries" >>"$log"
