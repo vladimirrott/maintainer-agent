@@ -169,6 +169,48 @@ elif [ -d "$r/.git" ]; then
     [ "$ahead" = 0 ] && green "not ahead of origin/main" || yellow "$ahead commit(s) ahead of origin/main" "push or reset"
 else red "no repository at $r" "clone it or set REPO_PATH in profile.env"; fi
 
+# Lesson 109: sysknife's main sat red from 10-16 to 10-19 on four rustls
+# advisories, every open pull request inherited the failing required check, and
+# nothing here looked. A run that failed in the last few hours may already have
+# a fix on the way, so only a red latest run older than the grace is an alarm.
+if [ -n "${REPO_SLUG:-}" ] && command -v gh >/dev/null; then
+    grace_h="${MAINTAINER_RED_GRACE_HOURS:-6}"
+    if runs="$(gh run list --repo "$REPO_SLUG" --branch main --event push --limit 40 \
+            --json workflowName,status,conclusion,createdAt,url 2>/dev/null)"; then
+        verdicts="$(GRACE_H="$grace_h" python3 -c '
+import json, os, sys
+from datetime import datetime, timezone
+runs = json.load(sys.stdin)
+if not isinstance(runs, list) or not runs:
+    print("unreadable"); sys.exit()
+latest = {}
+for r in runs:
+    w = r.get("workflowName") or "?"
+    if w not in latest or r["createdAt"] > latest[w]["createdAt"]:
+        latest[w] = r
+now = datetime.now(timezone.utc)
+for w, r in sorted(latest.items()):
+    if r.get("status") != "completed" or r.get("conclusion") != "failure":
+        continue
+    age = (now - datetime.fromisoformat(r["createdAt"].replace("Z", "+00:00"))).total_seconds() / 3600
+    if age >= float(os.environ["GRACE_H"]):
+        url = r.get("url") or ""
+        print("red", w, "%.0f" % age, url, sep="\t")
+' <<<"$runs" 2>/dev/null)" || verdicts="unreadable"
+        if [ "$verdicts" = "unreadable" ]; then
+            yellow "could not read main's workflow runs on $REPO_SLUG, so whether main is red is unknown" "gh run list --repo $REPO_SLUG --branch main"
+        elif [ -z "$verdicts" ]; then
+            green "no workflow on main has been red for ${grace_h}h or more"
+        else
+            while IFS=$'\t' read -r _ w age url; do
+                red "main's latest '$w' run failed ${age}h ago and main has been red since" "read the failing job: $url"
+            done <<<"$verdicts"
+        fi
+    else
+        yellow "could not read main's workflow runs on $REPO_SLUG, so whether main is red is unknown" "gh run list --repo $REPO_SLUG --branch main"
+    fi
+fi
+
 head_ "Scheduler"
 case "$(uname -s)" in
   Linux)

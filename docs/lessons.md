@@ -3195,3 +3195,25 @@ refuses on the first answer, names the token as rejected and gives the
 path. Four tests, written first: two failed on the old gate, all four pass now.
 The doctor was then run against the real revoked token and printed
 `GitHub rejects the stored token for vladimirrott (HTTP 401)`.
+
+## 109. The doctor checked the agent and never the repository it keeps
+
+RustSec published four rustls advisories on 2026-10-14. The next push to
+sysknife's main ran `security-audit` on 10-16 and it went red. Main stayed red
+until 10-19. Over those three days every open pull request (#612, #614, #615)
+showed a failing required check its author had not caused, and one contributor
+bumped rustls inside an unrelated fix to get past it. The timers that would have
+looked were down too, first on the network and then on a revoked token, and the
+doctor checked identity, timers, receipts and images, never the state of `main`.
+
+A red default branch is the repository's emergency, not the agent's, and it is
+the one the people sending pull requests feel first.
+
+**Guard:** the doctor lists the latest push run of each workflow on `main` and
+fails when one has been red for more than `MAINTAINER_RED_GRACE_HOURS` (6). A
+younger failure stays quiet because a fix may already be on its way, and a run
+list it cannot read is a warning that says so, never a pass. Four tests were written
+first. Of three mutations (no grace, oldest run instead of latest, unreadable
+read as green), the third survived: every case either parsed or had `gh` exit
+non-zero, and the mutation sat on the branch where `gh` exits 0 with nothing
+usable. Two more cases (`[]` and non-JSON) now catch it.

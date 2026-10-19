@@ -10,6 +10,15 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`maintainer-doctor` fails when `main` has been red for hours.** sysknife's
+  main sat red for three days on four rustls advisories and nothing in the
+  agent noticed, while every open pull request showed the failing required
+  check. The doctor now reads the latest push run of each workflow on `main`
+  and fails on one red for six hours or more; a run list it cannot read is a
+  warning, not a pass ([lesson 109](docs/lessons.md)).
+
 ## [0.7.1] — 2026-10-19
 
 Two fixes to gates that refused correctly and then told the human the wrong

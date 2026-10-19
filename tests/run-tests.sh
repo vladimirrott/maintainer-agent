@@ -7210,6 +7210,52 @@ grep -q 'does not cover every changed path' "$mg" \
     && ok "an explicitly named suite must still cover the changed paths" \
     || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
 
+echo "== doctor says when the default branch has been red for hours =="
+# 2026-10-19: RustSec published four rustls advisories on 10-14, the next push
+# to sysknife's main turned security-audit red on 10-16, and main stayed red
+# until 10-19. Every open pull request showed a failing required check that was
+# not its author's, and nothing this agent runs said a word: the doctor looked
+# at timers, receipts and identity, never at the repository it maintains.
+rh="$stub_dir/redhome"; rm -rf "$rh"
+mkdir -p "$rh/.local/share/maintainer/profiles/p" "$rh/.local/bin"
+printf 'REPO_SLUG="o/r"\n' > "$rh/.local/share/maintainer/profiles/p/profile.env"
+red_doctor() {  # $1 = conclusion of main's latest ci run, $2 = its age in hours, $3 = gh exit code
+    local created; created="$(date -u -d "-$2 hours" +%Y-%m-%dT%H:%M:%SZ)"
+    make_stub gh "case \"\$*\" in
+        *'run list'*) [ '$3' = 0 ] || { echo 'error connecting to api.github.com' >&2; exit $3; }
+            printf '%s\\n' '[{\"workflowName\":\"ci\",\"status\":\"completed\",\"conclusion\":\"$1\",\"createdAt\":\"$created\",\"url\":\"https://example.test/run/1\"},{\"workflowName\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\",\"createdAt\":\"2020-01-01T00:00:00Z\",\"url\":\"https://example.test/run/0\"}]' ;;
+        *) exit 0 ;;
+    esac"
+    PATH="$stub_dir:$PATH" HOME="$rh" MAINTAINER_PROFILE=p bash "$root/bin/maintainer-doctor" --quick 2>&1
+}
+rout="$(red_doctor failure 70 0)"
+grep -q "main's latest 'ci' run failed" <<<"$rout" && grep -q 'FAIL.*main has been red' <<<"$rout" \
+    && ok "a ci run red for 70 hours is a doctor failure that names the workflow" \
+    || bad "main red for 70 hours reads as healthy: $(grep -i 'red\|main' <<<"$rout" | tr '\n' ' ' | cut -c1-120)"
+rout="$(red_doctor failure 1 0)"
+grep -q 'FAIL.*main has been red' <<<"$rout" \
+    && bad "a run that failed an hour ago is already an alarm; a fix may be on its way" \
+    || ok "a failure younger than the 6-hour grace raises no alarm"
+rout="$(red_doctor success 70 0)"
+grep -q 'FAIL.*main has been red' <<<"$rout" \
+    && bad "a green main is reported red, so the latest run is not the one being read" \
+    || ok "a green latest run is not reported red, even with an older failure behind it"
+rout="$(red_doctor success 1 1)"
+grep -q 'could not read' <<<"$rout" \
+    && ok "when gh cannot list the runs, doctor says it could not ask instead of passing" \
+    || bad "an unreadable run list reads as a healthy main: $(grep -i 'main\|run' <<<"$rout" | tr '\n' ' ' | cut -c1-120)"
+# gh answering 0 with nothing usable is the other way not to know. The mutation
+# that turned this branch green survived the cases above, because each of them
+# either parsed or had gh exit non-zero.
+for body in '[]' 'not json'; do
+    make_stub gh "case \"\$*\" in *'run list'*) printf '%s\\n' '$body' ;; *) exit 0 ;; esac"
+    rout="$(PATH="$stub_dir:$PATH" HOME="$rh" MAINTAINER_PROFILE=p bash "$root/bin/maintainer-doctor" --quick 2>&1)"
+    grep -q 'could not read' <<<"$rout" && ! grep -q 'no workflow on main has been red' <<<"$rout" \
+        && ok "a run list of '$body' is reported as unreadable, not as a green main" \
+        || bad "a run list of '$body' reads as a healthy main"
+done
+rm -f "$stub_dir/gh"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
