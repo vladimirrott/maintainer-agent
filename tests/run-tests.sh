@@ -4,6 +4,11 @@
 # Everything here tests a REFUSAL. This agent's safety comes from what it
 # declines to do, so those are the paths worth pinning.
 set -uo pipefail
+# A git hook runs this suite with GIT_INDEX_FILE, GIT_DIR and friends set for
+# the commit in progress. Every scratch repository below would inherit them and
+# write into the caller's index (lesson 110), so none of them survive this line.
+# shellcheck disable=SC2046  # the names are git's own fixed list, one per word
+unset $(git rev-parse --local-env-vars)
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 # Clear anything a run exports before measuring anything.
@@ -7209,6 +7214,20 @@ echo "== naming a suite does not skip the coverage check =="
 grep -q 'does not cover every changed path' "$mg" \
     && ok "an explicitly named suite must still cover the changed paths" \
     || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
+
+echo "== the suite never writes into the index of the commit that runs it =="
+# 2026-10-21: `git commit -a` runs pre-commit with GIT_INDEX_FILE pointing at a
+# temporary index for the commit in progress. This suite inherited it, and its
+# scratch repositories' `git add -A -f` wrote their files into that index. The
+# lint sweep after it then saw "0 scripts" and failed closed, which is the only
+# reason a commit of scratch content did not go through.
+leaked=""
+for v in $(git rev-parse --local-env-vars); do
+    [ -n "${!v+x}" ] && leaked="$leaked $v"
+done
+[ -z "$leaked" ] \
+    && ok "no per-repository git variable reaches the cases (git rev-parse --local-env-vars)" \
+    || bad "the cases inherit$leaked, so their scratch repos write into the caller's repository"
 
 echo "== doctor says when the default branch has been red for hours =="
 # 2026-10-19: RustSec published four rustls advisories on 10-14, the next push
