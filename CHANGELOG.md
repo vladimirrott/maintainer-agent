@@ -10,6 +10,11 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-10-21
+
+The doctor now watches the repository it maintains, and the test suite stops
+writing into the index of the commit that runs it.
+
 ### Added
 
 - **`maintainer-doctor` fails when `main` has been red for hours.** sysknife's
@@ -18,6 +23,15 @@ middle digit.
   check. The doctor now reads the latest push run of each workflow on `main`
   and fails on one red for six hours or more; a run list it cannot read is a
   warning, not a pass ([lesson 109](docs/lessons.md)).
+
+### Fixed
+
+- **The test suite no longer writes into the index of the commit running it.**
+  Under `git commit -a`, the pre-commit hook carries `GIT_INDEX_FILE` for the
+  commit in progress, and the suite's scratch repositories added their fixture
+  files to it. The shellcheck sweep then saw no scripts and refused the commit.
+  The suite now unsets git's per-repository variables before any case runs
+  ([lesson 110](docs/lessons.md)).
 
 ## [0.7.1] — 2026-10-19
 

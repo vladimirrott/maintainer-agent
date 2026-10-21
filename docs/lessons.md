@@ -3217,3 +3217,24 @@ first. Of three mutations (no grace, oldest run instead of latest, unreadable
 read as green), the third survived: every case either parsed or had `gh` exit
 non-zero, and the mutation sat on the branch where `gh` exits 0 with nothing
 usable. Two more cases (`[]` and non-JSON) now catch it.
+
+## 110. The test suite wrote into the index of the commit that was running it
+
+Cutting v0.7.2 with `git commit -a`, the pre-commit hook failed twice over: two
+suite cases that had passed all week went red, and the shellcheck sweep after
+them reported "checking 0 scripts". For `-a`, git runs the hook with
+`GIT_INDEX_FILE` pointing at a temporary index holding the commit being made.
+The suite inherited it, and every scratch repository it builds ran
+`git add -A -f` into that index, replacing the commit's content with fixture
+files. The sweep, reading the same index, found no scripts and failed closed.
+That refusal is the only reason a commit of scratch fixtures did not go through.
+
+Earlier commits passed because they used `git add` and a plain `git commit`,
+which leaves `GIT_INDEX_FILE` unset. The same suite, the same hook, and a
+different flag decided whether the gate was safe.
+
+**Guard:** the suite unsets every name in `git rev-parse --local-env-vars`
+before anything else. A case asserts none of them reach the tests. Proof, run
+with `GIT_INDEX_FILE` aimed at a copy of the real index: before the fix 3 cases
+failed (the two above and the new one); after it all 1005 pass and the copy's
+sha256 is unchanged.
