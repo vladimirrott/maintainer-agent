@@ -33,6 +33,13 @@ SuccessExitStatus=75
 # finished, and because it held the profile lock the whole time, the 12:20
 # issues run then timed out waiting. Reviews of this repository grew; the
 # ceiling had not.
+#
+# LOCK_WAIT (lib/defaults.env, 3600) is deliberately SHORTER than this. A run
+# waiting for the shared lock spends this same budget, so a wait as long as the
+# budget would be killed by systemd before it could start. The cost is that a
+# run behind a three-hour review gives up after an hour, records an exit-75
+# failure, and the catch-up slot retries it. tests/run-tests.sh fails if
+# LOCK_WAIT ever reaches this figure.
 TimeoutStartSec=10800
 
 # --- Containment -----------------------------------------------------------

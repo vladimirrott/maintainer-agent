@@ -98,6 +98,25 @@ def deployed_version() -> dict:
     return out
 
 
+def _load_defaults() -> dict:
+    """Every tunable's default, from lib/defaults.env, or refuse.
+
+    The file is plain KEY=value, so one regex reads what bash sources. There is
+    no built-in fallback: a missing file stops the tool, because a default
+    written here as well would be a second home for the same number.
+    """
+    here = Path(os.path.realpath(__file__)).parent.parent
+    for c in (here / "lib/defaults.env",
+              Path.home() / ".local/share/maintainer/defaults.env"):
+        if c.is_file():
+            return dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(\S+)$", c.read_text(), re.M))
+    raise SystemExit("maintainer: lib/defaults.env not found, so no tunable has a value.\n"
+                     "            Run ./install.sh from the repository.")
+
+
+DEFAULTS = _load_defaults()
+
+
 def _profile_env(profile: str = PROFILE) -> dict:
     """Source the deployed profile.env and read its values back.
 
@@ -118,7 +137,7 @@ def _profile_env(profile: str = PROFILE) -> dict:
     # key this file reads out of _ENV against this tuple.
     keys = ("REPO_PATH", "REPO_SLUG", "STATE_DIR", "TASKS", "POST", "GH_ACCOUNT",
             "MAINTAINER_NAME", "REQUIRED_COMMANDS", "CLAIM_LABEL",
-            "CLAIM_STALE_DAYS", "RETENTION_DAYS")
+            "CLAIM_STALE_DAYS", "RETENTION_DAYS") + tuple(DEFAULTS)
     # The path goes in as an ARGUMENT, never interpolated into the script. The
     # key names are a literal tuple in this file, so they are the only thing
     # that reaches the command text.
@@ -150,6 +169,20 @@ _ENV = _profile_env()
 
 def _setting(env_key: str, profile_key: str, default: str) -> str:
     return os.environ.get(env_key) or _ENV.get(profile_key) or default
+
+
+def _tunable(key: str) -> str:
+    """A key of lib/defaults.env: MAINTAINER_<key> > profile.env > the default."""
+    return _setting(f"MAINTAINER_{key}", key, DEFAULTS[key])
+
+
+def _tunable_int(key: str) -> int:
+    v = _tunable(key)
+    try:
+        return int(v)
+    except ValueError:
+        raise SystemExit(f"maintainer: {key} must be a whole number, got {v!r}. "
+                         f"Fix MAINTAINER_{key} or {key} in profile.env.")
 
 
 # No fallback names a person or a repository. A tool that guesses which project
@@ -291,6 +324,24 @@ def gh_json(*args: str):
         return None
 
 
+def gh_list(*args: str):
+    """A gh list that must be complete, or None when it could not be read.
+
+    Asks for GH_LIST_LIMIT rows and refuses a listing exactly that long: gh
+    cuts silently at --limit, and a roster that lost its tail reads as "nobody
+    else is available" or "no duplicate". Raise MAINTAINER_GH_LIST_LIMIT, which
+    is a decision about cost, rather than let the tool guess.
+    """
+    n = _tunable_int("GH_LIST_LIMIT")
+    rows = gh_json(*args, "--limit", str(n))
+    if isinstance(rows, list) and len(rows) >= n:
+        raise SystemExit(f"maintainer: `gh {' '.join(args[:2])}` returned exactly {n} rows, "
+                         f"so the list may be cut off and\n"
+                         f"            anything past it would be treated as absent. "
+                         f"Raise MAINTAINER_GH_LIST_LIMIT and run it again.")
+    return rows
+
+
 def refresh() -> tuple[str, str, list[str], list[str]]:
     """Fast-forward main and fetch every open PR head. Returns (before, after, commits, notes)."""
     notes: list[str] = []
@@ -332,7 +383,7 @@ def refresh() -> tuple[str, str, list[str], list[str]]:
         # was filtered when read from the PR list and raw when read from the log.
         commits = [safe_for_prompt(ln, 120) for ln in log.splitlines() if ln]
 
-    prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
+    prs = gh_list("pr", "list", "--state", "open",
                   "--json", "number,headRefOid,updatedAt,title,author")
     if prs is None:
         notes.append("gh unavailable: PR heads not fetched, deltas below are git-only")
@@ -345,9 +396,9 @@ def refresh() -> tuple[str, str, list[str], list[str]]:
 
 
 def snapshot(main_sha: str) -> dict:
-    prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
+    prs = gh_list("pr", "list", "--state", "open",
                   "--json", "number,headRefOid,updatedAt,title,author") or []
-    issues = gh_json("issue", "list", "--state", "open", "--limit", "200",
+    issues = gh_list("issue", "list", "--state", "open",
                      "--json", "number,updatedAt,title,labels") or []
     baseline = None
     art = REPO / "tests/evidence/workspace-tests.json"
@@ -757,8 +808,7 @@ def cmd_gc(dry: bool) -> None:
     --uninstall` already refuses to delete them. A retention policy that can
     erase the evidence of a post is not a retention policy.
     """
-    days = _ENV.get("RETENTION_DAYS", "").strip()
-    days = int(days) if days.isdigit() else 90
+    days = _tunable_int("RETENTION_DAYS")
     cutoff = datetime.now().timestamp() - days * 86400
     freed, kept, n = 0, 0, 0
     for base in (LOGS, DRAFTS):
@@ -814,7 +864,7 @@ def _open_prs():
     """
     global _OPEN_PRS
     if _OPEN_PRS is None:
-        _OPEN_PRS = gh_json("pr", "list", "--state", "open", "--limit", "100",
+        _OPEN_PRS = gh_list("pr", "list", "--state", "open",
                             "--json", "number,author,body,title")
         if _OPEN_PRS is None:
             _OPEN_PRS = "unreadable"
@@ -831,7 +881,11 @@ def _past_contributors():
     Bots and the maintainer are dropped. Dependabot has more merged pull
     requests here than any human and cannot be offered an issue.
     """
-    rows = gh_json("pr", "list", "--state", "merged", "--limit", "300",
+    # A window, not a roster: CONTRIBUTOR_WINDOW is the most recent merged pull
+    # requests, and a repository with more of them fills it by design, so this
+    # one does not refuse at the limit the way gh_list does.
+    rows = gh_json("pr", "list", "--state", "merged",
+                   "--limit", str(_tunable_int("CONTRIBUTOR_WINDOW")),
                    "--json", "author,mergedAt")
     if rows is None:
         return None
@@ -948,15 +1002,14 @@ def cmd_claims() -> None:
     if not label:
         print("maintainer: this profile declares no CLAIM_LABEL, so it tracks no claims")
         return
-    issues = gh_json("issue", "list", "--state", "open", "--label", label,
-                     "--limit", "100", "--json",
-                     "number,title,assignees,updatedAt,labels")
+    issues = gh_list("issue", "list", "--state", "open", "--label", label,
+                     "--json", "number,title,assignees,updatedAt,labels")
     if issues is None:
         raise SystemExit("maintainer: could not read the tracker")
     if not issues:
         print(f"no open issue carries '{label}'")
         return
-    stale_days = int(_setting("CLAIM_STALE_DAYS", "CLAIM_STALE_DAYS", "7") or 7)
+    stale_days = _tunable_int("CLAIM_STALE_DAYS")
     print(f"{'issue':7} {'who':22} {'idle':>6}  state")
     # An OFFER and a CLAIM are not the same thing, and this used to print both
     # as "NOT assigned, so it is invisible to their dashboard" with an assign
@@ -1348,7 +1401,7 @@ def _offer_ledger() -> dict:
     second mention distinguishes neither.
     """
     label = _setting("CLAIM_LABEL", "CLAIM_LABEL", "").strip()
-    issues = gh_json("issue", "list", "--state", "open", "--limit", "100",
+    issues = gh_list("issue", "list", "--state", "open",
                      "--json", "number,labels,assignees")
     if issues is None:
         raise SystemExit("maintainer: could not read the tracker")
@@ -2059,10 +2112,11 @@ def _existing_finding(marker: str):
 
     Reads and greps rather than `--search`, because GitHub's search index lags a
     fresh issue by seconds to minutes and dedup that misses a just-filed issue is
-    no dedup at all. A tracker this size fits in one page.
+    no dedup at all. gh_list refuses a listing that fills GH_LIST_LIMIT, so a
+    tracker that outgrew the limit stops this instead of missing a duplicate.
     """
-    issues = gh_json("issue", "list", "--repo", SLUG, "--state", "all",
-                     "--limit", "300", "--json", "number,state,title,body")
+    issues = gh_list("issue", "list", "--repo", SLUG, "--state", "all",
+                     "--json", "number,state,title,body")
     # Rule 6: None is "could not ask", and returning it here read as "no
     # duplicate", so a gh failure filed the same finding a second time.
     if issues is None:
@@ -2445,7 +2499,7 @@ def main() -> None:
     elif cmd == "settle":
         cmd_settle()
     elif cmd == "stale" and len(sys.argv) <= 3:
-        cmd_stale(int(sys.argv[2]) if len(sys.argv) == 3 else 9)
+        cmd_stale(int(sys.argv[2]) if len(sys.argv) == 3 else _tunable_int("STALE_HOLD_DAYS"))
     elif cmd == "holders" and len(sys.argv) == 3:
         cmd_holders(sys.argv[2])
     elif cmd == "offers":

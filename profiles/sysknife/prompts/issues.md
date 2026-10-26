@@ -65,8 +65,9 @@ Invoke the `sysknife-issues` skill and follow it. Read
 6. Read `references/twir.md`. If a This Week in Rust CfP submission is due, say so
    in the report with the three issues you would list and why. **Do not open that
    PR**; it goes to another organisation's repository and Vladimir files it.
-7. **Run `maintainer stale 9` and `maintainer settle` every run.** `stale` names
-   holds nobody has touched for nine days; free each with `maintainer release`,
+7. **Run `maintainer stale` and `maintainer settle` every run.** `stale` names
+   holds nobody has touched for the profile's window (`STALE_HOLD_DAYS`, nine
+   days by default); free each with `maintainer release`,
    which also unassigns and lifts the claim label. `settle` assigns every offer
    whose holder has posted since, the first moment GitHub accepts it.
 

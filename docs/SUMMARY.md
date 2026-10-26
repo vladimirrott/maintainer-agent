@@ -13,6 +13,7 @@
 # Running it
 
 - [Command reference](cli.md)
+- [Configuration](configuration.md)
 - [Deploying it](deploy/README.md)
 - [Going public](going-public.md)
 

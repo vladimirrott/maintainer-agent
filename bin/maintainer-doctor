@@ -38,6 +38,16 @@ if [ -z "$profile" ]; then
     fi
 fi
 quick=0; [ "${1:-}" = "--quick" ] && quick=1
+# Thresholds come from lib/defaults.env, then the profile, then MAINTAINER_<KEY>,
+# the same order every other tool uses. Sourced here, ahead of every check, so
+# a check cannot read a number before it has been resolved.
+# shellcheck disable=SC1090,SC1091
+. "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/../lib/profile.sh" 2>/dev/null \
+  || . "$share/profile.sh" || { echo "maintainer-doctor: cannot find profile.sh" >&2; exit 64; }
+maintainer_load_defaults || exit 64
+# shellcheck disable=SC1090,SC1091
+[ -f "$share/profiles/$profile/profile.env" ] && . "$share/profiles/$profile/profile.env"
+maintainer_apply_overrides
 ok=0; warn=0; err=0
 
 green()  { printf '  \033[32mok\033[0m    %s\n' "$1"; ok=$((ok+1)); }
@@ -79,8 +89,8 @@ elif [ ! -f "$pdir/deny.json" ]; then
 elif [ -f "$pdir/settings.json" ]; then
     n=$(python3 -c "import json;print(len(json.load(open('$pdir/settings.json'))['permissions']['deny']))" 2>/dev/null)
     if [ -z "$n" ]; then red "deny wall is not valid JSON" "reinstall"
-    elif [ "$n" -lt 100 ]; then
-        red "deny wall has only $n rules; it is stale" "rm -rf $share && ./install.sh"
+    elif [ "$n" -lt "$DENY_WALL_MIN_RULES" ]; then
+        red "deny wall has only $n rules, under the floor of $DENY_WALL_MIN_RULES; it is stale" "rm -rf $share && ./install.sh"
     else green "deny wall generated, $n rules"; fi
     grep -q '__HOME__' "$pdir/settings.json" && red "unrendered __HOME__ left in the deny wall" "reinstall"
     # Measured: a single leading slash anchors to the settings directory, not to
@@ -107,8 +117,6 @@ if [ -d "$share/profiles/_template" ]; then
 fi
 
 head_ "Backend"
-# shellcheck disable=SC1091
-[ -f "$pdir/profile.env" ] && . "$pdir/profile.env"
 b="${BACKEND:-claude}"
 if [ -f "$share/backends/$b.sh" ]; then green "backend '$b' installed"; else
     red "backend '$b' not installed" "./install.sh"; fi
@@ -174,8 +182,8 @@ else red "no repository at $r" "clone it or set REPO_PATH in profile.env"; fi
 # nothing here looked. A run that failed in the last few hours may already have
 # a fix on the way, so only a red latest run older than the grace is an alarm.
 if [ -n "${REPO_SLUG:-}" ] && command -v gh >/dev/null; then
-    grace_h="${MAINTAINER_RED_GRACE_HOURS:-6}"
-    if runs="$(gh run list --repo "$REPO_SLUG" --branch main --event push --limit 40 \
+    grace_h="$RED_GRACE_HOURS"
+    if runs="$(gh run list --repo "$REPO_SLUG" --branch main --event push --limit "$DOCTOR_RUN_LIMIT" \
             --json workflowName,status,conclusion,createdAt,url 2>/dev/null)"; then
         verdicts="$(GRACE_H="$grace_h" python3 -c '
 import json, os, sys

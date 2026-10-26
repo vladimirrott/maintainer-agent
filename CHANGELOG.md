@@ -10,6 +10,47 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`lib/defaults.env`: one home for every tunable.** Defaults were literals
+  scattered through `bin/` and `lib/`, some written twice (container memory in
+  two `podman run` calls, the stale window in the code and in a prompt). Each
+  now has one value and one comment, read by bash through
+  `maintainer_load_defaults` and by the python tools through `_tunable()`.
+  Precedence is `MAINTAINER_<KEY>` in the environment, then a suite's own
+  declaration (`suite_memory`, `suite_cpus`, `suite_pids`, `suite_tmpfs`), then
+  `profile.env`, then the default. New keys: `VERIFY_MEMORY`, `VERIFY_CPUS`,
+  `VERIFY_PIDS`, `VERIFY_TMPFS`, `VERIFY_TIMEOUT`, `PREFETCH_TIMEOUT`,
+  `MCP_VERIFY_SLACK`, `STALE_HOLD_DAYS`, `GH_LIST_LIMIT`, `CONTRIBUTOR_WINDOW`,
+  `GH_TRIES`, `GH_BACKOFF`, `DOCTOR_RUN_LIMIT`, `DENY_WALL_MIN_RULES`,
+  `OPENCODE_MODEL`; `LOCK_WAIT`, `RETENTION_DAYS`, `CLAIM_STALE_DAYS` and
+  `RED_GRACE_HOURS` moved in. See [docs/configuration.md](docs/configuration.md).
+- **`maintainer` refuses a listing that fills its limit.** gh cuts a list
+  silently at `--limit`, so a roster past the limit lost its tail and read as
+  "nobody else is available" or "no duplicate". `claims`, `offers`, `holders`,
+  `file-issue` and the run snapshot now ask for `GH_LIST_LIMIT` rows (1000) and
+  stop, naming `MAINTAINER_GH_LIST_LIMIT`, when a listing comes back exactly
+  that long. The merged-PR contributor scan stays a window.
+
+### Changed
+
+- **The sysknife rust suite verifies in 6g, not 2g.** 2g OOM-killed rustc twice
+  on 2026-10-25, in an interactive verify and in the 21:14 timer run, which had
+  to retry with `MAINTAINER_CARGO_JOBS=2`. The suite declares `suite_memory`
+  (6g) beside `suite_jobs` (4), and a test fails when memory in gigabytes is
+  below the job count. Other suites keep the 2g default.
+- **The MCP `maintainer_verify` deadline is derived, not 2400 s.** 2400 is
+  shorter than a legitimate verify (clean run, mutated run and dependency fetch
+  can use 1800 + 1800 + 900). It is now `2 x VERIFY_TIMEOUT + PREFETCH_TIMEOUT +
+  MCP_VERIFY_SLACK`.
+- **`CLAIM_STALE_DAYS` is `MAINTAINER_CLAIM_STALE_DAYS` in the environment**,
+  like every other key. The unprefixed spelling was read by one command and
+  documented nowhere.
+- **`LOCK_WAIT` and `RETENTION_DAYS` are no longer copied into every
+  `profile.env`.** A profile that declares nothing gets the default. A test
+  fails if `LOCK_WAIT` reaches the systemd unit's `TimeoutStartSec`, because a
+  run waiting for the lock spends that budget and would be killed first.
+
 ## [0.7.2] — 2026-10-21
 
 The doctor now watches the repository it maintains, and the test suite stops

@@ -9,7 +9,41 @@
 #
 # Order: what run.sh exported, then the deployed profile, then refuse. There is
 # no fallback that names a person.
+# Where lib/defaults.env lives: beside this file in a checkout, in the share
+# directory once installed. There is no built-in fallback, so a tool that cannot
+# find it stops instead of running on numbers nobody chose.
+maintainer_defaults_path() {
+    local here; here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local c
+    for c in "$here/defaults.env" "$HOME/.local/share/maintainer/defaults.env"; do
+        [ -f "$c" ] && { printf '%s' "$c"; return 0; }
+    done
+    return 1
+}
+
+# Source the defaults, then let a profile.env override them (the caller sources
+# that), then apply MAINTAINER_<KEY> from the environment. Call this twice, with
+# the profile in between: maintainer_load_defaults, . profile.env,
+# maintainer_apply_overrides.
+maintainer_load_defaults() {
+    local f; f="$(maintainer_defaults_path)" || {
+        printf 'maintainer: lib/defaults.env not found, so no tunable has a value. Run ./install.sh.\n' >&2
+        return 1; }
+    # shellcheck disable=SC1090
+    . "$f"
+}
+
+maintainer_apply_overrides() {
+    local f k ev; f="$(maintainer_defaults_path)" || return 1
+    while IFS= read -r k; do
+        ev="MAINTAINER_$k"
+        [ -n "${!ev:-}" ] && printf -v "$k" '%s' "${!ev}"
+    done < <(sed -n 's/^\([A-Z][A-Z0-9_]*\)=.*/\1/p' "$f")
+    return 0
+}
+
 maintainer_load_profile() {
+    maintainer_load_defaults || return 1
     # run.sh exports these, and they win: a tool called from inside a run acts
     # on that run's repository and nothing else.
     #
@@ -22,6 +56,11 @@ maintainer_load_profile() {
     # set up a MORE complete environment than production provides.
     if [ -n "${MAINTAINER_SLUG:-}" ] && [ -n "${MAINTAINER_REPO:-}" ] \
        && [ -n "${MAINTAINER_ACCOUNT:-}" ] && [ -n "${MAINTAINER_STATE:-}" ]; then
+        # The tunables are not exported by run.sh, only the five names above, so
+        # read the profile the run came from. It is the file run.sh sourced.
+        # shellcheck disable=SC1091
+        [ -f "${PROFILE_DIR:-/nonexistent}/profile.env" ] && . "$PROFILE_DIR/profile.env"
+        maintainer_apply_overrides
         return 0
     fi
 
@@ -53,6 +92,7 @@ maintainer_load_profile() {
     fi
     # shellcheck disable=SC1090
     . "$env_file"
+    maintainer_apply_overrides
     MAINTAINER_SLUG="${MAINTAINER_SLUG:-$REPO_SLUG}"
     MAINTAINER_REPO="${MAINTAINER_REPO:-$REPO_PATH}"
     MAINTAINER_STATE="${MAINTAINER_STATE:-$STATE_DIR}"

@@ -818,6 +818,18 @@ first_failure_line() {  # $1 = log -> one line, at most 200 characters
     printf '%s' "$hit" | cut -c1-200
 }
 
+# One verify resource, by key. Precedence: MAINTAINER_<KEY> in the environment,
+# then the suite's own declaration (a verify.d file may define suite_memory,
+# suite_cpus, suite_pids, suite_tmpfs), then profile.env, then lib/defaults.env.
+# The suite sits above the profile on purpose: it knows what its own build
+# needs, and a profile-wide figure would tax every suite for the sake of one.
+verify_limit() {  # $1 = key in lib/defaults.env, $2 = the suite function that may override it
+    local key="$1" fn="$2" ev="MAINTAINER_$1" v
+    v="${!ev:-}"
+    if [ -z "$v" ] && declare -F "$fn" >/dev/null; then v="$("$fn")"; fi
+    printf '%s' "${v:-${!key:?lib/defaults.env was not loaded}}"
+}
+
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     pr="$(pr_or_die "$pr")" || exit 1
@@ -970,15 +982,15 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
         # --network=none, which are the isolation that actually holds.
         # shellcheck disable=SC2046
         "$rt" --log-level=error run --rm \
-            --timeout "${MAINTAINER_VERIFY_TIMEOUT:-1800}" \
+            --timeout "$VERIFY_TIMEOUT" \
             --network=none \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --read-only \
-            --tmpfs /tmp:rw,nosuid,size=256m \
-            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
-            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
-            --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
+            --tmpfs "/tmp:rw,nosuid,size=$(verify_limit VERIFY_TMPFS suite_tmpfs)" \
+            --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
+            --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
+            --cpus "$(verify_limit VERIFY_CPUS suite_cpus)" \
             -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
@@ -1011,13 +1023,13 @@ $(printf '%s' "$gmsg" | sed 's/^/    /')"
         say "fetching what the lockfile pins (network, no build scripts, --locked)"
         # shellcheck disable=SC2046
         "$rt" --log-level=error run --rm \
-            --timeout "${MAINTAINER_PREFETCH_TIMEOUT:-900}" \
+            --timeout "$PREFETCH_TIMEOUT" \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --read-only \
-            --tmpfs /tmp:rw,nosuid,size=256m \
-            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
-            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
+            --tmpfs "/tmp:rw,nosuid,size=$(verify_limit VERIFY_TMPFS suite_tmpfs)" \
+            --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
+            --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
             -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_prefetch_command)" >"$work/prefetch.log" 2>&1 \

@@ -23,6 +23,7 @@ interpolated. A pull request number is an integer or the call is refused.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -49,6 +50,52 @@ def run(cmd: list[str], timeout: int = 900) -> dict:
     except FileNotFoundError:
         return {"exit_code": 127, "stdout": "",
                 "stderr": f"{cmd[0]} is not installed; run ./install.sh"}
+
+
+def _defaults() -> dict:
+    """lib/defaults.env, or refuse. The same file and regex bin/maintainer reads."""
+    here = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    for base in (here, os.path.join(HOME, ".local/share/maintainer")):
+        for rel in ("lib/defaults.env", "defaults.env"):
+            path = os.path.join(base, rel)
+            if os.path.isfile(path):
+                with open(path) as f:
+                    return dict(re.findall(r"^([A-Z][A-Z0-9_]*)=(\S+)$", f.read(), re.M))
+    raise SystemExit("maintainer-mcp: lib/defaults.env not found. Run ./install.sh.")
+
+
+def _tunable_int(key: str, profile: str | None) -> int:
+    """MAINTAINER_<key> > the deployed profile.env's `KEY=value` line > the default.
+
+    The profile is read with a line match, not sourced: this server only needs
+    the plain numbers a profile may override, and sourcing a file the server
+    does not own is more than that needs.
+    """
+    v = os.environ.get(f"MAINTAINER_{key}")
+    if not v:
+        name = profile or os.environ.get("MAINTAINER_PROFILE")
+        if not name:
+            found = sorted(glob.glob(os.path.join(HOME, ".local/share/maintainer/profiles/*/profile.env")))
+            name = os.path.basename(os.path.dirname(found[0])) if len(found) == 1 else None
+        path = os.path.join(HOME, ".local/share/maintainer/profiles", name or "", "profile.env")
+        if name and SAFE_NAME.match(name) and os.path.isfile(path):
+            with open(path) as f:
+                m = re.search(rf"^{key}=([0-9]+)\s*(?:#.*)?$", f.read(), re.M)
+            v = m.group(1) if m else None
+    return int(v or _defaults()[key])
+
+
+def verify_deadline(profile: str | None) -> int:
+    """Seconds one verify call may take: both container runs, the fetch, and slack.
+
+    This was the literal 2400, shorter than a legitimate verify (the clean run,
+    the mutated run and the dependency fetch can use 1800 + 1800 + 900), so a
+    long verify was cut off by the server it was running under. Derived from
+    the settings that bound the containers, so the two cannot drift apart.
+    """
+    return (2 * _tunable_int("VERIFY_TIMEOUT", profile)
+            + _tunable_int("PREFETCH_TIMEOUT", profile)
+            + _tunable_int("MCP_VERIFY_SLACK", profile))
 
 
 def profile_env(profile: str | None) -> dict:
@@ -156,7 +203,8 @@ def call_tool(name: str, args: dict) -> dict:
             if not SAFE_NAME.match(str(args["suite"])):
                 raise ValueError("suite must be a plain name")
             argv.append(str(args["suite"]))
-        p = subprocess.run(argv, capture_output=True, text=True, env=env, timeout=2400)
+        p = subprocess.run(argv, capture_output=True, text=True, env=env,
+                           timeout=verify_deadline(_profile(args)))
         return {"exit_code": p.returncode, "stdout": p.stdout, "stderr": p.stderr}
     if name == "maintainer_merge":
         pr = _pr(args)

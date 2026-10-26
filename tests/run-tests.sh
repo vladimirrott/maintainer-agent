@@ -1588,7 +1588,7 @@ echo "== the installed layout resolves, not just the repo layout =="
 # in the repo (lib/run.sh) and wrong once installed beside them. The unit exited
 # 64 and the timer logged nothing, because a file-existence check is not a start.
 lay="$stub_dir/layout"; mkdir -p "$lay/profiles/sysknife/prompts"
-cp "$root/lib/run.sh" "$lay/run.sh"; cp "$root/lib/profile.sh" "$lay/profile.sh"
+cp "$root/lib/run.sh" "$lay/run.sh"; cp "$root/lib/profile.sh" "$lay/profile.sh"; cp "$root/lib/defaults.env" "$lay/defaults.env"
 cp -r "$root/lib/backends" "$lay/backends"
 cp "$root/profiles/sysknife/profile.env" "$lay/profiles/sysknife/"
 make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo nobody; exit 0;; esac"
@@ -1818,7 +1818,7 @@ done
 # gap: run.sh named maintainer_scrub_secret, never sourced the file defining it,
 # and the exit-path token scrub silently did nothing for the whole life of the
 # trap. Nothing here compared what run.sh loads against what install.sh ships.
-for f in profile.sh preamble-core.md prose-style.md failure-shapes.json; do
+for f in profile.sh preamble-core.md prose-style.md failure-shapes.json defaults.env; do
     [ -e "$ih/.local/share/maintainer/$f" ] && ok "$f deployed, and run.sh loads it" \
         || bad "run.sh loads $f and install.sh never deployed it"
 done
@@ -2481,7 +2481,7 @@ echo "== the doctrine is not optional =="
 # evidence rule. A run assembled without it is an unattended agent with none of
 # them, so its absence must stop the run rather than shorten the prompt.
 lay2="$stub_dir/nodoctrine"; mkdir -p "$lay2/profiles/sysknife/prompts"
-cp "$root/lib/run.sh" "$lay2/run.sh"; cp "$root/lib/profile.sh" "$lay2/profile.sh"
+cp "$root/lib/run.sh" "$lay2/run.sh"; cp "$root/lib/profile.sh" "$lay2/profile.sh"; cp "$root/lib/defaults.env" "$lay2/defaults.env"
 cp -r "$root/lib/backends" "$lay2/backends"
 cp "$root/profiles/sysknife/profile.env" "$lay2/profiles/sysknife/"
 cp "$root/profiles/sysknife/prompts/"*.md "$lay2/profiles/sysknife/prompts/"
@@ -2832,7 +2832,7 @@ MAINTAINER_IN_RUN="other/review" PATH="$stub_dir:$PATH" \
 
 # What the backend actually receives, measured by running one.
 envh="$stub_dir/envrun"; mkdir -p "$envh/backends" "$envh/profiles/envp/prompts" "$envh/bin"
-cp "$root/lib/run.sh" "$envh/run.sh"; cp "$root/lib/profile.sh" "$envh/profile.sh"
+cp "$root/lib/run.sh" "$envh/run.sh"; cp "$root/lib/profile.sh" "$envh/profile.sh"; cp "$root/lib/defaults.env" "$envh/defaults.env"
 cp "$root/lib/preamble-core.md" "$root/lib/prose-style.md" "$envh/"
 cat > "$envh/backends/envdump.sh" <<'BACKEND'
 backend_name() { printf 'envdump'; }
@@ -3092,6 +3092,7 @@ for p in alpha beta; do
         "$p" "$p" "$p" > "$two/.local/share/maintainer/profiles/$p/profile.env"
 done
 cp "$root/lib/profile.sh" "$two/.local/share/maintainer/profile.sh"
+cp "$root/lib/defaults.env" "$two/.local/share/maintainer/defaults.env"
 out=$(env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_PROFILE -u MAINTAINER_STATE \
           -u MAINTAINER_ACCOUNT HOME="$two" bash "$root/bin/maintainer-repo" release-check 2>&1)
 grep -q '2 profiles are deployed' <<<"$out" \
@@ -3989,13 +3990,13 @@ echo "== the verify container can run a script the test itself wrote =="
 # the PR can already execute whatever it likes. What noexec removes is the
 # ordinary write-a-stub-and-run-it pattern that both this repo's suite and
 # sysknife's use.
-grep -q 'tmpfs /tmp' "$root/bin/maintainer-merge" \
+grep -q 'tmpfs "\?/tmp' "$root/bin/maintainer-merge" \
     && ok "the verify container gives the suite a writable /tmp" \
     || bad "no tmpfs for /tmp, so a test that needs scratch space cannot run"
-grep -qE 'tmpfs /tmp:[^"]*noexec' "$root/bin/maintainer-merge" \
+grep -qE 'tmpfs "?/tmp:[^"]*noexec' "$root/bin/maintainer-merge" \
     && bad "/tmp is mounted noexec, so a test that writes and runs a stub reports the contributor as failing" \
     || ok "/tmp is executable, so a stub the test wrote can run"
-grep -qE 'tmpfs /tmp:[^"]*nosuid' "$root/bin/maintainer-merge" \
+grep -qE 'tmpfs "?/tmp:[^"]*nosuid' "$root/bin/maintainer-merge" \
     && ok "and /tmp is still nosuid" \
     || bad "nosuid was dropped along with noexec"
 for _f in --cap-drop=ALL --security-opt=no-new-privileges --read-only --network=none; do
@@ -6479,7 +6480,7 @@ broken_read_refuses "*'issue view'*comments*"     "comment list"
 # absent here is `maintainer`, not everything.
 nohelp="$stub_dir/nohelperroot"; rm -rf "$nohelp"; mkdir -p "$nohelp/bin" "$nohelp/lib"
 cp "$mg" "$nohelp/bin/maintainer-merge"
-cp "$root/lib/profile.sh" "$nohelp/lib/profile.sh"
+cp "$root/lib/profile.sh" "$nohelp/lib/profile.sh"; cp "$root/lib/defaults.env" "$nohelp/lib/defaults.env"
 cl_gh 0 claimant
 out="$(PATH="$stub_dir:/usr/bin:/bin" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
@@ -6780,11 +6781,10 @@ gcrun >/dev/null 2>&1
 [ -f "$gcd/runs/report.md" ] \
     && ok "runs/ is never pruned: it records what was published in your name" \
     || bad "gc DELETED A RUN REPORT, which is the record of what was posted"
-for pe in "$root"/profiles/*/profile.env; do
-    pn="$(basename "$(dirname "$pe")")"
-    grep -q '^RETENTION_DAYS=' "$pe" && ok "$pn declares a retention window" \
-        || bad "$pn has no RETENTION_DAYS, so gc falls back to a default nobody chose"
-done
+# The default is chosen once, in lib/defaults.env, and a profile that declares
+# nothing gets it. A profile may still override it.
+grep -q '^RETENTION_DAYS=' "$root/lib/defaults.env" && ok "gc's retention window has a declared default" \
+    || bad "no RETENTION_DAYS in lib/defaults.env, so gc falls back to a default nobody chose"
 
 echo "== a task that fans out declares the model its subagents get =="
 # A review fans out across files and dimensions. Running that on the main
@@ -7275,6 +7275,347 @@ for body in '[]' 'not json'; do
         && ok "a run list of '$body' is reported as unreadable, not as a green main" \
         || bad "a run list of '$body' reads as a healthy main"
 done
+rm -f "$stub_dir/gh"
+
+echo "== every tunable has one home: env var > profile.env > lib/defaults.env =="
+# The defaults were literals scattered through bin/ and lib/, some written twice.
+# 2g of container memory OOM-killed rustc twice on 2026-10-25, and the fix was a
+# different number in three places. One file now holds every default with a
+# comment, bin/ and lib/ read it, and a suite may declare its own resources.
+dflt="$root/lib/defaults.env"
+[ -f "$dflt" ] && ok "lib/defaults.env exists" || bad "there is no lib/defaults.env"
+dget() { sed -n "s/^$1=//p" "$dflt" | head -1; }
+# Plain KEY=value so bash can source it and python can parse it with one regex,
+# and a comment line above every key so a default is never a bare number.
+python3 - "$dflt" <<'PYEOF' && ok "every default is a plain KEY=value with a comment above it" \
+    || bad "lib/defaults.env has a line that is not KEY=value, or a key with no comment"
+import re, sys
+lines = open(sys.argv[1]).read().splitlines()
+bad = []
+for i, ln in enumerate(lines):
+    if not ln.strip() or ln.startswith("#"):
+        continue
+    if not re.fullmatch(r"[A-Z][A-Z0-9_]*=[^\s\"'$`]+", ln):
+        bad.append(f"line {i+1}: {ln!r}")
+    elif i == 0 or not lines[i-1].startswith("#"):
+        bad.append(f"line {i+1}: no comment above {ln.split('=')[0]}")
+sys.exit("; ".join(bad) if bad else 0)
+PYEOF
+# No numeric default may be written inline in a tool again.
+lits="$(grep -nE '\$\{MAINTAINER_[A-Z_]+:-[1-9]|size=[0-9]+m|--limit "[0-9]+"|--limit [0-9]+ ' \
+    "$root"/bin/* "$root"/lib/*.sh "$root"/lib/backends/* 2>/dev/null | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true)"
+[ -z "$lits" ] && ok "bin/ and lib/ carry no inline numeric default" \
+    || bad "a default is written inline again: $(printf '%s' "$lits" | head -3 | tr '\n' ' ' | cut -c1-200)"
+
+# Behaviour: drive `maintainer-merge verify` against a podman stub that records
+# its argv, so the flags a real container would get are the thing under test.
+tvh="$stub_dir/tunhome"; rm -rf "$tvh"
+tvp="$tvh/.local/share/maintainer/profiles/tv"
+mkdir -p "$tvp/verify.d" "$tvh/.local/bin"
+printf 'REPO_SLUG="o/r"\nGH_ACCOUNT="testuser"\nPOST="off"\nSTATE_DIR="%s/state"\n' "$tvh" > "$tvp/profile.env"
+cat > "$tvp/verify.d/s.sh" <<'SUITE'
+# shellcheck shell=bash
+suite_covers() { case "$1" in *.txt) return 0 ;; esac; return 1; }
+suite_mutate_glob() { printf '*.txt'; }
+suite_image() { printf 'img:x'; }
+suite_command() { printf 'true'; }
+suite_ran() { printf 1; }
+suite_prefetch_command() { printf 'true'; }
+SUITE
+tvrepo="$stub_dir/tunrepo"; rm -rf "$tvrepo"; mkdir -p "$tvrepo"
+git -C "$tvrepo" init -q -b main
+git -C "$tvrepo" config user.email t@t; git -C "$tvrepo" config user.name t
+printf 'x\n' > "$tvrepo/thing.txt"; git -C "$tvrepo" add -A; git -C "$tvrepo" commit -qm base
+tvhead="$(git -C "$tvrepo" rev-parse HEAD)"
+git -C "$tvrepo" update-ref refs/pull/9/head "$tvhead"; git -C "$tvrepo" remote add origin "$tvrepo"
+printf 'REPO_PATH="%s"\n' "$tvrepo" >> "$tvp/profile.env"
+make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *'pr view'*'files'*) echo 'thing.txt';;
+    esac"
+make_stub podman 'printf "%s\n" "$@" >> "$TUN_ARGS"; printf -- "--END--\n" >> "$TUN_ARGS"; exit 0'
+export TUN_ARGS="$stub_dir/tun.args"
+# The suite exports MAINTAINER_STATE/ACCOUNT/SLUG/REPO from line ~1279 on, which
+# would send the gate down its "called from inside a run" branch. Unset them, so
+# the deployed profile is what this reads, and pass them back for the in-run case.
+tun_verify() {  # env assignments as arguments; leaves the recorded argv in $TUN_ARGS
+    : > "$TUN_ARGS"; rm -rf "$tvh/state"
+    env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_ACCOUNT -u MAINTAINER_STATE \
+        PATH="$stub_dir:$PATH" HOME="$tvh" MAINTAINER_PROFILE=tv PROD_GLOBS="thing.txt" "$@" \
+        bash "$root/bin/maintainer-merge" verify 9 "$tvhead" f 's/x/y/' >"$TUN_ARGS.out" 2>&1
+}
+# The value after each occurrence of a flag, one per container run, as "3x 6g".
+tun_flag() {  # $1 = flag
+    awk -v k="$1" 'p{print; p=0} $0==k{p=1}' "$TUN_ARGS" | sort | uniq -c | sed 's/^ *\([0-9]*\) /\1x /' | paste -sd';'
+}
+tun_verify
+runs="$(grep -c '^--memory$' "$TUN_ARGS")"
+[ "$runs" = 3 ] && ok "the harness reaches all three container runs (fetch, clean, mutated)" \
+    || bad "the podman stub saw $runs container run(s), not 3, so the cases below are vacuous: $(tr '\n' ' ' < "$TUN_ARGS.out" | cut -c1-200)"
+for pair in "memory:VERIFY_MEMORY" "cpus:VERIFY_CPUS" "pids-limit:VERIFY_PIDS" "timeout:VERIFY_TIMEOUT"; do
+    flag="${pair%%:*}"; key="${pair##*:}"; want="$(dget "$key")"
+    [ -n "$want" ] || { bad "lib/defaults.env has no $key"; continue; }
+    got="$(tun_flag "--$flag")"
+    case "$flag" in
+        cpus) [ "$got" = "2x $want" ] ;;                       # clean and mutated only
+        timeout) [ "$got" = "2x $want;1x $(dget PREFETCH_TIMEOUT)" ] ;;
+        *) [ "$got" = "3x $want" ] ;;
+    esac && ok "with nothing set, --$flag is the default from lib/defaults.env ($want)" \
+          || bad "--$flag is '$got', not the default $want from lib/defaults.env"
+done
+grep -qx -- "--tmpfs" "$TUN_ARGS" \
+    && [ "$(grep -c "^/tmp:rw,nosuid,size=$(dget VERIFY_TMPFS)\$" "$TUN_ARGS")" = 3 ] \
+    && ok "and the /tmp tmpfs size comes from VERIFY_TMPFS" \
+    || bad "the tmpfs size is not read from lib/defaults.env"
+
+printf 'VERIFY_PIDS=77\n' >> "$tvp/profile.env"
+tun_verify
+[ "$(tun_flag --pids-limit)" = "3x 77" ] && ok "profile.env beats lib/defaults.env" \
+    || bad "profile.env VERIFY_PIDS=77 did not reach the container: $(tun_flag --pids-limit)"
+tun_verify MAINTAINER_VERIFY_PIDS=33
+[ "$(tun_flag --pids-limit)" = "3x 33" ] && ok "and an env var beats profile.env" \
+    || bad "MAINTAINER_VERIFY_PIDS=33 lost to the profile: $(tun_flag --pids-limit)"
+# Every numeric key reaches its own flag. Values differ from the defaults and
+# from each other, so a call site that still writes a literal cannot hide.
+printf 'VERIFY_CPUS=3\nVERIFY_TIMEOUT=111\nPREFETCH_TIMEOUT=22\nVERIFY_TMPFS=64m\n' >> "$tvp/profile.env"
+tun_verify
+[ "$(tun_flag --cpus)" = "2x 3" ] && ok "profile VERIFY_CPUS reaches --cpus" || bad "--cpus ignored the profile: $(tun_flag --cpus)"
+[ "$(tun_flag --timeout)" = "2x 111;1x 22" ] \
+    && ok "profile VERIFY_TIMEOUT and PREFETCH_TIMEOUT reach their containers" \
+    || bad "--timeout ignored the profile: $(tun_flag --timeout)"
+[ "$(grep -c '^/tmp:rw,nosuid,size=64m$' "$TUN_ARGS")" = 3 ] && ok "profile VERIFY_TMPFS reaches --tmpfs" \
+    || bad "--tmpfs ignored the profile"
+tun_verify MAINTAINER_VERIFY_TIMEOUT=55 MAINTAINER_PREFETCH_TIMEOUT=44
+[ "$(tun_flag --timeout)" = "1x 44;2x 55" ] && ok "and MAINTAINER_VERIFY_TIMEOUT, MAINTAINER_PREFETCH_TIMEOUT beat the profile" \
+    || bad "the env timeouts lost to the profile: $(tun_flag --timeout)"
+sed -i '/^VERIFY_\(CPUS\|TIMEOUT\|TMPFS\)=/d;/^PREFETCH_TIMEOUT=/d' "$tvp/profile.env"
+
+# A suite declares what ITS build needs. The rust suite wants 6g and the docs
+# suite wants nothing, and raising the default for both would tax every suite.
+printf 'suite_memory() { printf 6g; }\n' >> "$tvp/verify.d/s.sh"
+tun_verify
+[ "$(tun_flag --memory)" = "3x 6g" ] && ok "a suite's suite_memory reaches the fetch, the clean run and the mutated run" \
+    || bad "suite_memory is not what the containers got: $(tun_flag --memory)"
+printf 'VERIFY_MEMORY=4g\n' >> "$tvp/profile.env"
+tun_verify
+[ "$(tun_flag --memory)" = "3x 6g" ] && ok "the suite is more specific than profile.env, so it wins" \
+    || bad "profile.env VERIFY_MEMORY overrode the suite's own figure: $(tun_flag --memory)"
+tun_verify MAINTAINER_VERIFY_MEMORY=3g
+[ "$(tun_flag --memory)" = "3x 3g" ] && ok "and MAINTAINER_VERIFY_MEMORY beats the suite" \
+    || bad "the env override lost to the suite: $(tun_flag --memory)"
+# Called from inside a run, run.sh has exported the identity and not the
+# tunables, so the gate reads the profile the run came from (PROFILE_DIR).
+printf 'POST="off"\nVERIFY_PIDS=77\n' > "$tvp/profile.env"
+tun_verify MAINTAINER_SLUG=o/r MAINTAINER_REPO="$tvrepo" MAINTAINER_ACCOUNT=testuser \
+    MAINTAINER_STATE="$tvh/state" PROFILE_DIR="$tvp"
+[ "$(tun_flag --pids-limit)" = "3x 77" ] && ok "a gate called from inside a run still reads the profile's tunables" \
+    || bad "inside a run, the profile's VERIFY_PIDS=77 was lost: $(tun_flag --pids-limit)"
+rm -f "$stub_dir/podman" "$stub_dir/gh"
+
+# The python tools read the same file through _setting().
+echo "== the python tools resolve the same three tiers =="
+gch="$stub_dir/gchome"; rm -rf "$gch"; mkdir -p "$gch/.local/share/maintainer/profiles/gp" "$gch/state/logs"
+: > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+gcdays() { env HOME="$gch" MAINTAINER_PROFILE=gp MAINTAINER_STATE="$gch/state" MAINTAINER_SLUG=o/r \
+    MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t "$@" python3 "$root/bin/maintainer" gc --dry-run 2>&1 \
+    | sed -n 's/.*older than \([0-9]*\) days.*/\1/p'; }
+[ "$(gcdays)" = "$(dget RETENTION_DAYS)" ] && ok "gc's window defaults to RETENTION_DAYS in lib/defaults.env" \
+    || bad "gc used '$(gcdays)' days, not the default $(dget RETENTION_DAYS)"
+printf 'RETENTION_DAYS=45\n' > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+[ "$(gcdays)" = 45 ] && ok "profile.env beats the default for a python tool" \
+    || bad "profile RETENTION_DAYS=45 was ignored: '$(gcdays)'"
+[ "$(gcdays MAINTAINER_RETENTION_DAYS=12)" = 12 ] && ok "and MAINTAINER_RETENTION_DAYS beats the profile" \
+    || bad "the env override was ignored: '$(gcdays MAINTAINER_RETENTION_DAYS=12)'"
+
+# A listing that comes back exactly as long as its limit may have been cut off,
+# and a roster missing people reads as "nobody else is available".
+echo "== a list that fills its limit is refused, not believed =="
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+# `issue list` answers with as many rows as --limit asks for, less $LIST_SHORT.
+printf '%s\n' "$*" >> "$LIST_LOG"
+case "$*" in
+  *'issue list'*) n=0
+      while [ $# -gt 0 ]; do [ "$1" = --limit ] && n="$2"; shift; done
+      n=$((n - ${LIST_SHORT:-0}))
+      python3 -c 'import json,sys; print(json.dumps([{"number":i+1,"labels":[],"assignees":[]} for i in range(int(sys.argv[1]))]))' "$n" ;;
+  *'pr list'*) echo '[]' ;;
+  *'/comments'*) echo '[]' ;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+export LIST_LOG="$stub_dir/list.log"
+list_offers() { : > "$LIST_LOG"
+    env PATH="$stub_dir:$PATH" HOME="$gch" MAINTAINER_STATE="$gch/state" MAINTAINER_SLUG=o/r \
+        MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=gp "$@" \
+        python3 "$root/bin/maintainer" offers 2>&1; }
+out="$(list_offers MAINTAINER_GH_LIST_LIMIT=4 LIST_SHORT=1)"; rc=$?
+grep -q -- '--limit 4' "$LIST_LOG" && ok "MAINTAINER_GH_LIST_LIMIT reaches gh as --limit" \
+    || bad "gh was not asked for the configured limit: $(head -2 "$LIST_LOG" | tr '\n' ' ')"
+grep -q 'issue(s) free to offer' <<<"$out" && ok "a listing shorter than its limit is used" \
+    || bad "a listing of limit-1 rows was refused: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(list_offers MAINTAINER_GH_LIST_LIMIT=4)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'may be cut off' <<<"$out" && grep -q 'MAINTAINER_GH_LIST_LIMIT' <<<"$out" \
+    && ok "a listing exactly as long as its limit is refused, naming the setting to raise" \
+    || bad "a full page was believed (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+rm -f "$stub_dir/gh"
+# The stale window has a default of its own, declared where the others are, and
+# the prompt no longer carries a second copy of it.
+list_stale() { : > "$LIST_LOG"
+    env PATH="$stub_dir:$PATH" HOME="$gch" MAINTAINER_STATE="$gch/state" MAINTAINER_SLUG=o/r \
+        MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=gp \
+        MAINTAINER_GH_LIST_LIMIT=3 LIST_SHORT=1 python3 "$root/bin/maintainer" stale 2>&1; }
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$LIST_LOG"
+case "$*" in
+  *'issue list'*) n=0
+      while [ $# -gt 0 ]; do [ "$1" = --limit ] && n="$2"; shift; done
+      python3 -c 'import json,sys; print(json.dumps([{"number":i+1,"labels":[],"assignees":[]} for i in range(int(sys.argv[1])-1)]))' "$n" ;;
+  *) echo '[]' ;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+: > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+grep -q "older than $(dget STALE_HOLD_DAYS) days" <<<"$(list_stale)" \
+    && ok "'maintainer stale' with no argument uses STALE_HOLD_DAYS" \
+    || bad "stale's default window is not STALE_HOLD_DAYS ($(dget STALE_HOLD_DAYS)): $(list_stale | tr '\n' ' ' | cut -c1-100)"
+printf 'STALE_HOLD_DAYS=21\n' > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+grep -q 'older than 21 days' <<<"$(list_stale)" \
+    && ok "and a profile can change it" || bad "profile STALE_HOLD_DAYS=21 was ignored"
+rm -f "$stub_dir/gh"
+grep -q 'maintainer stale 9' "$root"/profiles/*/prompts/*.md \
+    && bad "a prompt still hard-codes the stale window" \
+    || ok "no prompt hard-codes the stale window"
+
+# memory and jobs move together: a rustc holds about a gigabyte while it links.
+python3 - "$root/profiles/sysknife/verify.d/rust.sh" <<'PYEOF' \
+    && ok "the rust suite's memory (GB) covers its cargo jobs, one gigabyte each" \
+    || bad "the rust suite declares fewer gigabytes than cargo jobs, which is the OOM it was raised to fix"
+import re, subprocess, sys
+def call(fn):
+    return subprocess.run(["bash", "-c", f'. "$1"; {fn}', "_", sys.argv[1]],
+                          capture_output=True, text=True, check=True).stdout.strip()
+mem, jobs = call("suite_memory"), int(call("suite_jobs"))
+m = re.fullmatch(r"(\d+)g", mem)
+sys.exit(0 if m and int(m.group(1)) >= jobs else f"suite_memory={mem} suite_jobs={jobs}")
+PYEOF
+
+# LOCK_WAIT sits inside systemd's start budget, so it must stay below it.
+tsec="$(sed -n 's/^TimeoutStartSec=//p' "$root/platform/linux/maintainer@.service")"
+[ -n "$tsec" ] && [ "$(dget LOCK_WAIT)" -lt "$tsec" ] \
+    && ok "LOCK_WAIT ($(dget LOCK_WAIT)s) is below the unit's TimeoutStartSec (${tsec}s)" \
+    || bad "LOCK_WAIT=$(dget LOCK_WAIT) is not below TimeoutStartSec=$tsec: a waiting run would be killed by systemd first"
+
+# The MCP verify deadline covers what the containers may legitimately use.
+mcp_deadline() {  # env assignments as arguments -> the timeout maintainer_verify really runs under
+    env HOME="$gch" "$@" python3 -B -I - "$root/bin/maintainer-mcp" <<'PYEOF'
+import importlib.machinery, importlib.util, sys
+loader = importlib.machinery.SourceFileLoader("mcp", sys.argv[1])
+spec = importlib.util.spec_from_loader("mcp", loader)
+m = importlib.util.module_from_spec(spec); loader.exec_module(m)
+seen = {}
+class P:
+    returncode, stdout, stderr = 0, "", ""
+def fake_run(cmd, **kw):
+    seen["timeout"] = kw.get("timeout"); return P()
+m.subprocess.run = fake_run
+m.call_tool("maintainer_verify", {"pr": 1, "head_sha": "abcdef1", "test_filter": "f", "mutation": "s/a/b/"})
+print(seen["timeout"])
+PYEOF
+}
+: > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+want=$(( 2 * $(dget VERIFY_TIMEOUT) + $(dget PREFETCH_TIMEOUT) + $(dget MCP_VERIFY_SLACK) ))
+[ "$(mcp_deadline)" = "$want" ] && [ "$want" -gt $(( 2 * $(dget VERIFY_TIMEOUT) + $(dget PREFETCH_TIMEOUT) )) ] \
+    && ok "the MCP verify deadline is 2 x VERIFY_TIMEOUT + PREFETCH_TIMEOUT + slack, longer than a legitimate verify" \
+    || bad "the MCP verify deadline is '$(mcp_deadline)', not $want"
+[ "$(mcp_deadline MAINTAINER_VERIFY_TIMEOUT=100 MAINTAINER_PREFETCH_TIMEOUT=10 MAINTAINER_MCP_VERIFY_SLACK=1)" = 211 ] \
+    && ok "and it follows the environment overrides of the settings it derives from" \
+    || bad "the MCP deadline ignored MAINTAINER_VERIFY_TIMEOUT: $(mcp_deadline MAINTAINER_VERIFY_TIMEOUT=100 MAINTAINER_PREFETCH_TIMEOUT=10 MAINTAINER_MCP_VERIFY_SLACK=1)"
+printf 'VERIFY_TIMEOUT=50\n' > "$gch/.local/share/maintainer/profiles/gp/profile.env"
+[ "$(mcp_deadline MAINTAINER_PROFILE=gp)" = "$(( 100 + $(dget PREFETCH_TIMEOUT) + $(dget MCP_VERIFY_SLACK) ))" ] \
+    && ok "and the profile's own VERIFY_TIMEOUT" \
+    || bad "the MCP deadline ignored the profile's VERIFY_TIMEOUT: $(mcp_deadline MAINTAINER_PROFILE=gp)"
+
+# run.sh reads LOCK_WAIT and the GitHub retry knobs from the same file. A wait
+# of one second against a held lock proves the value reached flock; the default
+# is never exercised here, because it is an hour.
+lw="$stub_dir/lockwait"; rm -rf "$lw"; mkdir -p "$lw/state" "$lw/repo" "$lw/bin"
+git -C "$lw/repo" init -q -b main 2>/dev/null
+printf '{"permissions":{"deny":[]}}\n' > "$lw/settings.json"
+touch -d "100 hours ago" "$lw/state/last-review.json"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$lw/bin/claude"; chmod +x "$lw/bin/claude"
+ln -sf "$(PATH=/usr/local/bin:/usr/bin:/bin command -v flock)" "$lw/bin/flock"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$LW_GH_LOG"\nexit 1\n' > "$lw/bin/gh"; chmod +x "$lw/bin/gh"
+export LW_GH_LOG="$lw/gh.log"
+lw_run() {  # env assignments as arguments
+    env PATH="$lw/bin:$PATH" MAINTAINER_STATE_DIR="$lw/state" MAINTAINER_REPO_PATH="$lw/repo" \
+        MAINTAINER_SETTINGS="$lw/settings.json" MAINTAINER_GH_BACKOFF=0 "$@" \
+        timeout 60 bash "$root/lib/run.sh" sysknife review 2>&1; }
+exec 8>"$lw/state/run.lock"; flock 8
+out="$(lw_run MAINTAINER_LOCK_WAIT=1)"; rc=$?
+flock -u 8; exec 8>&-
+[ "$rc" = 75 ] && grep -q 'over 1s' <<<"$out" \
+    && ok "MAINTAINER_LOCK_WAIT reaches the lock wait in run.sh" \
+    || bad "run.sh ignored MAINTAINER_LOCK_WAIT=1 (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+: > "$LW_GH_LOG"; lw_run MAINTAINER_GH_TRIES=2 >/dev/null
+[ "$(grep -c 'api user' "$LW_GH_LOG")" = 2 ] && ok "MAINTAINER_GH_TRIES sets how many times run.sh asks GitHub who it is" \
+    || bad "run.sh asked gh $(grep -c 'api user' "$LW_GH_LOG") times with MAINTAINER_GH_TRIES=2"
+: > "$LW_GH_LOG"; lw_run >/dev/null
+[ "$(grep -c 'api user' "$LW_GH_LOG")" = "$(dget GH_TRIES)" ] && ok "and with nothing set it asks GH_TRIES times" \
+    || bad "run.sh asked gh $(grep -c 'api user' "$LW_GH_LOG") times, not the default $(dget GH_TRIES)"
+
+# opencode's model is a default like the others.
+ocd="$stub_dir/ocm"; rm -rf "$ocd"; mkdir -p "$ocd"
+make_stub opencode 'printf "%s\n" "$@" > "$OC_ARGS"'
+oc_model() {  # env assignments -> the --model the backend passed
+    : > "$ocd/args"; printf 'p\n' > "$ocd/prompt"
+    env PATH="$stub_dir:$PATH" HOME="$ocd" OC_ARGS="$ocd/args" MAINTAINER_SETTINGS=/dev/null "$@" bash -c '
+        . "$1/lib/profile.sh"; maintainer_load_defaults; maintainer_apply_overrides
+        . "$1/lib/backends/opencode.sh"; backend_run "$2/prompt" opus "$2/log" "$2"' _ "$root" "$ocd" >/dev/null 2>&1
+    awk 'p{print; exit} $0=="--model"{p=1}' "$ocd/args"
+}
+[ "$(oc_model)" = "$(dget OPENCODE_MODEL)" ] && ok "opencode's default model is OPENCODE_MODEL from lib/defaults.env" \
+    || bad "opencode ran '$(oc_model)', not '$(dget OPENCODE_MODEL)'"
+[ "$(oc_model MAINTAINER_OPENCODE_MODEL=a/b)" = "a/b" ] && ok "and MAINTAINER_OPENCODE_MODEL overrides it" \
+    || bad "MAINTAINER_OPENCODE_MODEL was ignored: '$(oc_model MAINTAINER_OPENCODE_MODEL=a/b)'"
+rm -f "$stub_dir/opencode"
+
+# maintainer-doctor reads its thresholds the same way.
+dh="$stub_dir/dochome"; rm -rf "$dh"
+mkdir -p "$dh/.local/share/maintainer/profiles/p" "$dh/.local/bin"
+printf 'REPO_SLUG="o/r"\n' > "$dh/.local/share/maintainer/profiles/p/profile.env"
+created="$(date -u -d '-70 hours' +%Y-%m-%dT%H:%M:%SZ)"
+make_stub gh "printf '%s\\n' \"\$*\" >> \"\$DOC_LOG\"
+case \"\$*\" in
+    *'run list'*) printf '%s\\n' '[{\"workflowName\":\"ci\",\"status\":\"completed\",\"conclusion\":\"failure\",\"createdAt\":\"$created\",\"url\":\"u\"}]' ;;
+    *) exit 0 ;;
+esac"
+export DOC_LOG="$stub_dir/doc.log"
+doc_run() { : > "$DOC_LOG"
+    env PATH="$stub_dir:$PATH" HOME="$dh" MAINTAINER_PROFILE=p "$@" bash "$root/bin/maintainer-doctor" --quick 2>&1; }
+dout="$(doc_run)"
+grep -q -- "--limit $(dget DOCTOR_RUN_LIMIT) " "$DOC_LOG" && ok "doctor asks gh for DOCTOR_RUN_LIMIT runs" \
+    || bad "doctor's run limit is not DOCTOR_RUN_LIMIT: $(grep 'run list' "$DOC_LOG" | head -1)"
+grep -q 'FAIL.*main has been red' <<<"$dout" && ok "70h of red is a failure under the default grace" \
+    || bad "70h of red was not a failure with the default RED_GRACE_HOURS"
+grep -q 'FAIL.*main has been red' <<<"$(doc_run MAINTAINER_RED_GRACE_HOURS=100)" \
+    && bad "MAINTAINER_RED_GRACE_HOURS=100 did not move the grace" \
+    || ok "MAINTAINER_RED_GRACE_HOURS moves the grace"
+printf 'REPO_SLUG="o/r"\nRED_GRACE_HOURS=100\n' > "$dh/.local/share/maintainer/profiles/p/profile.env"
+grep -q 'FAIL.*main has been red' <<<"$(doc_run)" \
+    && bad "profile RED_GRACE_HOURS=100 did not move the grace" \
+    || ok "and so does the profile"
+# The deny wall floor.
+printf 'REPO_SLUG="o/r"\n' > "$dh/.local/share/maintainer/profiles/p/profile.env"
+printf '{}\n' > "$dh/.local/share/maintainer/profiles/p/deny.json"
+python3 -c 'import json; json.dump({"permissions":{"deny":["Bash(x)"]*5}}, open("'"$dh"'/.local/share/maintainer/profiles/p/settings.json","w"))'
+grep -q 'it is stale' <<<"$(doc_run)" && ok "a 5-rule wall is under the default floor" \
+    || bad "a 5-rule wall was not called stale under DENY_WALL_MIN_RULES=$(dget DENY_WALL_MIN_RULES)"
+grep -q 'it is stale' <<<"$(doc_run MAINTAINER_DENY_WALL_MIN_RULES=3)" \
+    && bad "MAINTAINER_DENY_WALL_MIN_RULES=3 did not lower the floor" \
+    || ok "and MAINTAINER_DENY_WALL_MIN_RULES moves it"
 rm -f "$stub_dir/gh"
 
 if [ "$skip" -gt 0 ]; then
