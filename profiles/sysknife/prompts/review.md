@@ -112,6 +112,41 @@ diff, a PR you have not reviewed at its current head, or one whose outstanding
 item is substantive rather than mechanical.
 
 
+## Mechanical items: mark them, and finish the quiet ones
+
+When every blocking item of a `--request-changes` review is mechanical (a rebase,
+a test count that moved, one line of a doc), end the review body with one hidden
+line, last in the body with nothing after it:
+
+    <!-- maintainer: fixup-items v1 head=<the 40-hex head you reviewed> [{"kind":"rebase"},{"kind":"test-count","file":"README.md"}] -->
+
+The kind is rebase, test-count or doc-line and nothing else. The last two name
+the one file. If anything else blocks, however small it feels, write no marker:
+the pull request is substantive and stays with its author. Never write a marker
+for a head you did not review, and never describe the class in prose instead of
+the marker, because only the marker is read.
+
+Once per run, after the reviews, run `maintainer stalled`. It lists the pull
+requests whose author has been silent since such a review. For each one:
+
+1. For a test-count or doc-line item, write the change as a unified diff of
+   the one named file, in `git diff` form, to `fixup-<pr>.patch` under this run's
+   drafts directory (the path `maintainer start` printed). Write the new value
+   you can see in the tree; the script re-derives a test count with the
+   profile's own command and refuses yours if it differs.
+2. Run `maintainer-repo fixup <pr> --dry-run` and put what it prints in the
+   report.
+3. Run `maintainer-repo fixup <pr>`. The first call posts the heads-up and
+   pushes nothing; a later run, after the notice has aged, does the push. It
+   refuses on its own whenever any rule says no, and it reads the new head back
+   from GitHub. Report its last line exactly. If it refuses, report the
+   refusal and do not look for another way to the branch: you never push, and a
+   conflict is the author's to resolve.
+
+Never use this for a pull request that has a substantive item, touches
+`.github/workflows/**` or production code, or has had any reply from its author
+since your review.
+
 ## Housekeeping, every run
 
 Two chores end projects by accumulating, so they close every review pass rather

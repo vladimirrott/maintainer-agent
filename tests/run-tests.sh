@@ -8490,6 +8490,36 @@ out="$(zenv bash "$root/bin/maintainer-repo" fixup '12; rm -rf x' 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'usage: maintainer-repo.*fixup' <<<"$out" && ok "a pull request number that is not a number is refused" || bad "a non-numeric number was accepted (rc=$rc): $out"
 zrepo
 
+# --- the prompts, the defaults and the docs agree with the code ----------------
+for zp in sysknife magent _template; do
+    zf_prompt="$root/profiles/$zp/prompts/review.md"
+    grep -q 'maintainer: fixup-items v1 head=' "$zf_prompt" && grep -q '`maintainer stalled`' "$zf_prompt" \
+        && grep -q 'maintainer-repo fixup <pr> --dry-run' "$zf_prompt" \
+        && ok "$zp: the review prompt tells the run to write the marker and to run stalled and fixup" \
+        || bad "$zp: its review prompt lacks the fixup marker or the stalled/fixup steps"
+done
+# The marker the prompts show must be one the parser accepts, or every review
+# written from them is substantive and the whole path is dead.
+python3 -B - "$root" <<'PYEOF' && ok "the marker example in the prompts parses, kinds and all" || bad "the prompts' marker example is rejected by the parser"
+import importlib.machinery, importlib.util, re, sys
+root = sys.argv[1]
+sys.argv = ["maintainer", "--help"]
+loader = importlib.machinery.SourceFileLoader("m", root + "/bin/maintainer")
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("m", loader))
+loader.exec_module(m)
+for prof in ("sysknife", "magent", "_template"):
+    t = open(f"{root}/profiles/{prof}/prompts/review.md").read()
+    line = next(l for l in t.splitlines() if l.startswith("    <!-- maintainer: fixup-items v1"))
+    line = line.strip().replace("<the 40-hex head you reviewed>", "a" * 40)
+    head, items = m._fixup_items("Words.\n\n" + line)
+    assert head == "a" * 40 and [k for k, _ in items] == ["rebase", "test-count"], (prof, items)
+PYEOF
+for zk in FIXUP_QUIET_DAYS FIXUP_NOTICE_DAYS FIXUP_MAX_LINES; do
+    grep -q "^$zk=[0-9]\+\$" "$root/lib/defaults.env" && ! grep -nE "(^|[^A-Z_])$zk *= *[0-9]" "$root/bin/maintainer" "$root/bin/maintainer-repo" >/dev/null \
+        && ok "$zk has its default in lib/defaults.env and no literal in the code" \
+        || bad "$zk is missing from lib/defaults.env or has a literal in bin/"
+done
+
 # ===== Z: stalled pull requests (end) =====
 
 if [ "$skip" -gt 0 ]; then
