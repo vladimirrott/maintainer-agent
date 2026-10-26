@@ -33,6 +33,44 @@ middle digit.
   nothing. The write happens in the script, never through the model. Story 15 is
   no longer a gap. New `maintainer fixup-check <pr>` prints the check the script
   runs.
+- **`maintainer lease`: say who is working a pull request.** A timer run and an
+  interactive session worked #637, #658 and #660 at the same time on 2026-10-25
+  (docs/lessons.md 8 and 80 are the same fault), and the run's report could not
+  tell whose review it had found. `lease take <pr>... [--ttl D] [--for TEXT]`
+  writes a small file under `leases/` naming the holder, the note, and when it
+  expires; `take` refuses another holder's live lease and names them, renews
+  its own, and prints a takeover of an expired one; `check <pr>` exits 0 free or
+  yours, 1 held, 2 unreadable (never free); `release <pr>...` frees yours. The
+  read-decide-write step runs under a short flock, so of two simultaneous takes
+  exactly one wins. New default `LEASE_TTL_SECONDS` (3600).
+- **A run says it is running.** `run.sh` writes `leases/run.json` (task, pid, run
+  id) right after it takes `run.lock` and removes it on every exit, through an
+  internal `maintainer run-lease` verb. Liveness is never read from the file or
+  a pid: `maintainer status` asks the lock, so a file left by a killed run
+  beside a free lock prints as stale and is ignored. `status` gains a `leases`
+  block (the run, then each PR lease with holder, note, renewed-ago and
+  expires-in; expired ones marked and ignored). An interactive `lease take`
+  while a run is live warns with the run id and `maintainer abort`, and still
+  takes: runs yield to interactive work.
+- **`gc` prunes old leases and the doctor flags forgotten ones.** `maintainer
+  gc` removes a PR lease that expired longer ago than `RETENTION_DAYS`, never a
+  live one, the run lease, or a file it cannot read. `maintainer-doctor` warns
+  about a lease last renewed more than `DOCTOR_LEASE_HOURS` ago (new default,
+  12), naming the PRs and the `lease release` command; an unreadable lease is a
+  warning, never a pass.
+- **`maintainer-merge` and the review prompts honour leases.** `verify`,
+  `verify-deps` and `merge` ask `maintainer lease check` first and refuse a PR
+  another actor holds, naming the holder; a lease they cannot read, or no helper
+  to ask, refuses too. The preamble and the review prompts tell a run to check
+  the lease before posting and to skip a leased PR in its report. The lease
+  verbs need only a state directory, so when the caller names one (as
+  `maintainer-merge` does) they answer with several profiles deployed and none
+  chosen; without one they still refuse to guess a project.
+- **`maintainer reviewed <pr>`.** Lists the reviews and inline comments by the
+  profile's account whose `commit_id` is the PR's head now, plus the lease. A
+  pure read, derived from GitHub on every call; a read that fails refuses
+  instead of reporting none. The review prompts use it instead of a hand-built
+  activity loop. docs/maintainer-doctrine.md gains "Who yields to whom".
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

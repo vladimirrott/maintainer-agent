@@ -6531,7 +6531,9 @@ cl_gh 0 claimant
 out="$(PATH="$stub_dir:/usr/bin:/bin" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
     MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$nohelp/bin/maintainer-merge" merge 1 2>&1)"; rc=$?
-grep -q 'could not read' <<<"$out" \
+# The lease gate looks for the same helper first and refuses first, with its own words;
+# either refusal is the helper's absence being treated as "cannot ask", never as "free".
+grep -q 'could not read\|cannot tell whether' <<<"$out" \
     && ok "a missing holders helper refuses the merge" \
     || bad "with no helper on PATH the gate merged without asking who holds the issue: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
 grep -q 'maintainer' <<<"$out" \
@@ -8521,6 +8523,488 @@ for zk in FIXUP_QUIET_DAYS FIXUP_NOTICE_DAYS FIXUP_MAX_LINES; do
 done
 
 # ===== Z: stalled pull requests (end) =====
+# --- branch Y: leases (begin) ---------------------------------------------------
+echo "== leases: who holds a pull request, until when, doing what =="
+# Three times an interactive session and a timer run worked one PR blind (lessons
+# 8, 80 and 2026-10-25). A lease is a small file per PR naming its holder, so the
+# second actor can ask instead of finding out with `ps`.
+lsd="$stub_dir/lease"; mkdir -p "$lsd"
+lease_as() {  # $1 = "me" (interactive) or "run" (inside a run); then the lease arguments
+    local who="$1"; shift
+    local inrun=""; [ "$who" = run ] && inrun="magent/review"
+    MAINTAINER_IN_RUN="$inrun" MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+        MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease python3 "$root/bin/maintainer" lease "$@" 2>&1
+}
+jget() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v)' "$1" "$2"; }
+# Rewrites one field, to age a lease without sleeping.
+jset() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(sys.argv[1],"w"))' "$1" "$2" "$3"; }
+
+grep -q '^LEASE_TTL_SECONDS=' "$root/lib/defaults.env" \
+    && ok "the lease TTL has a declared default in lib/defaults.env" \
+    || bad "no LEASE_TTL_SECONDS in lib/defaults.env, so a lease would carry a number nobody chose"
+out="$(lease_as me take 658 --for 'reviewing the retry fix')"; rc=$?
+[ "$rc" = 0 ] && [ -f "$lsd/leases/pr-658.json" ] \
+    && ok "take writes leases/pr-658.json" || bad "take wrote no lease (rc=$rc): $out"
+[ "$(jget "$lsd/leases/pr-658.json" holder)" = interactive ] && [ "$(jget "$lsd/leases/pr-658.json" kind)" = interactive ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" note)" = 'reviewing the retry fix' ] \
+    && ok "the record names its holder, kind and note" || bad "lease record fields wrong: $(cat "$lsd/leases/pr-658.json")"
+[ "$(jget "$lsd/leases/pr-658.json" ttl_seconds)" = "$(dget LEASE_TTL_SECONDS)" ] \
+    && ok "with no --ttl the lease carries the default from lib/defaults.env" \
+    || bad "ttl_seconds is '$(jget "$lsd/leases/pr-658.json" ttl_seconds)', not the default $(dget LEASE_TTL_SECONDS)"
+out="$(lease_as run check 658)"; rc=$?
+[ "$rc" = 1 ] && grep -q 'interactive' <<<"$out" && grep -q 'reviewing the retry fix' <<<"$out" && grep -qi 'expires' <<<"$out" \
+    && ok "check from a run: exit 1, naming the holder, the note and the expiry" \
+    || bad "check on a PR held by someone else (rc=$rc): $out"
+out="$(lease_as me check 658)"; rc=$?
+[ "$rc" = 0 ] && ok "check by the holder itself is exit 0" || bad "the holder was refused its own lease (rc=$rc): $out"
+out="$(lease_as run check 659)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'free' <<<"$out" && ok "check on an unleased PR: exit 0, free" || bad "unleased PR not free (rc=$rc): $out"
+out="$(lease_as run take 658 --for 'timer pass')"; rc=$?
+[ "$rc" = 1 ] && grep -q 'interactive' <<<"$out" && [ "$(jget "$lsd/leases/pr-658.json" holder)" = interactive ] \
+    && ok "take is refused while another holder's lease is live, and the file is untouched" \
+    || bad "a live lease was taken over (rc=$rc): $out"
+# Renewal: the same holder takes again, acquired stays and renewed moves.
+jset "$lsd/leases/pr-658.json" renewed "$(( $(date +%s) - 600 ))"
+a0="$(jget "$lsd/leases/pr-658.json" acquired)"
+out="$(lease_as me take 658 --ttl 10m)"; rc=$?
+[ "$rc" = 0 ] && [ "$(jget "$lsd/leases/pr-658.json" acquired)" = "$a0" ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" renewed)" -gt "$(( $(date +%s) - 60 ))" ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" ttl_seconds)" = 600 ] \
+    && ok "take again renews (acquired kept, renewed moved, --ttl 10m is 600 s)" \
+    || bad "renewal wrong (rc=$rc): $(cat "$lsd/leases/pr-658.json")"
+# Release.
+out="$(lease_as run release 658)"; rc=$?
+[ "$rc" = 1 ] && [ -f "$lsd/leases/pr-658.json" ] \
+    && ok "release by a non-holder is refused and the lease stays" || bad "a non-holder released someone's lease (rc=$rc): $out"
+out="$(lease_as me release 658)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$lsd/leases/pr-658.json" ] && ok "release by the holder removes it" \
+    || bad "release left the lease (rc=$rc): $out"
+out="$(lease_as me release 658)"; rc=$?
+[ "$rc" = 0 ] && ok "releasing what is not held is not an error" || bad "release of nothing failed (rc=$rc): $out"
+# Expiry: a lease past renewed + ttl_seconds is free to anyone, and the takeover is said aloud.
+printf '{"holder":"run:magent/review","kind":"run","note":"old pass","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(( $(date +%s) - 9000 ))" "$(( $(date +%s) - 7200 ))" > "$lsd/leases/pr-700.json"
+out="$(lease_as me check 700)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'expired' <<<"$out" && ok "an expired lease reads as free, and says it was expired" \
+    || bad "an expired lease still blocked (rc=$rc): $out"
+out="$(lease_as me take 700)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'took over' <<<"$out" && grep -q 'run:magent/review' <<<"$out" \
+    && [ "$(jget "$lsd/leases/pr-700.json" holder)" = interactive ] \
+    && ok "taking an expired lease is allowed and names whose it was" \
+    || bad "expired takeover (rc=$rc): $out"
+# A lease that is exactly at its expiry is expired: renewed + ttl <= now.
+printf '{"holder":"run:magent/review","kind":"run","note":"edge","acquired":1,"renewed":%s,"ttl_seconds":100}\n' \
+    "$(( $(date +%s) - 100 ))" > "$lsd/leases/pr-701.json"
+out="$(lease_as me check 701)"; rc=$?
+[ "$rc" = 0 ] && ok "a lease at exactly its TTL is expired" || bad "an expired-at-the-boundary lease blocked (rc=$rc): $out"
+# The boundary needs a clock the test controls, so call the predicate itself.
+out="$(MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease \
+    python3 -B - "$root/bin/maintainer" <<'PYEOF' 2>&1
+import importlib.machinery, importlib.util, sys
+path = sys.argv[1]; sys.argv = ["maintainer", "--help"]
+loader = importlib.machinery.SourceFileLoader("maintainer_cli", path)
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("maintainer_cli", loader))
+loader.exec_module(m)
+d = {"renewed": 100, "ttl_seconds": 50}
+print(m._lease_expired(d, 150), m._lease_expired(d, 149.9), m._lease_expired(d, 151))
+PYEOF
+)"
+[ "$out" = "True False True" ] && ok "a lease is expired at renewed + ttl exactly, and not a moment before" \
+    || bad "the expiry boundary is wrong: $out"
+# Several at once are all-or-nothing.
+lease_as me take 710 >/dev/null
+out="$(lease_as run take 711 710 --for both)"; rc=$?
+[ "$rc" = 1 ] && [ ! -e "$lsd/leases/pr-711.json" ] \
+    && ok "taking several is all-or-nothing: one held PR takes none" \
+    || bad "a partial take left pr-711 behind (rc=$rc): $out"
+out="$(lease_as me release 710 711)"
+[ ! -e "$lsd/leases/pr-710.json" ] && ok "release takes several" || bad "release 710 711 left 710"
+# Arguments that would become a path, or a TTL nobody can mean.
+for badpr in '../x' 'abc' '12a' ''; do
+    before="$(ls -A "$lsd/leases" | wc -l)"
+    out="$(lease_as me take "$badpr")"; rc=$?
+    [ "$rc" != 0 ] && [ "$(ls -A "$lsd/leases" | wc -l)" = "$before" ] && grep -q 'not a pull request number' <<<"$out" \
+        && ok "take refuses the pull request '$badpr'" || bad "take accepted '$badpr' (rc=$rc): $out"
+done
+for badttl in 0 -5 abc 10x ''; do
+    out="$(lease_as me take 720 --ttl "$badttl")"; rc=$?
+    [ "$rc" != 0 ] && [ ! -e "$lsd/leases/pr-720.json" ] && grep -q 'not a duration' <<<"$out" \
+        && ok "take refuses --ttl '$badttl'" || bad "take accepted --ttl '$badttl' (rc=$rc): $out"
+done
+out="$(lease_as me take 720 --ttl 2h)"
+[ "$(jget "$lsd/leases/pr-720.json" ttl_seconds)" = 7200 ] && ok "--ttl 2h is 7200 s" || bad "--ttl 2h gave $(jget "$lsd/leases/pr-720.json" ttl_seconds)"
+lease_as me release 720 >/dev/null
+out="$(MAINTAINER_LEASE_TTL_SECONDS=77 MAINTAINER_IN_RUN='' MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease python3 "$root/bin/maintainer" lease take 721 2>&1)"
+[ "$(jget "$lsd/leases/pr-721.json" ttl_seconds)" = 77 ] && ok "MAINTAINER_LEASE_TTL_SECONDS beats the default" \
+    || bad "the env override did not reach the lease: $out"
+lease_as me release 721 >/dev/null
+# A file that cannot be read is not a free PR.
+printf '{not json' > "$lsd/leases/pr-730.json"
+out="$(lease_as me check 730)"; rc=$?
+[ "$rc" = 2 ] && ok "an unreadable lease file is exit 2, never free" || bad "unreadable lease read as free or held (rc=$rc): $out"
+out="$(lease_as me take 730)"; rc=$?
+[ "$rc" != 0 ] && [ "$(cat "$lsd/leases/pr-730.json")" = '{not json' ] \
+    && ok "take will not overwrite a lease it cannot read" || bad "take clobbered an unreadable lease (rc=$rc)"
+rm -f "$lsd/leases/pr-730.json"
+# Two takes at once: exactly one wins. Each round races an interactive take and a run take.
+wins=0; rounds=0; allone=1
+for n in $(seq 800 819); do
+    lease_as me take "$n" >/dev/null & p1=$!
+    lease_as run take "$n" >/dev/null & p2=$!
+    wait "$p1"; r1=$?; wait "$p2"; r2=$?
+    rounds=$((rounds+1))
+    if { [ "$r1" = 0 ] && [ "$r2" != 0 ]; } || { [ "$r1" != 0 ] && [ "$r2" = 0 ]; }; then wins=$((wins+1)); else allone=0; fi
+done
+[ "$allone" = 1 ] && ok "two simultaneous takes: exactly one wins, in all $rounds rounds" \
+    || bad "only $wins of $rounds races had exactly one winner"
+# The mutex is what makes that true rather than lucky, so hold it and watch take wait.
+mkdir -p "$lsd/leases"; : > "$lsd/leases/.mutex"
+flock -x "$lsd/leases/.mutex" sleep 3 & hold=$!
+sleep 0.4
+lease_as me take 900 >/dev/null & tk=$!
+sleep 1
+if kill -0 "$tk" 2>/dev/null; then ok "take waits while the lease mutex is held"; else bad "take did not wait for the mutex, so two takers can both win"; fi
+wait "$hold"; wait "$tk"; rc=$?
+[ "$rc" = 0 ] && [ -f "$lsd/leases/pr-900.json" ] && ok "and completes once the mutex is free" || bad "take never completed after the mutex was released (rc=$rc)"
+echo "== the run lease: a pass says it is running, and the lock says whether that is true =="
+# run.sh already takes run.lock. Beside it, a file says WHICH run holds it, so an
+# interactive session can ask instead of running `ps`. The file is only a label:
+# liveness is "ask the lock", and a leftover file with a free lock is stale.
+rl="$lsd"; rm -rf "$rl/leases"; rm -f "$rl/run.lock"
+rlrun() { MAINTAINER_STATE="$rl" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease \
+    python3 "$root/bin/maintainer" "$@" 2>&1; }
+out="$(rlrun run-lease review 4242 2031-02-03T04-05-review)"; rc=$?
+[ "$rc" = 0 ] && [ "$(jget "$rl/leases/run.json" task)" = review ] && [ "$(jget "$rl/leases/run.json" pid)" = 4242 ] \
+    && [ "$(jget "$rl/leases/run.json" run_id)" = 2031-02-03T04-05-review ] \
+    && ok "run-lease writes leases/run.json with the task, pid and run id" \
+    || bad "run-lease (rc=$rc): $out $(cat "$rl/leases/run.json" 2>&1)"
+out="$(rlrun run-lease review 4242)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$(jget "$rl/leases/run.json" run_id)" ] \
+    && ok "before the run id exists the file carries the task and pid alone" \
+    || bad "run-lease without a run id (rc=$rc): $(cat "$rl/leases/run.json")"
+rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+out="$(rlrun run-lease --clear)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$rl/leases/run.json" ] && ok "run-lease --clear removes it" || bad "run-lease --clear left the file (rc=$rc): $out"
+out="$(rlrun run-lease --clear)"; rc=$?
+[ "$rc" = 0 ] && ok "and clearing nothing is not an error" || bad "clearing an absent run lease failed (rc=$rc): $out"
+out="$(rlrun run-lease 'bad task' 1)"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$rl/leases/run.json" ] && grep -q 'plain words' <<<"$out" \
+    && ok "a task that is not a plain word is refused" || bad "run-lease accepted 'bad task' (rc=$rc): $out"
+out="$(rlrun run-lease review notapid)"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$rl/leases/run.json" ] && grep -q 'plain words' <<<"$out" \
+    && ok "and so is a pid that is not a number" || bad "run-lease accepted a non-numeric pid (rc=$rc): $out"
+# The run id arrives after the start; the start time must survive it.
+rlrun run-lease review 4242 >/dev/null; t0="$(jget "$rl/leases/run.json" started)"
+sleep 1.1; rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+[ "$(jget "$rl/leases/run.json" started)" = "$t0" ] && [ -n "$t0" ] \
+    && ok "adding the run id keeps the original start time" || bad "the start time moved when the run id was added"
+rlrun run-lease --clear >/dev/null
+
+# A status home, as the status block above builds one: a deployed profile and a scratch state directory.
+sl_home="$stub_dir/leasehome"; rm -rf "$sl_home"
+mkdir -p "$sl_home/.local/share/maintainer/profiles/sk"
+cat > "$sl_home/.local/share/maintainer/profiles/sk/profile.env" <<'ENVSK'
+PROFILE_NAME="sk"
+REPO_SLUG="acme/sk"
+REPO_PATH="$HOME/src/sk"
+STATE_DIR="$HOME/.local/state/sk-maint"
+TASKS="review"
+POST="on"
+GH_ACCOUNT="acmebot"
+ENVSK
+make_stub systemctl 'exit 0'
+rlstatus() { PATH="$stub_dir:$PATH" HOME="$sl_home" MAINTAINER_PROFILE=sk MAINTAINER_STATE="$rl" \
+    env -u MAINTAINER_STATE_DIR MAINTAINER_STATE="$rl" python3 "$root/bin/maintainer" status 2>&1; }
+mkdir -p "$rl/leases"
+out="$(rlstatus)"
+grep -qi 'leases' <<<"$out" && grep -qi 'idle\|no run' <<<"$out" \
+    && ok "status shows a leases block, and says no run holds the lock" || bad "status has no leases block: $(tail -5 <<<"$out")"
+# A leftover file and a FREE lock: stale, ignored, and never described as running.
+rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+out="$(rlstatus)"
+grep -qi 'stale' <<<"$out" && grep -qi 'ignored' <<<"$out" && ! grep -qi 'LIVE' <<<"$out" \
+    && ok "a run lease with a free lock is stale and ignored" || bad "a stale run lease read as live: $(grep -i -A3 lease <<<"$out")"
+# The same file with the lock really held by another process: live, naming the run.
+: > "$rl/run.lock"
+flock -x "$rl/run.lock" sleep 6 & lockpid=$!
+sleep 0.4
+if flock -n "$rl/run.lock" true; then bad "the positive control failed: the lock is not held, so the next cases prove nothing"
+else ok "positive control: run.lock is really held by pid $lockpid"; fi
+out="$(rlstatus)"
+grep -qi 'live' <<<"$out" && grep -q '2031-02-03T04-05-review' <<<"$out" \
+    && ok "with the lock held, status shows the run lease as live, with its run id" \
+    || bad "a held lock was not shown as a live run: $(grep -i -A3 lease <<<"$out")"
+# Taking a PR while a run is live: warn, name the run and the abort hint, never refuse.
+out="$(lease_as me take 950 --for 'looking at it')"; rc=$?
+[ "$rc" = 0 ] && [ -f "$rl/leases/pr-950.json" ] && grep -q '2031-02-03T04-05-review' <<<"$out" && grep -q 'maintainer abort' <<<"$out" \
+    && ok "an interactive take during a live run warns with the run id and the abort hint, and still takes" \
+    || bad "take during a live run (rc=$rc): $out"
+lease_as me release 950 >/dev/null
+out="$(lease_as run take 951)"; rc=$?
+grep -q 'maintainer abort' <<<"$out" && bad "a run was told to abort itself" || ok "a take from inside a run does not print the abort hint"
+lease_as run release 951 >/dev/null
+wait "$lockpid"
+out="$(lease_as me take 952)"; rc=$?
+[ "$rc" = 0 ] && ! grep -q 'maintainer abort' <<<"$out" \
+    && ok "once the lock is free the leftover file warns nobody" || bad "a stale run lease still warned (rc=$rc): $out"
+lease_as me release 952 >/dev/null
+# PR leases in status: holder, note, renewed-ago, expires-in; an expired one marked and ignored.
+printf '{"holder":"interactive","kind":"interactive","note":"fixing the retry","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(( $(date +%s) - 900 ))" "$(( $(date +%s) - 300 ))" > "$rl/leases/pr-901.json"
+printf '{"holder":"run:sk/review","kind":"run","note":"old pass","acquired":1,"renewed":%s,"ttl_seconds":1800}\n' \
+    "$(( $(date +%s) - 10800 ))" > "$rl/leases/pr-902.json"
+out="$(rlstatus)"
+l901="$(grep '#901' <<<"$out")"; l902="$(grep '#902' <<<"$out")"
+grep -q 'interactive' <<<"$l901" && grep -q 'fixing the retry' <<<"$l901" && grep -Eq 'renewed [0-9]+m ago' <<<"$l901" && grep -Eq 'expires in [0-9]+m' <<<"$l901" \
+    && ok "status lists a live PR lease with holder, note, renewed-ago and expires-in" || bad "the live PR lease line: '$l901'"
+grep -qi 'expired' <<<"$l902" && grep -qi 'ignored' <<<"$l902" && ! grep -qi 'expires in' <<<"$l902" \
+    && ok "and marks an expired one as expired and ignored" || bad "the expired PR lease line: '$l902'"
+rm -f "$rl/leases/pr-901.json" "$rl/leases/pr-902.json" "$rl/leases/run.json"
+
+# run.sh itself: the lease exists while the pass runs and the lock is held, and is gone after.
+lk="$stub_dir/runlease"; rm -rf "$lk"; mkdir -p "$lk/.local/bin" "$lk/bin" "$lk/state/state" "$lk/state/runs"
+lk_repo="$lk/repo"; git init -q -b main "$lk_repo"
+printf '{"permissions":{"deny":[]}}\n' > "$lk/settings.json"
+# No flock stub here: the suite's global one always succeeds, and this case is about the real lock.
+printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo TOKENTOKENTOKENTOKEN;; *"api user"*) echo vladimirrott;; esac\n' > "$lk/bin/gh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$lk/bin/notify-send"
+cat > "$lk/bin/claude" <<LKEOF
+#!/usr/bin/env bash
+# What a pass sees while it runs: is the lease there, and is the lock really held?
+[ -f "$lk/state/leases/run.json" ] && cp "$lk/state/leases/run.json" "$lk/seen.json"
+if flock -n "$lk/state/run.lock" true; then echo free > "$lk/lockstate"; else echo held > "$lk/lockstate"; fi
+exit 0
+LKEOF
+cat > "$lk/.local/bin/maintainer" <<LKEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$lk/helper.log"
+case "\$1" in
+  run-lease) MAINTAINER_PROFILE=sysknife exec python3 "$root/bin/maintainer" "\$@" ;;
+  start) echo "=== maintainer 2031-02-03T04-05-review ==="; echo "context" ;;
+  *) exit 0 ;;
+esac
+LKEOF
+chmod +x "$lk/bin/"* "$lk/.local/bin/maintainer"
+PATH="$lk/bin:$lk/.local/bin:$PATH" HOME="$lk" MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$lk/settings.json" \
+    MAINTAINER_STATE_DIR="$lk/state" MAINTAINER_REPO_PATH="$lk_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >"$lk/run.out" 2>&1
+[ "$(cat "$lk/lockstate" 2>/dev/null)" = held ] \
+    && ok "the pass ran with run.lock really held (positive control for the cases below)" \
+    || bad "the pass did not see the lock held: $(cat "$lk/lockstate" 2>&1); $(tail -3 "$lk/run.out")"
+[ "$(jget "$lk/seen.json" task 2>/dev/null)" = review ] && [ "$(jget "$lk/seen.json" run_id 2>/dev/null)" = 2031-02-03T04-05-review ] \
+    && ok "while the pass ran, leases/run.json named its task and its run id" \
+    || bad "the pass saw no run lease: $(cat "$lk/seen.json" 2>&1)"
+case "$(jget "$lk/seen.json" pid 2>/dev/null)" in ''|*[!0-9]*) bad "the run lease carries no pid" ;; *) ok "and its pid" ;; esac
+[ ! -e "$lk/state/leases/run.json" ] && ok "when the run ends the lease is gone" || bad "run.sh left leases/run.json behind"
+first="$(grep -n '^run-lease' "$lk/helper.log" | head -1 | cut -d: -f1)"; started="$(grep -n '^start' "$lk/helper.log" | head -1 | cut -d: -f1)"
+[ -n "$first" ] && [ -n "$started" ] && [ "$first" -lt "$started" ] \
+    && ok "the lease is written before the refresh, not after it: the lock is already held" \
+    || bad "run-lease is not called ahead of start (run-lease line ${first:-none}, start line ${started:-none})"
+
+# An exit before the run reaches its own cleanup (here the identity gate) still takes the lease down.
+rm -f "$lk/helper.log"; printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"api user"*) echo someone-else;; esac\n' > "$lk/bin/gh"
+PATH="$lk/bin:$lk/.local/bin:$PATH" HOME="$lk" MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$lk/settings.json" \
+    MAINTAINER_STATE_DIR="$lk/state" MAINTAINER_REPO_PATH="$lk_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >"$lk/run2.out" 2>&1; rc=$?
+grep -q '^run-lease review' "$lk/helper.log" && [ "$rc" = 1 ] \
+    && ok "positive control: a run refused at the identity gate had already written its lease" \
+    || bad "the early-exit case never got past the lock (rc=$rc): $(tail -3 "$lk/run2.out")"
+[ ! -e "$lk/state/leases/run.json" ] && ok "and an exit that early still removes it" || bad "a run refused at the identity gate left leases/run.json behind"
+echo "== leases are pruned by gc and flagged by the doctor when they are forgotten =="
+# gc: a lease expired longer ago than the retention window is clutter. A live one,
+# and one that expired recently, are not.
+lgc="$stub_dir/leasegc"; rm -rf "$lgc"; mkdir -p "$lgc/leases"
+now_s="$(date +%s)"
+mklease() {  # $1 = file, $2 = seconds since renewed, $3 = ttl
+    printf '{"holder":"interactive","kind":"interactive","note":"","acquired":1,"renewed":%s,"ttl_seconds":%s}\n' "$(( now_s - $2 ))" "$3" > "$1"; }
+mklease "$lgc/leases/pr-1.json" $(( 5*86400 )) 3600       # expired about 5 days ago
+mklease "$lgc/leases/pr-2.json" 7200 3600                 # expired two hours ago
+mklease "$lgc/leases/pr-3.json" 60 3600                   # live
+printf '{"task":"review","pid":1,"renewed":1,"ttl_seconds":1}\n' > "$lgc/leases/run.json"
+lgcrun() { MAINTAINER_RETENTION_DAYS=2 MAINTAINER_STATE="$lgc" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=gc python3 "$root/bin/maintainer" gc "$@" 2>&1; }
+out="$(lgcrun --dry-run)"
+grep -q 'would remove.*pr-1.json' <<<"$out" && [ -f "$lgc/leases/pr-1.json" ] \
+    && ok "gc --dry-run names a lease expired past the window and removes nothing" || bad "gc --dry-run on leases: $out"
+lgcrun >/dev/null
+[ ! -e "$lgc/leases/pr-1.json" ] && ok "gc removes a lease that expired longer ago than RETENTION_DAYS" || bad "gc kept a long-expired lease"
+[ -f "$lgc/leases/pr-2.json" ] && ok "and keeps one that expired recently" || bad "gc removed a lease that expired two hours ago"
+[ -f "$lgc/leases/pr-3.json" ] && ok "and a live one" || bad "gc removed a LIVE lease"
+[ -f "$lgc/leases/run.json" ] && ok "and never touches the run lease" || bad "gc removed leases/run.json"
+printf '{junk' > "$lgc/leases/pr-4.json"; touch -d '30 days ago' "$lgc/leases/pr-4.json"
+lgcrun >/dev/null
+[ -f "$lgc/leases/pr-4.json" ] && ok "a lease gc cannot read is left for a person, not deleted" || bad "gc deleted a lease it could not read"
+
+# The doctor: a lease last renewed longer ago than DOCTOR_LEASE_HOURS is forgotten.
+grep -q '^DOCTOR_LEASE_HOURS=' "$root/lib/defaults.env" && ok "the doctor's lease threshold has a declared default" \
+    || bad "no DOCTOR_LEASE_HOURS in lib/defaults.env"
+dlh="$stub_dir/leasedoc"; rm -rf "$dlh"
+mkdir -p "$dlh/.local/share/maintainer/profiles/p" "$dlh/.local/bin" "$dlh/state/leases"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+make_stub gh 'exit 0'
+mklease "$dlh/state/leases/pr-31.json" $(( 30*3600 )) 3600
+mklease "$dlh/state/leases/pr-32.json" 3600 3600
+ldoc() { env PATH="$stub_dir:$PATH" HOME="$dlh" MAINTAINER_PROFILE=p "$@" bash "$root/bin/maintainer-doctor" --quick 2>&1; }
+dout="$(ldoc)"
+grep -q 'warn.*lease.*#31' <<<"$dout" && ok "doctor warns about a lease last renewed 30h ago" || bad "doctor missed a 30h-old lease: $(grep -i lease <<<"$dout")"
+grep -q '#32' <<<"$(grep -i 'lease' <<<"$dout")" && bad "doctor flagged a lease renewed an hour ago" || ok "and not one renewed an hour ago"
+grep -q 'lease release 31' <<<"$dout" && ok "and says how to clear it" || bad "the warning names no fix"
+grep -qi 'warn.*lease.*#31' <<<"$(ldoc MAINTAINER_DOCTOR_LEASE_HOURS=100)" \
+    && bad "MAINTAINER_DOCTOR_LEASE_HOURS=100 did not move the threshold" || ok "MAINTAINER_DOCTOR_LEASE_HOURS moves the threshold"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\nDOCTOR_LEASE_HOURS=100\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+grep -qi 'warn.*lease.*#31' <<<"$(ldoc)" && bad "the profile's DOCTOR_LEASE_HOURS was ignored" || ok "and so does the profile"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+printf '{junk' > "$dlh/state/leases/pr-33.json"
+grep -q 'warn.*lease.*#33' <<<"$(ldoc)" && ok "a lease file the doctor cannot read is a warning too, never a pass" \
+    || bad "an unreadable lease passed the doctor: $(ldoc | grep -i lease)"
+rm -f "$dlh/state/leases/"pr-*.json
+grep -q 'ok.*no lease' <<<"$(ldoc)" && ok "with nothing forgotten the doctor says so" || bad "no all-clear for leases: $(ldoc | grep -i lease)"
+rm -f "$stub_dir/gh"
+echo "== maintainer-merge yields to a lease another actor holds =="
+# verify builds the whole workspace twice and merge is the one irreversible step,
+# so both ask `maintainer lease check` first and refuse a PR somebody else has
+# leased. The holder itself is not in the way of its own work.
+mgl="$root/bin/maintainer-merge"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo testuser;; esac"
+lgate() {  # $1 = who ("me" or "run"), then the maintainer-merge arguments
+    local who="$1"; shift; local inrun=""; [ "$who" = run ] && inrun="magent/review"
+    PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="$inrun" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" \
+        bash "$mgl" "$@" 2>&1
+}
+lease_as me release 31 >/dev/null; lease_as me take 31 --for 'reviewing by hand' >/dev/null
+for verb in "verify 31 abcdef1234 t s/a/b/" "verify-deps 31 abcdef1234" "merge 31"; do
+    out="$(lgate run $verb)"; rc=$?
+    [ "$rc" != 0 ] && grep -q 'leased\|lease' <<<"$out" && grep -q 'interactive' <<<"$out" && grep -q 'reviewing by hand' <<<"$out" \
+        && ok "'${verb%% *}' from a run refuses a PR leased by the interactive session, naming it" \
+        || bad "'${verb%% *}' went ahead on a leased PR (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+done
+# Positive controls: the holder gets past the lease gate to the next one, and so does a free PR.
+out="$(lgate me merge 31)"; rc=$?
+grep -q 'no verification receipt' <<<"$out" && ! grep -qi 'leased' <<<"$out" \
+    && ok "the holder itself reaches the receipt check, so the refusals above are the lease's own" \
+    || bad "the holder was stopped by its own lease (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+out="$(lgate run merge 32)"; rc=$?
+grep -q 'no verification receipt' <<<"$out" && ok "an unleased PR reaches the receipt check" \
+    || bad "an unleased PR was refused (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+# An expired lease is nobody's.
+printf '{"holder":"interactive","kind":"interactive","note":"gone","acquired":1,"renewed":%s,"ttl_seconds":60}\n' \
+    "$(( $(date +%s) - 3600 ))" > "$lsd/leases/pr-33.json"
+out="$(lgate run merge 33)"
+grep -q 'no verification receipt' <<<"$out" && ok "an expired lease does not block a merge" || bad "an expired lease blocked: $out"
+# A lease it cannot read stops the gate: it never asked, so it cannot say free.
+printf '{junk' > "$lsd/leases/pr-34.json"
+out="$(lgate run merge 34)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -qi 'lease' <<<"$out" \
+    && ok "an unreadable lease refuses the merge instead of passing it" || bad "an unreadable lease let the merge through (rc=$rc): $out"
+# No helper to ask: refuse rather than assume free.
+# bin/ and lib/ side by side, as in the repo, and HOME pointed at the copy:
+# with the script one level too high it sourced the DEPLOYED profile.sh from
+# $HOME, passed on a machine with magent installed and failed in CI.
+mgcopy="$stub_dir/mgcopy"; rm -rf "$mgcopy"; mkdir -p "$mgcopy/bin" "$mgcopy/lib"
+cp "$mgl" "$mgcopy/bin/maintainer-merge"; cp "$root/lib/profile.sh" "$root/lib/defaults.env" "$mgcopy/lib/"
+out="$(HOME="$mgcopy" PATH="/usr/bin:/bin" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" bash "$mgcopy/bin/maintainer-merge" merge 35 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -q 'helper' <<<"$out" \
+    && ok "with no maintainer helper to ask, merge refuses rather than assuming the PR is free" \
+    || bad "merge passed the lease gate with no helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+rm -f "$lsd/leases/pr-3"[1-4].json "$stub_dir/gh"
+# The prompts carry the rule, because the agent reads them and never the code.
+for f in lib/preamble-core.md profiles/sysknife/prompts/review.md profiles/_template/prompts/review.md; do
+    grep -q 'maintainer lease check <pr>' "$root/$f" && grep -qi 'skip' "$root/$f" \
+        && ok "$f tells a review to check the lease and skip a leased PR" \
+        || bad "$f does not tell a review to run 'maintainer lease check <pr>'"
+done
+# The gate must not need a profile: maintainer-merge names the state directory itself, and an
+# operator with two profiles deployed and none chosen still gets an answer. Without a state
+# directory the same call must refuse, because then it would be guessing which project.
+two="$stub_dir/twoprof"; rm -rf "$two"
+mkdir -p "$two/.local/share/maintainer/profiles/a" "$two/.local/share/maintainer/profiles/b"
+printf 'REPO_SLUG="o/a"\n' > "$two/.local/share/maintainer/profiles/a/profile.env"
+printf 'REPO_SLUG="o/b"\n' > "$two/.local/share/maintainer/profiles/b/profile.env"
+out="$(env -u MAINTAINER_PROFILE HOME="$two" MAINTAINER_STATE="$lsd" python3 "$root/bin/maintainer" lease check 4242 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q free <<<"$out" && ok "lease check answers with two profiles deployed when the state directory is named" \
+    || bad "lease check needed a profile it had no use for (rc=$rc): $out"
+out="$(env -u MAINTAINER_PROFILE -u MAINTAINER_STATE -u MAINTAINER_STATE_DIR HOME="$two" python3 "$root/bin/maintainer" lease check 4242 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'profiles are deployed' <<<"$out" \
+    && ok "and with no state directory named it still refuses to guess a project" \
+    || bad "lease check guessed a project (rc=$rc): $out"
+out="$(env -u MAINTAINER_PROFILE HOME="$two" MAINTAINER_STATE="$lsd" python3 "$root/bin/maintainer" status 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'profiles are deployed' <<<"$out" \
+    && ok "naming a state directory excuses only the lease verbs, not status" || bad "status guessed a profile (rc=$rc): $out"
+echo "== maintainer reviewed: what this account already said at the current head =="
+# On 2026-10-25 a run found "#658 already reviewed at this head by vladimirrott" and could not tell
+# whose review it was. `reviewed` answers from GitHub alone: the reviews and inline comments by the
+# profile's account whose commit_id is the head now, plus the lease. It keeps no state of its own.
+HEADSHA=1111111111111111111111111111111111111111
+OLDSHA=2222222222222222222222222222222222222222
+make_stub gh "case \"\$*\" in
+  *'pr view'*headRefOid*) echo \"\${RV_HEAD-$HEADSHA}\" ;;
+  *pulls/7/reviews*) [ -n \"\${RV_FAIL:-}\" ] && { echo 'HTTP 502' >&2; exit 1; }
+      printf '%s\\n' '{\"user\":\"VladimirRott\",\"state\":\"APPROVED\",\"commit_id\":\"$HEADSHA\",\"submitted_at\":\"2026-10-25T20:00:00Z\",\"html_url\":\"https://x/r1\"}' \\
+                     '{\"user\":\"vladimirrott\",\"state\":\"COMMENTED\",\"commit_id\":\"$OLDSHA\",\"submitted_at\":\"2026-10-24T20:00:00Z\",\"html_url\":\"https://x/r0\"}' \\
+                     '{\"user\":\"someone-else\",\"state\":\"APPROVED\",\"commit_id\":\"$HEADSHA\",\"submitted_at\":\"2026-10-25T21:00:00Z\",\"html_url\":\"https://x/r2\"}' ;;
+  *pulls/7/comments*) printf '%s\\n' '{\"user\":\"vladimirrott\",\"path\":\"bin/a.sh\",\"commit_id\":\"$HEADSHA\",\"created_at\":\"2026-10-25T20:01:00Z\",\"html_url\":\"https://x/c1\"}' \\
+                     '{\"user\":\"vladimirrott\",\"path\":\"bin/b.sh\",\"commit_id\":\"$OLDSHA\",\"created_at\":\"2026-10-24T20:01:00Z\",\"html_url\":\"https://x/c0\"}' \\
+                     '{\"user\":\"another\",\"path\":\"bin/c.sh\",\"commit_id\":\"$HEADSHA\",\"created_at\":\"2026-10-25T20:02:00Z\",\"html_url\":\"https://x/c2\"}' ;;
+  *'pulls/8/'*) exit 0 ;;
+  *) exit 0 ;;
+esac"
+rvw() {  # env assignments, then --, then the arguments
+    local -a envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+    env PATH="$stub_dir:$PATH" MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=vladimirrott \
+        MAINTAINER_PROFILE=lease "${envs[@]}" python3 "$root/bin/maintainer" reviewed "$@" 2>&1; }
+rm -f "$lsd/leases/pr-7.json"
+out="$(rvw -- 7)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'https://x/r1' <<<"$out" && grep -q 'https://x/c1' <<<"$out" && grep -q 'APPROVED' <<<"$out" \
+    && ok "reviewed lists this account's review and inline comment at the current head" \
+    || bad "reviewed (rc=$rc): $out"
+grep -q 'https://x/r0\|https://x/c0' <<<"$out" && bad "reviewed listed something from an older head" \
+    || ok "and nothing from an older head"
+grep -q 'https://x/r2\|https://x/c2' <<<"$out" && bad "reviewed listed someone else's activity" \
+    || ok "and nothing by another account"
+grep -qi '1 review.*1 inline comment' <<<"$out" && ok "with a count" || bad "no count line: $out"
+grep -qi 'not leased\|free' <<<"$out" && ok "and says the PR is not leased" || bad "no lease status when free: $out"
+lease_as me take 7 --for 'second look' >/dev/null
+out="$(rvw MAINTAINER_IN_RUN=magent/review -- 7)"
+grep -qi 'leased' <<<"$out" && grep -q 'interactive' <<<"$out" && grep -q 'second look' <<<"$out" \
+    && ok "when the PR is leased by someone else it says by whom and why" || bad "the lease is not in the output: $out"
+lease_as me release 7 >/dev/null
+out="$(rvw RV_HEAD="$OLDSHA" -- 7)"
+grep -q 'https://x/r0' <<<"$out" && ! grep -q 'https://x/r1' <<<"$out" \
+    && ok "the head is read from GitHub each time, not remembered" || bad "reviewed used a stale head: $out"
+out="$(rvw -- 8)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'no review\|none' <<<"$out" && ok "with nothing by this account it says none, and still exits 0" || bad "an empty history (rc=$rc): $out"
+# Refusals: a read that failed is not an empty history.
+out="$(rvw RV_FAIL=1 -- 7)"; rc=$?
+[ "$rc" != 0 ] && ! grep -qi 'no review\|none' <<<"$out" && grep -q 'could not read' <<<"$out" \
+    && ok "a failed read of the reviews refuses instead of reporting none" || bad "a failed read passed (rc=$rc): $out"
+out="$(rvw RV_HEAD= -- 7)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'could not read' <<<"$out" && ok "an unreadable head refuses" || bad "an empty head passed (rc=$rc): $out"
+out="$(rvw MAINTAINER_ACCOUNT= -- 7)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'account' <<<"$out" && ok "an unknown account refuses: it cannot say whose reviews to list" || bad "no account passed (rc=$rc): $out"
+out="$(rvw -- 'x;y')"; rc=$?
+[ "$rc" != 0 ] && ok "a pull request that is not a number is refused" || bad "reviewed accepted 'x;y'"
+pure="$stub_dir/purestate"; rm -rf "$pure"
+rvw MAINTAINER_STATE="$pure" -- 7 >/dev/null
+[ ! -e "$pure" ] && ok "reviewed is a pure read: against an empty state directory it creates nothing" \
+    || bad "reviewed wrote into the state directory: $(find "$pure" | head -3 | tr '\n' ' ')"
+# An expired lease blocks nobody, so it is reported as free.
+printf '{"holder":"interactive","kind":"interactive","note":"gone","acquired":1,"renewed":%s,"ttl_seconds":60}\n' \
+    "$(( $(date +%s) - 3600 ))" > "$lsd/leases/pr-7.json"
+out="$(rvw -- 7)"
+grep -qi 'not leased' <<<"$out" && ! grep -q 'gone' <<<"$out" && ok "an expired lease is reported as free" || bad "an expired lease was reported as held: $out"
+rm -f "$lsd/leases/pr-7.json"
+rm -f "$stub_dir/gh"
+for f in profiles/sysknife/prompts/review.md profiles/_template/prompts/review.md; do
+    grep -q 'maintainer reviewed <pr>' "$root/$f" \
+        && ok "$f uses 'maintainer reviewed' instead of a hand-built activity loop" \
+        || bad "$f does not point the review at 'maintainer reviewed <pr>'"
+done
+grep -qi 'runs yield to interactive work' "$root/docs/maintainer-doctrine.md" && grep -q 'maintainer lease take' "$root/docs/maintainer-doctrine.md" \
+    && ok "the doctrine says who yields to whom" || bad "docs/maintainer-doctrine.md does not say that runs yield to interactive work"
+# --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"

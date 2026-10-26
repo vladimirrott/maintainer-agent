@@ -29,12 +29,16 @@ on. Defaults and the environment variables are in [Configuration](configuration.
 | `maintainer fixup-check <pr>` | the check `maintainer-repo fixup` runs at the current head: prints `state=notice` (the heads-up is due), `state=ready` (the push may follow) and the facts the script needs, or exits 1 with the reason. Also refuses a patch that touches production, `.github/`, anything the screen calls build- or gate-executed, a file the review did not name, or more than `FIXUP_MAX_LINES` lines. Read-only |
 | `maintainer holders <issue>` | who the maintainer has pointed at one issue and not released, one handle per line. `maintainer-merge` calls this before merging a PR that closes an issue, so the gate and `offers` share one derivation instead of two |
 | `maintainer file-issue --title T --body-file F [--fingerprint FP] [--label L] [--dry-run]` | file one tracker issue for a finding, deduplicated by fingerprint. The only path issue creation takes; a bare `gh issue create` is denied. `--dry-run`, or `POST=off`, rehearses. An unreadable tracker stops it, since it cannot tell whether the finding is already filed |
-| `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`. Never touches `runs/` or `index.md` |
+| `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`, and PR leases that expired longer ago than that. Never touches `runs/`, `index.md`, a live lease or the run lease |
+| `maintainer lease take <pr>... [--ttl D] [--for TEXT]`<br>`lease release <pr>...`<br>`lease check <pr>` | say who is working a pull request, until when, and why, so a timer run and an interactive session never work one blind. A lease is a file under the state directory's `leases/`: holder (`interactive`, or `run:<profile>/<task>` inside a run), note, acquired, renewed, TTL. `take` refuses while another holder's lease is live and names that holder; taking again renews; an expired lease may be taken over and the takeover is printed. Several PRs are all or nothing. `--ttl` is seconds or `10m`, `2h`, `1d` (default `LEASE_TTL_SECONDS`, 3600). `check` exits 0 when the PR is free or yours, 1 when someone else holds it (printing who, why and when it expires), and 2 when the lease file cannot be read, which is never read as free. `release` frees your own lease, or an expired one, and refuses someone else's live one |
+| `maintainer reviewed <pr>` | what this profile's account already said on a pull request at its current head: its reviews and inline comments whose `commit_id` is the head now, plus the lease. A pure read from GitHub with no state of its own, and a read that fails refuses instead of reporting none. Issue comments carry no `commit_id` and are not counted |
 | `maintainer log [n]` | the last n lines of the run index (`index.md`), default 10: one line per finished run. A run's own log is under the state directory's `logs/` |
 
 ## `maintainer-merge`
 
-The only path to a merge.
+The only path to a merge. `verify`, `verify-deps` and `merge` refuse a pull request
+another actor has leased (`maintainer lease check` exits non-zero), naming the holder,
+and refuse when they cannot ask. See [the doctrine](maintainer-doctrine.md).
 
 | command | what it does |
 |---|---|
@@ -66,7 +70,8 @@ identity, the repository, the scheduler, a real container, and the audit trail.
 
 ## Called by run.sh, not by you
 
-`start`, `finish`, `abort`, `failed`, `ok`. They open a run, close it, record
-that one produced nothing, write a failure marker and clear it. `run.sh` calls
+`start`, `finish`, `abort`, `failed`, `ok`, `run-lease`. They open a run, close
+it, record that one produced nothing, write a failure marker and clear it, and
+write or remove `leases/run.json`, the label `status` reads beside `run.lock`. `run.sh` calls
 them in order; typing them by hand puts the audit trail out of step with what
 happened.

@@ -58,8 +58,14 @@ def _resolve_profile() -> str:
 # `--help` names no profile and must work with two deployed and none chosen, so
 # it skips resolution; main() answers it before anything reads PROFILE.
 _HELP = sys.argv[1:2] in (["--help"], ["-h"], ["help"])
-PROFILE = "" if _HELP else _resolve_profile()
-if not PROFILE and not _HELP:
+# `lease` needs a state directory and nothing else of a profile. When the caller
+# names the directory itself (maintainer-merge always does) there is no project
+# to guess, so it works with several profiles deployed and none chosen.
+_NO_PROFILE = _HELP or (sys.argv[1:2] in (["lease"], ["run-lease"])
+                        and bool(os.environ.get("MAINTAINER_STATE"))
+                        and not os.environ.get("MAINTAINER_PROFILE"))
+PROFILE = "" if _NO_PROFILE else _resolve_profile()
+if not PROFILE and not _NO_PROFILE:
     raise SystemExit("maintainer: no profile is deployed. Run ./install.sh from the repository,\n"
                      "            or set MAINTAINER_PROFILE to the one you mean.")
 # A profile name becomes a path AND, below, part of a shell command. Both need
@@ -69,7 +75,7 @@ if not PROFILE and not _HELP:
 # nothing when whoever sets the variable also creates the directory. That is
 # arbitrary shell inside a subprocess the deny wall never sees.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-if not _HELP and not _SAFE_NAME.match(PROFILE):
+if not _NO_PROFILE and not _SAFE_NAME.match(PROFILE):
     raise SystemExit(f"maintainer: refusing a profile name that is not a plain "
                      f"word: {PROFILE!r}")
 
@@ -851,6 +857,22 @@ def cmd_gc(dry: bool) -> None:
                 else:
                     entry.unlink(missing_ok=True)
                 print(f"  removed  {entry.relative_to(ROOT)}  ({size} bytes)")
+    # A lease that expired longer ago than the window is clutter. A live one, a
+    # recent expiry, the run lease and a file that cannot be read are all left.
+    for f in sorted(LEASES.glob("pr-*.json")) if LEASES.exists() else []:
+        try:
+            if _lease_expires(json.loads(f.read_text())) >= cutoff:
+                continue
+            size = f.stat().st_size
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        n += 1
+        freed += size
+        if dry:
+            print(f"  would remove  {f.relative_to(ROOT)}  ({size} bytes)")
+        else:
+            f.unlink(missing_ok=True)
+            print(f"  removed  {f.relative_to(ROOT)}  ({size} bytes)")
     verb = "would free" if dry else "freed"
     print(f"maintainer: {verb} {freed} bytes across {n} item(s) older than {days} days; "
           f"{kept} bytes kept")
@@ -2556,6 +2578,414 @@ def cmd_file_issue(args: list[str]) -> None:
     print((p.stdout or "").strip())
 
 
+# --- leases -----------------------------------------------------------------
+# A lease is a small file naming who is working one pull request, until when and
+# doing what, so the second actor asks instead of finding out with `ps`. The
+# pattern is a Kubernetes Lease (holder, duration, renew time) on the local
+# filesystem: a timer run and an interactive session share one host and one
+# GitHub account, so a file is enough. There is no daemon, no heartbeat and no
+# label. The incidents are docs/lessons.md 8, 80 and 2026-10-25.
+LEASES = ROOT / "leases"
+_DURATION = re.compile(r"^([1-9][0-9]*)([smhd]?)$")
+_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _lease_actor() -> tuple[str, str]:
+    """(kind, holder) of whoever is asking. Inside a run it is that run's task."""
+    in_run = os.environ.get("MAINTAINER_IN_RUN", "")
+    return ("run", f"run:{in_run}") if in_run else ("interactive", "interactive")
+
+
+def _lease_pr(arg: str) -> str:
+    """A pull request number, or refuse: it becomes part of a file name."""
+    if not re.fullmatch(r"[0-9]+", arg or ""):
+        raise SystemExit(f"maintainer lease: {arg!r} is not a pull request number")
+    return arg
+
+
+def _lease_seconds(text: str) -> int:
+    m = _DURATION.match(text or "")
+    if not m:
+        raise SystemExit(f"maintainer lease: {text!r} is not a duration: a whole number "
+                         f"of seconds, or one with s, m, h or d (10m, 2h)")
+    return int(m.group(1)) * _UNIT[m.group(2)]
+
+
+class _LeaseMutex:
+    """A short flock on leases/.mutex, so a take is one read-decide-write step.
+
+    Two takers that both read "free" would both write and both believe they
+    hold it. The lock covers the decision and the write, nothing longer.
+    """
+    def __enter__(self):
+        import fcntl
+        LEASES.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(LEASES / ".mutex", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)        # closing drops the flock
+
+
+def _lease_path(pr: str) -> Path:
+    return LEASES / f"pr-{pr}.json"
+
+
+class _LeaseUnreadable(Exception):
+    pass
+
+
+def _lease_read(pr: str) -> dict | None:
+    """The lease on one PR, None when there is none. An unreadable file refuses.
+
+    A file that cannot be parsed is not a free pull request: answering "free"
+    for it is a guard that answered when it could not ask.
+    """
+    f = _lease_path(pr)
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        d = json.loads(text)
+        for k in ("holder", "kind", "renewed", "ttl_seconds"):
+            d[k]
+        d["renewed"], d["ttl_seconds"] = int(d["renewed"]), int(d["ttl_seconds"])
+    except (ValueError, KeyError, TypeError):
+        raise _LeaseUnreadable(f"maintainer lease: {f} cannot be read as a lease, so #{pr} is "
+                               f"neither free nor held.\n"
+                               f"                  Look at it, then remove it if it is junk.")
+    return d
+
+
+def _lease_expires(d: dict) -> int:
+    return d["renewed"] + d["ttl_seconds"]
+
+
+def _lease_expired(d: dict, now: float) -> bool:
+    return now >= _lease_expires(d)
+
+
+def _lease_write(pr: str, d: dict) -> None:
+    f = _lease_path(pr)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(d, sort_keys=True) + "\n")
+    os.replace(tmp, f)
+
+
+def _ago(seconds: float) -> str:
+    """A span as 45s, 12m, 3h or 2.5d. Not _duration, which says "in" and "overdue"."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s / 3600:.1f}h".replace(".0h", "h")
+    return f"{s / 86400:.1f}d".replace(".0d", "d")
+
+
+def _lease_describe(pr: str, d: dict, now: float) -> str:
+    note = f', "{d["note"]}"' if d.get("note") else ""
+    left = _lease_expires(d) - now
+    when = f"expires in {_ago(left)}" if left > 0 else f"expired {_ago(-left)} ago"
+    return f"#{pr} held by {d['holder']} ({d['kind']}){note}; {when}"
+
+
+def cmd_lease(args: list[str]) -> None:
+    try:
+        _lease_main(args)
+    except _LeaseUnreadable as e:
+        # 2, not 1: "held by someone else" and "could not tell" are different
+        # answers, and a caller that treats both as "skip" is right to.
+        print(e, file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _lease_main(args: list[str]) -> None:
+    if not args or args[0] not in ("take", "release", "check"):
+        raise _Usage
+    verb, rest = args[0], args[1:]
+    if verb == "check":
+        if len(rest) != 1:
+            raise _Usage
+        raise SystemExit(_lease_check(_lease_pr(rest[0])))
+    ttl, note, prs, i = None, "", [], 0
+    while i < len(rest):
+        a = rest[i]
+        if verb == "take" and a in ("--ttl", "--for"):
+            if i + 1 >= len(rest):
+                raise _Usage
+            if a == "--ttl":
+                ttl = _lease_seconds(rest[i + 1])
+            else:
+                note = rest[i + 1]
+            i += 2
+            continue
+        if a.startswith("--"):
+            raise _Usage
+        prs.append(_lease_pr(a))
+        i += 1
+    if not prs:
+        raise _Usage
+    if verb == "take":
+        raise SystemExit(_lease_take(prs, ttl if ttl is not None else _tunable_int("LEASE_TTL_SECONDS"), note))
+    raise SystemExit(_lease_release(prs))
+
+
+def _lease_check(pr: str) -> int:
+    _, me = _lease_actor()
+    now = datetime.now().timestamp()
+    d = _lease_read(pr)
+    if d is None:
+        print(f"#{pr} is free")
+        return 0
+    if _lease_expired(d, now):
+        print(f"#{pr} is free ({_lease_describe(pr, d, now)}, so it is ignored)")
+        return 0
+    if d["holder"] == me:
+        print(f"#{pr} is leased to you: {_lease_describe(pr, d, now)}")
+        return 0
+    print(_lease_describe(pr, d, now))
+    return 1
+
+
+def _lease_take(prs: list[str], ttl: int, note: str) -> int:
+    kind, me = _lease_actor()
+    now = int(datetime.now().timestamp())
+    with _LeaseMutex():
+        held, took = [], []
+        for pr in prs:
+            d = _lease_read(pr)
+            if d is None or d["holder"] == me:
+                continue
+            if _lease_expired(d, now):
+                took.append((pr, d))
+            else:
+                held.append((pr, d))
+        if held:
+            # All or nothing: a partial take would leave the caller holding half
+            # of what it asked for and believing it was refused.
+            for pr, d in held:
+                print(f"refused: {_lease_describe(pr, d, now)}")
+            return 1
+        for pr in prs:
+            d = _lease_read(pr)
+            mine = d is not None and d["holder"] == me
+            _lease_write(pr, {
+                "pr": int(pr), "holder": me, "kind": kind,
+                "note": note or (d.get("note", "") if mine else ""),
+                "acquired": d["acquired"] if mine else now,
+                "renewed": now, "ttl_seconds": ttl})
+            print(f"#{pr} {'renewed' if mine else 'leased'} to {me} for {_ago(ttl)}")
+        for pr, d in took:
+            print(f"took over #{pr} from {d['holder']}, whose lease had expired "
+                  f"{_ago(now - _lease_expires(d))} ago")
+    if kind == "interactive":
+        _warn_live_run()
+    return 0
+
+
+def _lease_release(prs: list[str]) -> int:
+    _, me = _lease_actor()
+    now = datetime.now().timestamp()
+    rc = 0
+    with _LeaseMutex():
+        for pr in prs:
+            d = _lease_read(pr)
+            if d is None:
+                print(f"#{pr} had no lease")
+            elif d["holder"] != me and not _lease_expired(d, now):
+                print(f"refused: {_lease_describe(pr, d, now)}")
+                rc = 1
+            else:
+                _lease_path(pr).unlink(missing_ok=True)
+                print(f"#{pr} released")
+    return rc
+
+
+def _lock_held(path: Path) -> bool:
+    """Is an flock held on this file right now? Ask the lock, never a pid.
+
+    A pid recorded in a file outlives the process, and a process-name pattern
+    matches the shell asking (docs/lessons.md). `flock -n` on the same file is
+    the question run.sh's own lock answers. A missing file is a free lock.
+    """
+    import fcntl
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)             # closing drops a lock this call just took
+    return False
+
+
+def _run_lease() -> tuple[str, dict]:
+    """("live" | "stale" | "idle", the record). The lock decides, the file only labels.
+
+    run.sh writes leases/run.json after it takes run.lock and removes it on
+    exit, so a file beside a free lock is what a killed run leaves behind.
+    """
+    f = LEASES / "run.json"
+    held = _lock_held(ROOT / "run.lock")
+    try:
+        d = json.loads(f.read_text())
+        if not isinstance(d, dict):
+            raise ValueError
+    except FileNotFoundError:
+        return ("live", {}) if held else ("idle", {})
+    except ValueError:
+        d = {}
+    return ("live" if held else "stale", d)
+
+
+def _warn_live_run() -> None:
+    """A take during a live run warns and goes ahead: runs yield to interactive work."""
+    state, d = _run_lease()
+    if state != "live":
+        return
+    rid = d.get("run_id") or "(run id not recorded yet)"
+    print(f"warning: a run is live ({d.get('task', '?')}, {rid}) and may already be on this PR.")
+    if d.get("run_id"):
+        print(f"         To stop it: maintainer abort {d['run_id']} \"<reason>\"")
+
+
+def cmd_run_lease(args: list[str]) -> None:
+    """Write or clear leases/run.json. Called by run.sh, which holds run.lock."""
+    if args == ["--clear"]:
+        (LEASES / "run.json").unlink(missing_ok=True)
+        return
+    if len(args) not in (2, 3) or not _SAFE_NAME.match(args[0]) or not args[1].isdigit() \
+            or (len(args) == 3 and not _SAFE_NAME.match(args[2])):
+        raise SystemExit("maintainer run-lease: expects <task> <pid> [run-id], or --clear; "
+                         "the task and run id must be plain words")
+    LEASES.mkdir(parents=True, exist_ok=True)
+    rec = {"task": args[0], "pid": int(args[1]), "started": int(datetime.now().timestamp())}
+    if len(args) == 3:
+        rec["run_id"] = args[2]
+    f = LEASES / "run.json"
+    try:
+        before = json.loads(f.read_text())
+        if before.get("pid") == rec["pid"]:
+            rec["started"] = before.get("started", rec["started"])     # the run id arrives later
+    except (OSError, ValueError, AttributeError):
+        pass
+    tmp = f.with_name(f".run.json.{os.getpid()}")
+    tmp.write_text(json.dumps(rec, sort_keys=True) + "\n")
+    os.replace(tmp, f)
+
+
+def _lease_status_lines(now: float) -> list[str]:
+    state, d = _run_lease()
+    out = ["leases"]
+    if state == "live":
+        since = f", started {_ago(now - d['started'])} ago" if d.get("started") else ""
+        out.append(f"  run     LIVE  {d.get('task', '?')}, {d.get('run_id') or 'run id not recorded yet'}"
+                   f"{since}")
+    elif state == "stale":
+        what = " ".join(x for x in (d.get("task"), d.get("run_id")) if x) or "a run"
+        out.append(f"  run     stale: leases/run.json names {what}, but run.lock is free, so it is ignored")
+    else:
+        out.append("  run     idle: no run holds the lock")
+    for f in sorted(LEASES.glob("pr-*.json"), key=lambda p: int(p.stem[3:]) if p.stem[3:].isdigit() else 0):
+        pr = f.stem[3:]
+        try:
+            lease = _lease_read(pr)
+        except _LeaseUnreadable:
+            out.append(f"  #{pr:<6} UNREADABLE lease file; `check` refuses it and it blocks nobody")
+            continue
+        if lease is None:
+            continue
+        note = f' "{lease["note"]}"' if lease.get("note") else ""
+        head = f" @{str(lease['head_sha'])[:8]}" if lease.get("head_sha") else ""
+        left = _lease_expires(lease) - now
+        if left <= 0:
+            out.append(f"  #{pr:<6} {lease['holder']}{note}{head}  EXPIRED {_ago(-left)} ago, ignored")
+        else:
+            out.append(f"  #{pr:<6} {lease['holder']}{note}{head}  renewed {_ago(now - lease['renewed'])} ago, "
+                       f"expires in {_ago(left)}")
+    if len(out) == 2 and state == "idle":
+        out.append("  no pull request is leased")
+    return out
+
+
+
+def _gh_lines(*args: str) -> list[dict]:
+    """Objects one-per-line from a paginated `gh api ... --jq`, or refuse.
+
+    A read that failed is not an empty history: "none by you" from a 502 would
+    send a review back over work it had already done.
+    """
+    p = _spawn(("gh", *args), cwd=REPO)
+    if p.returncode != 0:
+        raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                         f"{(p.stderr or p.stdout).strip()[:200]}")
+    rows = []
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                             f"a line was not JSON")
+        if not isinstance(row, dict):
+            raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                             f"unexpected shape")
+        rows.append(row)
+    return rows
+
+
+def cmd_reviewed(pr: str) -> None:
+    """What this profile's account already said on a PR at its current head, and its lease.
+
+    A pure read, derived from GitHub on every call, so there is no ledger to go
+    stale. Issue comments carry no commit_id and cannot be tied to a head, so
+    only reviews and inline review comments count.
+    """
+    if not re.fullmatch(r"[0-9]+", pr):
+        raise SystemExit(f"maintainer reviewed: {pr!r} is not a pull request number")
+    me = _owner()
+    if not me:
+        raise SystemExit("maintainer reviewed: the profile names no GitHub account "
+                         "(GH_ACCOUNT), so I cannot say whose reviews to list")
+    head = ""
+    p = _spawn(("gh", "pr", "view", pr, "--repo", SLUG, "--json", "headRefOid", "--jq", ".headRefOid"),
+               cwd=REPO)
+    if p.returncode == 0:
+        head = p.stdout.strip()
+    if not head:
+        raise SystemExit(f"maintainer reviewed: could not read the head of #{pr}")
+    api = f"repos/{SLUG}/pulls/{pr}"
+    reviews = _gh_lines("api", "--paginate", f"{api}/reviews", "--jq",
+                        '.[] | {user: .user.login, state, commit_id, submitted_at, html_url} | tojson')
+    comments = _gh_lines("api", "--paginate", f"{api}/comments", "--jq",
+                         '.[] | {user: .user.login, path, commit_id, created_at, html_url} | tojson')
+    mine_r = [r for r in reviews if _login(r.get("user")) == me and r.get("commit_id") == head]
+    mine_c = [c for c in comments if _login(c.get("user")) == me and c.get("commit_id") == head]
+    print(f"#{pr} head {head[:8]}, account {me}")
+    for r in mine_r:
+        print(f"  review   {r.get('state', '?'):17} {r.get('submitted_at', '?')}  {r.get('html_url', '')}")
+    for c in mine_c:
+        print(f"  inline   {c.get('path', '?'):17} {c.get('created_at', '?')}  {c.get('html_url', '')}")
+    if mine_r or mine_c:
+        print(f"{len(mine_r)} review(s) and {len(mine_c)} inline comment(s) by {me} at this head")
+    else:
+        print(f"no review or inline comment by {me} at this head")
+    d = _lease_read(pr)
+    now = datetime.now().timestamp()
+    if d is None or _lease_expired(d, now):
+        print("lease: not leased (free)")
+    else:
+        print("lease: leased. " + _lease_describe(pr, d, now))
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -2658,6 +3088,8 @@ def cmd_status() -> None:
     if rec:
         print(f"\n{len(rec)} verification receipt(s) open: "
               + ", ".join("#" + p.stem for p in rec))
+    print()
+    print("\n".join(_lease_status_lines(datetime.now().timestamp())))
 
 
 def cmd_run(args: list[str]) -> None:
@@ -2882,6 +3314,11 @@ COMMANDS = {
                       cmd_file_issue),
     "gc": Cmd("gc [--dry-run]", "prune logs and drafts past RETENTION_DAYS",
               lambda a: cmd_gc("--dry-run" in a)),
+    "lease": Cmd("lease take <pr>... [--ttl D] [--for TEXT] | release <pr>... | check <pr>",
+                 "say who is working a pull request, until when; a run yields to a lease",
+                 cmd_lease, 2),
+    "reviewed": Cmd("reviewed <pr>", "what this account already said at the PR's current head, and its lease",
+                    lambda a: cmd_reviewed(a[0]), 1, 1),
     "log": Cmd("log [n]", "the last n lines of the run index (default 10)",
                lambda a: cmd_log(int(a[0]) if a else 10)),
     "start": Cmd("start <task>", "refresh, diff against the last run, open a report",
@@ -2890,6 +3327,8 @@ COMMANDS = {
                   lambda a: cmd_finish(a[0]), 1, 1, True),
     "abort": Cmd("abort <run-id> <reason>", "record that a run started and produced nothing",
                  lambda a: cmd_abort(a[0], a[1]), 2, None, True),
+    "run-lease": Cmd("run-lease <task> <pid> [run-id] | --clear", "write or clear leases/run.json for the run holding run.lock",
+                     cmd_run_lease, 1, 3, True),
     "failed": Cmd("failed <task> <reason> [log]", "write a failure marker for a task",
                   lambda a: record_failure(a[0], a[1], a[2] if len(a) > 2 else ""), 2, None, True),
     "ok": Cmd("ok <task>", "clear a task's failure marker",

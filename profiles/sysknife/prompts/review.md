@@ -6,6 +6,10 @@ start in), push account `vladimirrott`.
 
 1. Take every open PR, oldest first. Skip any whose head SHA you already reviewed
    (the context block says which moved). Re-pin the SHA and name it in the review.
+   Run `maintainer lease check <pr>` first and skip a PR it reports as leased,
+   saying so in the report.
+   `maintainer reviewed <pr>` lists what this account already said at the head now,
+   and the lease; use it instead of a hand-built loop over reviews and comments.
 2. Run the gates its change class requires, copying the commands from
    `.github/workflows/ci.yml` rather than from memory. Use podman on a free port
    for anything Postgres, and confirm the run prints `running N tests` with N > 0.

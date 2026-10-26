@@ -3297,3 +3297,29 @@ needs more declares it beside its job count (`suite_memory` and `suite_jobs` in
 `verify.d/rust.sh`), so the rust suite gets 6g without every other suite paying
 for it. `scripts/check_drift.py` fails when a key in the defaults file or an
 environment variable the code reads goes undocumented.
+
+## 114. An interactive session and a timer run worked the same pull requests, and neither could see the other
+
+On 2026-10-25 an interactive session and the 21:14 review run worked #637, #658
+and #660 at the same time. The run's report said "#658 already reviewed at this
+head by vladimirrott" and could not tell whose review that was. The interactive
+session found the live run with `ps`. This was the third time: lesson 8 (a timer
+fired on a session mid-review) and lesson 80 (a manual `verify 426` beside the
+timer's) had the same shape, and each got a lock for its own action.
+
+Those locks were anonymous. `run.lock` and the per-PR `.verify-N.lock` and
+`.merge-N.lock` answer "is somebody there" and cannot answer who, until when, or
+doing what. Two actors on one host and one account have no other way to tell
+their work apart.
+
+**Guard:** a lease per pull request under `leases/` (holder, note, renewed, TTL
+from `LEASE_TTL_SECONDS`), taken with `maintainer lease take`. A run checks the
+lease before posting, `maintainer-merge verify` and `merge` refuse a PR another
+actor holds, and the run itself leaves `leases/run.json` whose liveness is asked
+of `run.lock`, never of a pid. Of twelve mutations of the take path, ten were
+killed by the first tests; two survived. The expiry boundary (`>=` against `>`)
+needed a test that calls the predicate with a clock it controls, because no real
+run lands on the exact second. And a fixture for `gc` whose run lease had no
+`renewed` field passed a mutation that made `gc` delete `run.json`, since the
+parse error spared it; the fixture now carries an ancient expiry so only the
+glob protects the file.

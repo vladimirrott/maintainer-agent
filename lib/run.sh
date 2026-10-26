@@ -389,6 +389,18 @@ fi
 # likely rather than less.
 min_gate "after waiting for the lock"
 
+# Say which run holds the lock. A file beside the lock names the task and pid, so
+# an interactive session can ask `maintainer status` instead of running `ps`.
+# It only labels: whether the run is live is decided by asking run.lock, and a
+# file left by a killed run beside a free lock is ignored. Failing to write it
+# is logged and never stops the run.
+clear_run_lease() {
+    "$HELPER" run-lease --clear >>"$log" 2>&1 || true
+}
+"$HELPER" run-lease "$task" "$$" >>"$log" 2>&1 \
+    || echo "run-lease: could not write leases/run.json; the run goes on without it" >>"$log"
+trap clear_run_lease EXIT
+
 # 0. Pin the GitHub identity and refuse to run without it.
 #
 # `gh`'s active account has been observed flipping back to a different account
@@ -490,6 +502,7 @@ scrub_pinned_token() {
     [ -d "$sess" ] && where="$where $sess"
     # shellcheck disable=SC2086
     maintainer_scrub_secret "$GH_TOKEN" $where >>"$log" 2>&1 || true
+    clear_run_lease
     return "$rc"
 }
 trap scrub_pinned_token EXIT
@@ -569,6 +582,9 @@ if [ "$log" != "$log_by_id" ]; then
     log="$log_by_id"
     printf 'log renamed to match run id %s\n' "$run_id" >>"$log"
 fi
+# The run id exists now; add it to the lease.
+"$HELPER" run-lease "$task" "$$" "$run_id" >>"$log" 2>&1 \
+    || echo "run-lease: could not add the run id to leases/run.json" >>"$log"
 
 else
     context="(preview only: no refresh ran, so nothing here reflects the tracker)"

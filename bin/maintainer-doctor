@@ -387,6 +387,34 @@ elif [ -d "$st" ]; then
     else
         green "no receipt outlives its pull request"
     fi
+    # A lease nobody released and nobody renewed. It blocks nothing once it has
+    # expired, so this is housekeeping, but a lease that old means a session
+    # ended without letting go, and a file the doctor cannot read is not a pass.
+    _forgotten=""
+    if [ -d "$st/leases" ]; then
+        if ! _forgotten="$(LEASE_H="$DOCTOR_LEASE_HOURS" python3 -c '
+import glob, json, os, sys, time
+limit = float(os.environ["LEASE_H"]) * 3600
+for f in sorted(glob.glob(sys.argv[1] + "/pr-*.json")):
+    pr = os.path.basename(f)[3:-5]
+    try:
+        age = time.time() - int(json.load(open(f))["renewed"])
+    except (OSError, ValueError, KeyError, TypeError):
+        print("#%s (unreadable)" % pr)
+        continue
+    if age > limit:
+        print("#%s (renewed %.0fh ago)" % (pr, age / 3600))
+' "$st/leases" 2>&1)"; then
+            yellow "could not read the leases under $st/leases, so forgotten ones are unknown" "python3 and a readable state directory"
+            _forgotten=""
+        fi
+    fi
+    if [ -n "$_forgotten" ]; then
+        yellow "lease(s) nobody has renewed for over ${DOCTOR_LEASE_HOURS}h: $(paste -sd, <<<"$_forgotten" | sed 's/,/, /g')" \
+            "maintainer lease release $(sed -n 's/^#\([0-9]*\) .*/\1/p' <<<"$_forgotten" | tr '\n' ' ')"
+    else
+        green "no lease has gone ${DOCTOR_LEASE_HOURS}h without a renewal"
+    fi
     [ -w "$st" ] && green "state directory writable" || red "state directory not writable" "chown it"
     # A pinned token that outlived the run that used it. run.sh scrubs on exit,
     # so anything found here was written by a build older than that trap, by a

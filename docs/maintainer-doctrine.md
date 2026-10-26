@@ -129,6 +129,28 @@ An empty check list is treated as a failure, not as green. That distinction has
 a repository behind it: this project's recurring defect is a test that passes
 with the fix reverted, which no board can see.
 
+## Who yields to whom
+
+A person at a keyboard and a timer run share one host, one GitHub account and
+one list of open pull requests. Nothing in the account tells a second review
+apart from the first, so on 2026-10-25 an interactive session and the 21:14 run
+worked #637, #658 and #660 at once, and the run could not say whose review it
+had found at #658.
+
+The rule is that **runs yield to interactive work**, and the lease makes it
+mechanical. Whoever starts work on a pull request runs `maintainer lease take
+<pr>`. A run checks `maintainer lease check <pr>` before it posts and skips a
+leased PR, saying so in its report. `maintainer-merge` refuses `verify` and
+`merge` on a PR another actor holds. An interactive session that takes a PR
+while a run is live gets a warning with the run id and the `maintainer abort`
+hint, and takes it anyway: a person is not made to wait for a timer.
+
+Three properties keep this honest. A lease expires, so a session that died
+cannot block a PR for longer than its TTL. Liveness of the run itself is asked
+of `run.lock`, never of a pid or a process name, so a file left by a killed run
+is ignored. And every refusal says who holds the PR and why, so the next move
+is a conversation and not a guess.
+
 ## Bus factor
 
 The audit trail is not bookkeeping, it is the succession document. Every run
