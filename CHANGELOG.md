@@ -66,6 +66,11 @@ middle digit.
   verbs need only a state directory, so when the caller names one (as
   `maintainer-merge` does) they answer with several profiles deployed and none
   chosen; without one they still refuse to guess a project.
+- **`maintainer reviewed <pr>`.** Lists the reviews and inline comments by the
+  profile's account whose `commit_id` is the PR's head now, plus the lease. A
+  pure read, derived from GitHub on every call; a read that fails refuses
+  instead of reporting none. The review prompts use it instead of a hand-built
+  activity loop. docs/maintainer-doctrine.md gains "Who yields to whom".
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

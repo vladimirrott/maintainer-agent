@@ -8930,6 +8930,77 @@ out="$(env -u MAINTAINER_PROFILE -u MAINTAINER_STATE -u MAINTAINER_STATE_DIR HOM
 out="$(env -u MAINTAINER_PROFILE HOME="$two" MAINTAINER_STATE="$lsd" python3 "$root/bin/maintainer" status 2>&1)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'profiles are deployed' <<<"$out" \
     && ok "naming a state directory excuses only the lease verbs, not status" || bad "status guessed a profile (rc=$rc): $out"
+echo "== maintainer reviewed: what this account already said at the current head =="
+# On 2026-10-25 a run found "#658 already reviewed at this head by vladimirrott" and could not tell
+# whose review it was. `reviewed` answers from GitHub alone: the reviews and inline comments by the
+# profile's account whose commit_id is the head now, plus the lease. It keeps no state of its own.
+HEADSHA=1111111111111111111111111111111111111111
+OLDSHA=2222222222222222222222222222222222222222
+make_stub gh "case \"\$*\" in
+  *'pr view'*headRefOid*) echo \"\${RV_HEAD-$HEADSHA}\" ;;
+  *pulls/7/reviews*) [ -n \"\${RV_FAIL:-}\" ] && { echo 'HTTP 502' >&2; exit 1; }
+      printf '%s\\n' '{\"user\":\"VladimirRott\",\"state\":\"APPROVED\",\"commit_id\":\"$HEADSHA\",\"submitted_at\":\"2026-10-25T20:00:00Z\",\"html_url\":\"https://x/r1\"}' \\
+                     '{\"user\":\"vladimirrott\",\"state\":\"COMMENTED\",\"commit_id\":\"$OLDSHA\",\"submitted_at\":\"2026-10-24T20:00:00Z\",\"html_url\":\"https://x/r0\"}' \\
+                     '{\"user\":\"someone-else\",\"state\":\"APPROVED\",\"commit_id\":\"$HEADSHA\",\"submitted_at\":\"2026-10-25T21:00:00Z\",\"html_url\":\"https://x/r2\"}' ;;
+  *pulls/7/comments*) printf '%s\\n' '{\"user\":\"vladimirrott\",\"path\":\"bin/a.sh\",\"commit_id\":\"$HEADSHA\",\"created_at\":\"2026-10-25T20:01:00Z\",\"html_url\":\"https://x/c1\"}' \\
+                     '{\"user\":\"vladimirrott\",\"path\":\"bin/b.sh\",\"commit_id\":\"$OLDSHA\",\"created_at\":\"2026-10-24T20:01:00Z\",\"html_url\":\"https://x/c0\"}' \\
+                     '{\"user\":\"another\",\"path\":\"bin/c.sh\",\"commit_id\":\"$HEADSHA\",\"created_at\":\"2026-10-25T20:02:00Z\",\"html_url\":\"https://x/c2\"}' ;;
+  *'pulls/8/'*) exit 0 ;;
+  *) exit 0 ;;
+esac"
+rvw() {  # env assignments, then --, then the arguments
+    local -a envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+    env PATH="$stub_dir:$PATH" MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=vladimirrott \
+        MAINTAINER_PROFILE=lease "${envs[@]}" python3 "$root/bin/maintainer" reviewed "$@" 2>&1; }
+rm -f "$lsd/leases/pr-7.json"
+out="$(rvw -- 7)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'https://x/r1' <<<"$out" && grep -q 'https://x/c1' <<<"$out" && grep -q 'APPROVED' <<<"$out" \
+    && ok "reviewed lists this account's review and inline comment at the current head" \
+    || bad "reviewed (rc=$rc): $out"
+grep -q 'https://x/r0\|https://x/c0' <<<"$out" && bad "reviewed listed something from an older head" \
+    || ok "and nothing from an older head"
+grep -q 'https://x/r2\|https://x/c2' <<<"$out" && bad "reviewed listed someone else's activity" \
+    || ok "and nothing by another account"
+grep -qi '1 review.*1 inline comment' <<<"$out" && ok "with a count" || bad "no count line: $out"
+grep -qi 'not leased\|free' <<<"$out" && ok "and says the PR is not leased" || bad "no lease status when free: $out"
+lease_as me take 7 --for 'second look' >/dev/null
+out="$(rvw MAINTAINER_IN_RUN=magent/review -- 7)"
+grep -qi 'leased' <<<"$out" && grep -q 'interactive' <<<"$out" && grep -q 'second look' <<<"$out" \
+    && ok "when the PR is leased by someone else it says by whom and why" || bad "the lease is not in the output: $out"
+lease_as me release 7 >/dev/null
+out="$(rvw RV_HEAD="$OLDSHA" -- 7)"
+grep -q 'https://x/r0' <<<"$out" && ! grep -q 'https://x/r1' <<<"$out" \
+    && ok "the head is read from GitHub each time, not remembered" || bad "reviewed used a stale head: $out"
+out="$(rvw -- 8)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'no review\|none' <<<"$out" && ok "with nothing by this account it says none, and still exits 0" || bad "an empty history (rc=$rc): $out"
+# Refusals: a read that failed is not an empty history.
+out="$(rvw RV_FAIL=1 -- 7)"; rc=$?
+[ "$rc" != 0 ] && ! grep -qi 'no review\|none' <<<"$out" && grep -q 'could not read' <<<"$out" \
+    && ok "a failed read of the reviews refuses instead of reporting none" || bad "a failed read passed (rc=$rc): $out"
+out="$(rvw RV_HEAD= -- 7)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'could not read' <<<"$out" && ok "an unreadable head refuses" || bad "an empty head passed (rc=$rc): $out"
+out="$(rvw MAINTAINER_ACCOUNT= -- 7)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'account' <<<"$out" && ok "an unknown account refuses: it cannot say whose reviews to list" || bad "no account passed (rc=$rc): $out"
+out="$(rvw -- 'x;y')"; rc=$?
+[ "$rc" != 0 ] && ok "a pull request that is not a number is refused" || bad "reviewed accepted 'x;y'"
+pure="$stub_dir/purestate"; rm -rf "$pure"
+rvw MAINTAINER_STATE="$pure" -- 7 >/dev/null
+[ ! -e "$pure" ] && ok "reviewed is a pure read: against an empty state directory it creates nothing" \
+    || bad "reviewed wrote into the state directory: $(find "$pure" | head -3 | tr '\n' ' ')"
+# An expired lease blocks nobody, so it is reported as free.
+printf '{"holder":"interactive","kind":"interactive","note":"gone","acquired":1,"renewed":%s,"ttl_seconds":60}\n' \
+    "$(( $(date +%s) - 3600 ))" > "$lsd/leases/pr-7.json"
+out="$(rvw -- 7)"
+grep -qi 'not leased' <<<"$out" && ! grep -q 'gone' <<<"$out" && ok "an expired lease is reported as free" || bad "an expired lease was reported as held: $out"
+rm -f "$lsd/leases/pr-7.json"
+rm -f "$stub_dir/gh"
+for f in profiles/sysknife/prompts/review.md profiles/_template/prompts/review.md; do
+    grep -q 'maintainer reviewed <pr>' "$root/$f" \
+        && ok "$f uses 'maintainer reviewed' instead of a hand-built activity loop" \
+        || bad "$f does not point the review at 'maintainer reviewed <pr>'"
+done
+grep -qi 'runs yield to interactive work' "$root/docs/maintainer-doctrine.md" && grep -q 'maintainer lease take' "$root/docs/maintainer-doctrine.md" \
+    && ok "the doctrine says who yields to whom" || bad "docs/maintainer-doctrine.md does not say that runs yield to interactive work"
 # --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then

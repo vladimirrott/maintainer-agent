@@ -2916,6 +2916,76 @@ def _lease_status_lines(now: float) -> list[str]:
 
 
 
+def _gh_lines(*args: str) -> list[dict]:
+    """Objects one-per-line from a paginated `gh api ... --jq`, or refuse.
+
+    A read that failed is not an empty history: "none by you" from a 502 would
+    send a review back over work it had already done.
+    """
+    p = _spawn(("gh", *args), cwd=REPO)
+    if p.returncode != 0:
+        raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                         f"{(p.stderr or p.stdout).strip()[:200]}")
+    rows = []
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                             f"a line was not JSON")
+        if not isinstance(row, dict):
+            raise SystemExit(f"maintainer reviewed: could not read `gh {' '.join(args[:2])}`: "
+                             f"unexpected shape")
+        rows.append(row)
+    return rows
+
+
+def cmd_reviewed(pr: str) -> None:
+    """What this profile's account already said on a PR at its current head, and its lease.
+
+    A pure read, derived from GitHub on every call, so there is no ledger to go
+    stale. Issue comments carry no commit_id and cannot be tied to a head, so
+    only reviews and inline review comments count.
+    """
+    if not re.fullmatch(r"[0-9]+", pr):
+        raise SystemExit(f"maintainer reviewed: {pr!r} is not a pull request number")
+    me = _owner()
+    if not me:
+        raise SystemExit("maintainer reviewed: the profile names no GitHub account "
+                         "(GH_ACCOUNT), so I cannot say whose reviews to list")
+    head = ""
+    p = _spawn(("gh", "pr", "view", pr, "--repo", SLUG, "--json", "headRefOid", "--jq", ".headRefOid"),
+               cwd=REPO)
+    if p.returncode == 0:
+        head = p.stdout.strip()
+    if not head:
+        raise SystemExit(f"maintainer reviewed: could not read the head of #{pr}")
+    api = f"repos/{SLUG}/pulls/{pr}"
+    reviews = _gh_lines("api", "--paginate", f"{api}/reviews", "--jq",
+                        '.[] | {user: .user.login, state, commit_id, submitted_at, html_url} | tojson')
+    comments = _gh_lines("api", "--paginate", f"{api}/comments", "--jq",
+                         '.[] | {user: .user.login, path, commit_id, created_at, html_url} | tojson')
+    mine_r = [r for r in reviews if _login(r.get("user")) == me and r.get("commit_id") == head]
+    mine_c = [c for c in comments if _login(c.get("user")) == me and c.get("commit_id") == head]
+    print(f"#{pr} head {head[:8]}, account {me}")
+    for r in mine_r:
+        print(f"  review   {r.get('state', '?'):17} {r.get('submitted_at', '?')}  {r.get('html_url', '')}")
+    for c in mine_c:
+        print(f"  inline   {c.get('path', '?'):17} {c.get('created_at', '?')}  {c.get('html_url', '')}")
+    if mine_r or mine_c:
+        print(f"{len(mine_r)} review(s) and {len(mine_c)} inline comment(s) by {me} at this head")
+    else:
+        print(f"no review or inline comment by {me} at this head")
+    d = _lease_read(pr)
+    now = datetime.now().timestamp()
+    if d is None or _lease_expired(d, now):
+        print("lease: not leased (free)")
+    else:
+        print("lease: leased. " + _lease_describe(pr, d, now))
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -3247,6 +3317,8 @@ COMMANDS = {
     "lease": Cmd("lease take <pr>... [--ttl D] [--for TEXT] | release <pr>... | check <pr>",
                  "say who is working a pull request, until when; a run yields to a lease",
                  cmd_lease, 2),
+    "reviewed": Cmd("reviewed <pr>", "what this account already said at the PR's current head, and its lease",
+                    lambda a: cmd_reviewed(a[0]), 1, 1),
     "log": Cmd("log [n]", "the last n lines of the run index (default 10)",
                lambda a: cmd_log(int(a[0]) if a else 10)),
     "start": Cmd("start <task>", "refresh, diff against the last run, open a report",
