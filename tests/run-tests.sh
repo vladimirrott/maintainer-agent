@@ -8899,10 +8899,13 @@ out="$(lgate run merge 34)"; rc=$?
 [ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -qi 'lease' <<<"$out" \
     && ok "an unreadable lease refuses the merge instead of passing it" || bad "an unreadable lease let the merge through (rc=$rc): $out"
 # No helper to ask: refuse rather than assume free.
-mgcopy="$stub_dir/mgcopy"; rm -rf "$mgcopy"; mkdir -p "$mgcopy/lib"
-cp "$mgl" "$mgcopy/maintainer-merge"; cp "$root/lib/profile.sh" "$root/lib/defaults.env" "$mgcopy/lib/" 2>/dev/null
-out="$(PATH="/usr/bin:/bin" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
-    MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" bash "$mgcopy/maintainer-merge" merge 35 2>&1)"; rc=$?
+# bin/ and lib/ side by side, as in the repo, and HOME pointed at the copy:
+# with the script one level too high it sourced the DEPLOYED profile.sh from
+# $HOME, passed on a machine with magent installed and failed in CI.
+mgcopy="$stub_dir/mgcopy"; rm -rf "$mgcopy"; mkdir -p "$mgcopy/bin" "$mgcopy/lib"
+cp "$mgl" "$mgcopy/bin/maintainer-merge"; cp "$root/lib/profile.sh" "$root/lib/defaults.env" "$mgcopy/lib/"
+out="$(HOME="$mgcopy" PATH="/usr/bin:/bin" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" bash "$mgcopy/bin/maintainer-merge" merge 35 2>&1)"; rc=$?
 [ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -q 'helper' <<<"$out" \
     && ok "with no maintainer helper to ask, merge refuses rather than assuming the PR is free" \
     || bad "merge passed the lease gate with no helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
