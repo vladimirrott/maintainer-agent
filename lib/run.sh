@@ -691,7 +691,9 @@ if ! backend_run "$prompt_file" "$model" "$log" "$STATE_DIR"; then
 fi
 
 # 4. Close the run. `finish` refuses an empty report, which is the point.
-if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
+finish_out="$("$HELPER" finish "$run_id" 2>&1)"; finish_rc=$?
+printf '%s\n' "$finish_out" >>"$log"
+if [ "$finish_rc" -ne 0 ]; then
     # Write the absence into the index BEFORE alerting, so the record exists
     # whatever happens to the alert. A gap in the index is indistinguishable
     # from a run that never started, and this run demonstrably started: it has
@@ -702,7 +704,15 @@ if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
     # Thirty-one aborted runs carried that sentence and nothing else.
     abort_why="$(maintainer_classify_failure "$log" 2>/dev/null \
         | awk -F'\t' '{printf "%s%s: %s", $1, ($2==""?"":"/"$2), $3}')"
-    "$HELPER" abort "$run_id" "no report; ${abort_why:-cause not determined}" >>"$log" 2>&1 || true
+    # A report that exists but that finish turned down is a different event
+    # from no report at all: the reader should open runs/, not the log. Three
+    # runs on 2026-10-25 were indexed "no report" with the report in place (#133).
+    refused="$(grep -m1 -o 'fixture rather than a report' <<<"$finish_out")"
+    if [ -n "$refused" ]; then
+        "$HELPER" abort "$run_id" "report refused by finish: $refused (see runs/$run_id.md)" >>"$log" 2>&1 || true
+    else
+        "$HELPER" abort "$run_id" "no report; ${abort_why:-cause not determined}" >>"$log" 2>&1 || true
+    fi
     if [ -n "$backend_why" ]; then
         # The backend never got far enough to write anything, and the reason
         # heals on its own. Exit 75 so SuccessExitStatus absorbs it and
@@ -724,7 +734,11 @@ if ! "$HELPER" finish "$run_id" >>"$log" 2>&1; then
             | tee -a "$log" >&2
         exit 1
     fi
-    alert "$run_id produced no report; the run is not auditable. See $log"
+    if [ -n "$refused" ]; then
+        alert "$run_id wrote a report that finish refused ($refused). Read runs/$run_id.md and $log"
+    else
+        alert "$run_id produced no report; the run is not auditable. See $log"
+    fi
     exit 1
 fi
 

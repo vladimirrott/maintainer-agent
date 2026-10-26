@@ -193,7 +193,9 @@ Both compute what the rules used to ask you to remember.
 The context block above lists what changed since your last run of this skill.
 Never post a second review of a head SHA you already reviewed. Never send a
 second offer to somebody with an unanswered one. Never re-file an issue that
-exists. When nothing changed, post nothing and write a two-line report saying so.
+exists. When nothing changed, post nothing and write a report of at least 3 non-empty lines
+saying so: what you looked at (with the SHA), what you found, and what you decided not to do.
+`maintainer finish` refuses anything shorter.
 
 ## Tone
 

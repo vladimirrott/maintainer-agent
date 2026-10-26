@@ -46,6 +46,14 @@ middle digit.
 
 ### Fixed
 
+- **A quiet run's report is no longer refused for doing what the preamble asked** (#133).
+  The preamble asked for a two-line report and `finish` refused anything under three,
+  so 12 of 32 magent runs from 2026-10-02 to 2026-10-25 were indexed `ABORTED, no report`
+  with their report in `runs/`. `REPORT_MIN_LINES` in `lib/defaults.env` is now the one
+  number, and the suite fails when the preamble disagrees with it. A report that `finish`
+  refuses is now indexed and alerted as `report refused by finish`, with the reason, not
+  as a missing report. Lessons 111 to 113.
+
 - **A cancelled check no longer passes the merge gate.** `maintainer-merge merge`
   counted failing and pending checks and ignored the other buckets `gh` reports,
   and never compared what it accepted with the total, so a cancelled check, a

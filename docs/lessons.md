@@ -3238,3 +3238,62 @@ before anything else. A case asserts none of them reach the tests. Proof, run
 with `GIT_INDEX_FILE` aimed at a copy of the real index: before the fix 3 cases
 failed (the two above and the new one); after it all 1005 pass and the copy's
 sha256 is unchanged.
+
+## 111. The preamble asked for a report that finish refused
+
+`lib/preamble-core.md` told a quiet run to "write a two-line report". From
+2026-09-04, `maintainer finish` refused any report with fewer than three
+non-empty lines below its heading. The two were written a day apart and no test
+connected them. From 2026-10-02 to 2026-10-25, 12 of 32 magent runs did exactly
+what the preamble asked. Each one was indexed `ABORTED, no report`, raised a
+critical "not auditable" alert, and left `maintainer@magent-review.service`
+failed, while its report sat in `runs/` naming the SHA and what it had checked.
+The magent issues run found it on 2026-10-25 by reading four of those reports
+(#133).
+
+The index line misled a second time: "no report" sent the reader to the log
+for a report that existed.
+
+**Guard:** `REPORT_MIN_LINES` in `lib/defaults.env` is the one number. `finish`
+reads it, and the suite fails when the preamble asks for a different count or
+for a "two-line" report anywhere. The suite also feeds `finish` a report of
+exactly that length (indexed) and one line shorter (refused). `lib/run.sh`
+records a refused report as `report refused by finish` with finish's own reason
+and alerts with the path to read. Four mutations (a literal floor, the old
+preamble sentence, the refused branch removed, an off-by-one floor) each turn a
+named case red.
+
+## 112. A cancelled check passed the board
+
+`maintainer-merge` bucketed `gh pr checks` into fail, pending and pass and
+accepted the board when fail and pending were both zero. A cancelled check sits
+in a fourth bucket, `cancel`, so a board with one cancelled check and nothing
+else read as green. The suite never fed it a pending or a cancelled board. Its
+"green" fixture was `[]`, an empty board, which is the same mistake: a board
+where nothing ran.
+
+A second shape of the same fault hit an interactive poll on 2026-10-25.
+`statusCheckRollup` reports a running check with `conclusion: ""`, an empty
+string, so `.conclusion // .status` never falls through. The poll announced a
+settled board with eight checks still running.
+
+**Guard:** the gate is positive now. Every check must be `pass` or `skipping`,
+at least one must pass, and the counts must add up to the total. Pending,
+cancelled, unknown, empty and unreadable boards are refused by name, each with
+a fixture. Pending counts in prose and tooling use
+`select((.conclusion//"")=="")`.
+
+## 113. 2g killed rustc, twice in one evening
+
+The verify container's memory default was `2g`, written as a literal twice in
+`bin/maintainer-merge`. On 2026-10-25 the sysknife rust suite was OOM-killed
+under it by an interactive verify and again by the 21:14 timer run, which
+retried with `MAINTAINER_CARGO_JOBS=2` and lost the time. `6g` works. Memory and
+cargo jobs live in different files, so raising one without the other was the
+only edit on offer.
+
+**Guard:** `lib/defaults.env` holds every tunable's default once. A suite that
+needs more declares it beside its job count (`suite_memory` and `suite_jobs` in
+`verify.d/rust.sh`), so the rust suite gets 6g without every other suite paying
+for it. `scripts/check_drift.py` fails when a key in the defaults file or an
+environment variable the code reads goes undocumented.
