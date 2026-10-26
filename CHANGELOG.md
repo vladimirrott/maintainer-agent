@@ -10,6 +10,100 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`lib/defaults.env`: one home for every tunable.** Defaults were literals
+  scattered through `bin/` and `lib/`, some written twice (container memory in
+  two `podman run` calls, the stale window in the code and in a prompt). Each
+  now has one value and one comment, read by bash through
+  `maintainer_load_defaults` and by the python tools through `_tunable()`.
+  Precedence is `MAINTAINER_<KEY>` in the environment, then a suite's own
+  declaration (`suite_memory`, `suite_cpus`, `suite_pids`, `suite_tmpfs`), then
+  `profile.env`, then the default. New keys: `VERIFY_MEMORY`, `VERIFY_CPUS`,
+  `VERIFY_PIDS`, `VERIFY_TMPFS`, `VERIFY_TIMEOUT`, `PREFETCH_TIMEOUT`,
+  `MCP_VERIFY_SLACK`, `STALE_HOLD_DAYS`, `GH_LIST_LIMIT`, `CONTRIBUTOR_WINDOW`,
+  `GH_TRIES`, `GH_BACKOFF`, `DOCTOR_RUN_LIMIT`, `DENY_WALL_MIN_RULES`,
+  `OPENCODE_MODEL`; `LOCK_WAIT`, `RETENTION_DAYS`, `CLAIM_STALE_DAYS` and
+  `RED_GRACE_HOURS` moved in. See [docs/configuration.md](docs/configuration.md).
+- **`maintainer` refuses a listing that fills its limit.** gh cuts a list
+  silently at `--limit`, so a roster past the limit lost its tail and read as
+  "nobody else is available" or "no duplicate". `claims`, `offers`, `holders`,
+  `file-issue` and the run snapshot now ask for `GH_LIST_LIMIT` rows (1000) and
+  stop, naming `MAINTAINER_GH_LIST_LIMIT`, when a listing comes back exactly
+  that long. The merged-PR contributor scan stays a window.
+
+- **`scripts/check_drift.py` holds the documentation to the code.** Seven
+  checks, each proved by planting its defect in a copy of the tree: every verb
+  the code dispatches is in `--help` and in `docs/cli.md` (the command table
+  for what a person types, the `Called by run.sh` section for the rest), every
+  key in `lib/defaults.env` has a row in `docs/configuration.md` with the same
+  default, every `MAINTAINER_*` name the code reads is documented, every
+  `docs/*.md` path a message names exists, the README's backend count and the
+  lesson counts in the README, CONTRIBUTING and the book agree with the tree,
+  the README's Posts column matches each `profile.env`, and every CHANGELOG
+  version has a link at the foot. The pre-commit hook, CI and the test suite
+  run it.
+
+### Fixed
+
+- **A cancelled check no longer passes the merge gate.** `maintainer-merge merge`
+  counted failing and pending checks and ignored the other buckets `gh` reports,
+  and never compared what it accepted with the total, so a cancelled check, a
+  bucket it did not recognise and an empty check list (`[]`) all read as a green
+  board. It now refuses unless every check is `pass` or `skipping` and at least
+  one passed, and names the count (`2 of 3 checks are pass or skipping`). No
+  test had ever fed it a pending or cancelled bucket; there are nine cases now,
+  each proved by removing its refusal.
+- **The documentation matches the code again.** The README said three backends
+  (four exist), "twenty-five" lessons beside 110, and described `magent` as
+  running at `POST=off` while its profile posts; the book called lessons
+  "thirty-six defects" and CONTRIBUTING "forty-one". `docs/verifying.md` and
+  `docs/release.md`, named in five places in the code, did not exist: both are written.
+  `docs/cli.md` described `maintainer log` as the run's log (it prints the run
+  index), omitted `run --show-prompt`, `verify-deps`, `verify-part` and the
+  `[suite]` argument, and the CHANGELOG's links stopped at 0.4.1. Twenty-odd
+  environment variables the code reads were documented nowhere; they are in
+  `docs/configuration.md`.
+- **`maintainer --help` lists every verb and works with no profile chosen.** The
+  docstring listed seven of twenty-two verbs, and `--help` was not handled: it
+  printed to stderr with exit 1, and with two profiles deployed it died in
+  profile resolution before it printed anything. `bin/maintainer` now dispatches
+  through one table (`COMMANDS`), `--help`, `-h` and `help` print it to stdout
+  and exit 0, and a wrong argument count prints that verb's usage. The test
+  suite reads the verb list from the same table. `maintainer-merge`'s header now
+  lists its six verbs, not three.
+
+### Changed
+
+- **No tool guesses which project it acts on.** `maintainer run` read
+  `MAINTAINER_PROFILE` itself with `sysknife` as the fallback, so with one other
+  profile deployed it started the wrong repository's run; it now uses the
+  profile resolved once at import, and a machine with none refuses. A profile
+  that declares no `TASKS` runs nothing instead of inheriting four task names.
+  `install-launchd.sh`, `install-cron.sh` and `Install-Maintainer.ps1` require
+  the profile name (`install.sh --uninstall` now strips each deployed profile's
+  cron block by name, where it used to strip only the default's). The sysknife
+  review prompt names the profile's own checkout (`$MAINTAINER_REPO`) instead of
+  a path on the author's laptop.
+  `scripts/check_drift.py --only repo-names` holds the README claim that no
+  executable line in `bin/` or `lib/` names a project; the test suite runs it.
+- **The sysknife rust suite verifies in 6g, not 2g.** 2g OOM-killed rustc twice
+  on 2026-10-25, in an interactive verify and in the 21:14 timer run, which had
+  to retry with `MAINTAINER_CARGO_JOBS=2`. The suite declares `suite_memory`
+  (6g) beside `suite_jobs` (4), and a test fails when memory in gigabytes is
+  below the job count. Other suites keep the 2g default.
+- **The MCP `maintainer_verify` deadline is derived, not 2400 s.** 2400 is
+  shorter than a legitimate verify (clean run, mutated run and dependency fetch
+  can use 1800 + 1800 + 900). It is now `2 x VERIFY_TIMEOUT + PREFETCH_TIMEOUT +
+  MCP_VERIFY_SLACK`.
+- **`CLAIM_STALE_DAYS` is `MAINTAINER_CLAIM_STALE_DAYS` in the environment**,
+  like every other key. The unprefixed spelling was read by one command and
+  documented nowhere.
+- **`LOCK_WAIT` and `RETENTION_DAYS` are no longer copied into every
+  `profile.env`.** A profile that declares nothing gets the default. A test
+  fails if `LOCK_WAIT` reaches the systemd unit's `TimeoutStartSec`, because a
+  run waiting for the lock spends that budget and would be killed first.
+
 ## [0.7.2] — 2026-10-21
 
 The doctor now watches the repository it maintains, and the test suite stops
@@ -1085,7 +1179,14 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.2
+[0.7.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.1
+[0.7.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.0
+[0.6.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.2
+[0.6.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.1
+[0.6.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.0
+[0.5.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.5.0
 [0.4.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.1
 [0.4.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.3.0

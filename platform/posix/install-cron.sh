@@ -6,7 +6,7 @@
 # Alpine and other musl or systemd-less Linux, Termux on Android, and any
 # container or VM where a user session manager is absent.
 #
-#   install-cron.sh            install the entries
+#   MAINTAINER_PROFILE=<profile> install-cron.sh            install the entries
 #   install-cron.sh --dry-run  print the crontab that would be written
 #   install-cron.sh --remove   take them out again
 #
@@ -25,7 +25,14 @@
 set -eu
 
 share="$HOME/.local/share/maintainer"
-profile="${MAINTAINER_PROFILE:-sysknife}"
+profile="${MAINTAINER_PROFILE:-}"
+# No default. A project's name here registered that project's agents on a
+# machine whose operator meant another one.
+if [ -z "$profile" ]; then
+    echo "install-cron: no profile name given. Set MAINTAINER_PROFILE=<name>." >&2
+    echo "              deployed here: $(cd "$share/profiles" 2>/dev/null && printf '%s ' */ | tr -d /)" >&2
+    exit 64
+fi
 marker="# maintainer-agent ($profile)"
 mode="${1:-install}"
 

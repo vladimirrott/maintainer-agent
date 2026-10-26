@@ -58,7 +58,7 @@ backend_run() {
     # profile already gave a provider/model pair.
     case "$model" in
         */*) ;;
-        *) model="${MAINTAINER_OPENCODE_MODEL:-groq/openai/gpt-oss-120b}" ;;
+        *) model="${OPENCODE_MODEL:?lib/defaults.env was not loaded}" ;;
     esac
     [ -z "${GROQ_API_KEY:-}" ] && [ -f "$HOME/.groq-staging-key" ] \
         && GROQ_API_KEY="$(tr -d '\n' < "$HOME/.groq-staging-key")" && export GROQ_API_KEY

@@ -80,9 +80,9 @@ refuses unless **all** of these hold:
 | a **verification receipt** exists for the PR | somebody mutated the guard and watched it go red |
 | **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved anything the profile calls production, the receipt describes a tree that is gone. The paths come from `PROD_GLOBS` in the profile, and a profile that declares none gets no merge |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
-| zero failing **and zero pending** checks | pending is not green |
+| every check is **pass or skipping**, and at least one passed | pending, cancelled and any bucket the gate does not know are not green. `gh` cuts a check into pass, fail, pending, skipping and cancel; the gate used to count only fail and pending |
 | `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
-| the check list is **non-empty** | an empty board is a failure, not a pass |
+| the check list is **non-empty** | an empty board is a failure, not a pass; neither is a board where every check skipped |
 | `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
 
 ```sh
@@ -220,7 +220,7 @@ worse than none: it reads as a guarantee.
 
 ## Backends
 
-Three, and they are **not** interchangeable. The difference is containment, and
+Four, and they are **not** interchangeable. The difference is containment, and
 it is the reason there is a default.
 
 | | opencode | Claude Code | Codex | Cursor |
@@ -324,13 +324,16 @@ spelled, so `POST=off` would not have blocked a single GitHub write verb there.
 
 ```sh
 ./install.sh --timers                                # Linux
-./install.sh && platform/macos/install-launchd.sh    # macOS
+./install.sh && platform/macos/install-launchd.sh myrepo    # macOS
 ./install.sh                                         # Windows, then:
-#   platform\windows\Install-Maintainer.ps1
+#   platform\windows\Install-Maintainer.ps1 -ProfileName myrepo
+MAINTAINER_PROFILE=myrepo platform/posix/install-cron.sh    # everything else
 ```
 
 All three read the task list from the deployed `profile.env`, so a second
-repository needs a profile and no edit to any of them. The PowerShell installer
+repository needs a profile and no edit to any of them. Each takes the profile
+name and refuses to guess one: an installer that defaulted to a project would
+register that project's agents on a machine whose operator meant another. The PowerShell installer
 is parsed by a real `pwsh` in a container when the image is present locally;
 counting braces was the previous check, and it would pass a file PowerShell
 refuses to load.
@@ -360,14 +363,18 @@ each one asks you to trust.
 One machine, six user timers, two profiles, both posting to GitHub as
 `vladimirrott`.
 
-| Profile | Repository | Tasks | Cadence |
-|---|---|---|---|
-| `sysknife` | [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife) | `review` | twice a day |
-| | | `issues` | every 2 days |
-| | | `ci` | every 3 days |
-| | | `audit` | every 5 days |
-| `magent` | this repository | `review` | daily |
-| | | `issues` | every 2 days |
+| Profile | Repository | Posts | Tasks | Cadence |
+|---|---|---|---|---|
+| `sysknife` | [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife) | on | `review` | twice a day |
+| | | | `issues` | every 2 days |
+| | | | `ci` | every 3 days |
+| | | | `audit` | every 5 days |
+| `magent` | this repository | on | `review` | daily |
+| | | | `issues` | every 2 days |
+
+The Posts column is each profile's `POST` default, and a test holds it to
+`profile.env`. At `on` the deny wall still blocks `gh pr merge`, push, release
+and tag: a merge goes through `maintainer-merge` or not at all.
 
 Both `magent` timers are enabled, `maintainer@magent-review.timer` and
 `maintainer@magent-issues.timer`, so this repository's tracker has two
@@ -421,7 +428,8 @@ fixture.
 ```
 
 `profiles/magent/` is the worked second profile: this repository maintaining
-itself, at `POST=off`. Scaffolding it found three defects in the first five
+itself. It ran at `POST=off` for a rehearsal period and posts now, as the table
+above says. Scaffolding it found three defects in the first five
 minutes, which is the argument for doing it rather than describing it.
 `maintainer status` for a second profile printed that profile's name above the
 *first* profile's repository and run history; `new-profile.sh` wrote an absolute
@@ -435,9 +443,12 @@ timer per task. Then rewrite `profiles/widget/prompts/*.md` for the project.
 The generic ones are a starting point; `profiles/sysknife/prompts/` is the
 worked set.
 
-Nothing in `bin/` or `lib/` carries a repository's name. The task list, the
-skill each task loads, the models, the cadences, the deny wall and the state
-directory all come from `profile.env`. `CONTRIBUTING.md` has claimed that since
+No executable line in `bin/` or `lib/` carries a repository's name:
+comments and docstrings cite the incidents that taught each rule and those name
+their repositories, but no code path does, and `scripts/check_drift.py` fails
+the commit if one starts to. The task list, the skill each task loads, the
+models, the cadences, the deny wall and the state directory all come from
+`profile.env`. `CONTRIBUTING.md` has claimed that since
 the beginning; before `new-profile.sh` it was not true, because adding a
 repository meant editing a hardcoded skill map in `bin/maintainer` and
 hand-writing four unit files.
@@ -569,7 +580,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-five entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the 110 entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -597,12 +608,13 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 1005 offline tests
+./tests/run-tests.sh        # 1121 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
+./scripts/check_drift.py    # the docs agree with the code
 ```
 
-1005 offline tests: no network, no GitHub, no model call. Every case tests a
+1121 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
@@ -627,6 +639,12 @@ scorecard**. The last two are skipped while the repository is private, because
 code scanning needs Advanced Security there and the scorecard reads branch
 protection. Skipping is stated in the workflow; pretending to scan would be
 worse than not scanning.
+
+`scripts/check_drift.py` holds the prose to the code: every verb is in `--help` and
+`docs/cli.md`, every default and `MAINTAINER_*` variable is in
+`docs/configuration.md`, every `docs/*.md` a message names exists, and the
+backend and lesson counts match the tree. Each check was proved by planting its
+defect in a copy.
 
 `scripts/check_claims.sh` holds this README's numbers to the tree, the same way
 the target repository holds its published test count to an evidence artifact. If

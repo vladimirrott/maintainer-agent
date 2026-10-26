@@ -1,7 +1,8 @@
 # Daily task: review every open sysknife pull request
 
 Invoke the `sysknife-review` skill and follow it. Repo `lacs-project/sysknife`,
-working directory `$HOME/Desktop/lacs`, push account `vladimirrott`.
+working directory `$MAINTAINER_REPO` (this profile's own review checkout, which you
+start in), push account `vladimirrott`.
 
 1. Take every open PR, oldest first. Skip any whose head SHA you already reviewed
    (the context block says which moved). Re-pin the SHA and name it in the review.

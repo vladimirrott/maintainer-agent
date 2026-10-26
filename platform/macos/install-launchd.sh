@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Register a profile's tasks with launchd.
 #
-#   install-launchd.sh [profile]     default: sysknife (or $MAINTAINER_PROFILE)
-#   install-launchd.sh --remove [profile]
+#   install-launchd.sh <profile>           (or set MAINTAINER_PROFILE)
+#   install-launchd.sh --remove <profile>
 #
 # launchd differs from systemd in one way that matters: there is no
 # Persistent=true. A StartCalendarInterval job missed while the machine was
@@ -19,7 +19,14 @@ share="$HOME/.local/share/maintainer"
 agents="$HOME/Library/LaunchAgents"
 
 remove=0; [ "${1:-}" = "--remove" ] && { remove=1; shift; }
-profile="${1:-${MAINTAINER_PROFILE:-sysknife}}"
+profile="${1:-${MAINTAINER_PROFILE:-}}"
+# No default. A project's name here registered that project's agents on a
+# machine whose operator meant another one.
+if [ -z "$profile" ]; then
+    echo "install-launchd: no profile name given. Pass it as an argument or set MAINTAINER_PROFILE." >&2
+    echo "                 deployed here: $(cd "$share/profiles" 2>/dev/null && printf '%s ' */ | tr -d /)" >&2
+    exit 64
+fi
 label_prefix="dev.maintainer.$profile"
 env_file="$share/profiles/$profile/profile.env"
 [ -f "$env_file" ] || { echo "install-launchd: no deployed profile '$profile'; run ./install.sh first" >&2; exit 1; }

@@ -17,14 +17,14 @@
     Print what would be registered and change nothing.
 
 .EXAMPLE
-    .\Install-Maintainer.ps1
-    .\Install-Maintainer.ps1 -DryRun
     .\Install-Maintainer.ps1 -ProfileName widget
+    .\Install-Maintainer.ps1 -ProfileName widget -DryRun
 #>
 [CmdletBinding()]
 param(
     [switch]$DryRun,
-    [string]$ProfileName = 'sysknife',
+    [Parameter(Mandatory)]
+    [string]$ProfileName,
     [string]$RepoPath
 )
 

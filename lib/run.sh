@@ -74,8 +74,12 @@ fi
 
 PROFILE_DIR="$local_root/profiles/$profile"
 [ -f "$PROFILE_DIR/profile.env" ] || { echo "run.sh: no profile '$profile'" >&2; exit 64; }
+# Defaults first, so a profile that declares nothing still has a value for every
+# tunable, then the profile, then MAINTAINER_<KEY> from the environment.
+maintainer_load_defaults || exit 64
 # shellcheck disable=SC1091
 . "$PROFILE_DIR/profile.env"
+maintainer_apply_overrides
 export PROFILE_DIR REPO_PATH
 # ACCOUNT and PROD_GLOBS travel too: maintainer-merge reads both, and a tool
 # called from inside a run must not have to re-derive what the run already knows.
@@ -402,8 +406,8 @@ gh auth switch --hostname github.com --user "$GH_ACCOUNT" >>"$log" 2>&1 || true
 # refused on the first answer and never retried into: retrying that would be
 # waiting for a different identity to show up, which is the one thing this gate
 # exists to prevent.
-gh_tries="${MAINTAINER_GH_TRIES:-3}"
-gh_backoff="${MAINTAINER_GH_BACKOFF:-20}"
+gh_tries="$GH_TRIES"
+gh_backoff="$GH_BACKOFF"
 #
 # A rejected token is a third case. `gh api user` then prints GitHub's JSON
 # error body on stdout and exits 1, so stdout alone read as a login and the

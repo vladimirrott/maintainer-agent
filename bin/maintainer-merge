@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Merge a pull request, but only against a recorded verification.
 #
-#   maintainer-merge receipt <pr> <head-sha> <what-was-proved>
-#   maintainer-merge merge   <pr>
-#   maintainer-merge show    [pr]
+#   maintainer-merge verify      <pr> <head-sha> <test-filter> <sed-mutation> [suite]
+#   maintainer-merge verify-deps <pr> <head-sha>
+#   maintainer-merge verify-part <pr> <head-sha> <test-filter> <sed-mutation> <suite>
+#   maintainer-merge receipt     <pr> <head-sha> <what-was-proved>
+#   maintainer-merge merge       <pr>
+#   maintainer-merge show        [pr]
 #
 # The point is not to merge. The point is that a merge is impossible unless
 # somebody proved the guard bites, at a head whose production code is identical
@@ -818,6 +821,18 @@ first_failure_line() {  # $1 = log -> one line, at most 200 characters
     printf '%s' "$hit" | cut -c1-200
 }
 
+# One verify resource, by key. Precedence: MAINTAINER_<KEY> in the environment,
+# then the suite's own declaration (a verify.d file may define suite_memory,
+# suite_cpus, suite_pids, suite_tmpfs), then profile.env, then lib/defaults.env.
+# The suite sits above the profile on purpose: it knows what its own build
+# needs, and a profile-wide figure would tax every suite for the sake of one.
+verify_limit() {  # $1 = key in lib/defaults.env, $2 = the suite function that may override it
+    local key="$1" fn="$2" ev="MAINTAINER_$1" v
+    v="${!ev:-}"
+    if [ -z "$v" ] && declare -F "$fn" >/dev/null; then v="$("$fn")"; fi
+    printf '%s' "${v:-${!key:?lib/defaults.env was not loaded}}"
+}
+
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     pr="$(pr_or_die "$pr")" || exit 1
@@ -970,15 +985,15 @@ $(printf '%s\n' "$links" | sed 's/^/    /')
         # --network=none, which are the isolation that actually holds.
         # shellcheck disable=SC2046
         "$rt" --log-level=error run --rm \
-            --timeout "${MAINTAINER_VERIFY_TIMEOUT:-1800}" \
+            --timeout "$VERIFY_TIMEOUT" \
             --network=none \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --read-only \
-            --tmpfs /tmp:rw,nosuid,size=256m \
-            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
-            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
-            --cpus "${MAINTAINER_VERIFY_CPUS:-2}" \
+            --tmpfs "/tmp:rw,nosuid,size=$(verify_limit VERIFY_TMPFS suite_tmpfs)" \
+            --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
+            --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
+            --cpus "$(verify_limit VERIFY_CPUS suite_cpus)" \
             -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_command "$filter")" >>"$1" 2>&1
@@ -1011,13 +1026,13 @@ $(printf '%s' "$gmsg" | sed 's/^/    /')"
         say "fetching what the lockfile pins (network, no build scripts, --locked)"
         # shellcheck disable=SC2046
         "$rt" --log-level=error run --rm \
-            --timeout "${MAINTAINER_PREFETCH_TIMEOUT:-900}" \
+            --timeout "$PREFETCH_TIMEOUT" \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --read-only \
-            --tmpfs /tmp:rw,nosuid,size=256m \
-            --pids-limit "${MAINTAINER_VERIFY_PIDS:-512}" \
-            --memory "${MAINTAINER_VERIFY_MEMORY:-2g}" \
+            --tmpfs "/tmp:rw,nosuid,size=$(verify_limit VERIFY_TMPFS suite_tmpfs)" \
+            --pids-limit "$(verify_limit VERIFY_PIDS suite_pids)" \
+            --memory "$(verify_limit VERIFY_MEMORY suite_memory)" \
             -v "$work:/repo:z" $(suite_extra_args "$rt" "$scratch") \
             -w /repo "$(suite_image)" \
             sh -c "$(suite_prefetch_command)" >"$work/prefetch.log" 2>&1 \
@@ -1642,17 +1657,28 @@ cmd_merge() {
     # python:3.12 the three counts came back empty, and the refusal read
     # "#7 has  failing check(s)" with a blank where the number goes. It failed
     # closed, which is right, and it named the wrong thing, which is not.
-    local pass_n
-    read -r fails pend pass_n <<<"$(printf '%s' "$checks" | python3 -c '
+    #
+    # gh buckets a check as pass, fail, pending, skipping or cancel. Counting
+    # only fail and pending let a cancelled check, a bucket gh adds next year,
+    # and a list with nothing in it all read as a green board, so the rule is
+    # the positive one: every check is pass or skipping, and at least one passed.
+    # A skipped check made no claim either way, but a board where all of them
+    # skipped has shown nothing.
+    local pass_n skip_n cancel_n total
+    read -r fails pend pass_n skip_n cancel_n total <<<"$(printf '%s' "$checks" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 c = lambda b: sum(1 for x in d if x.get("bucket") == b)
-print(c("fail"), c("pending"), c("pass"))
+print(c("fail"), c("pending"), c("pass"), c("skipping"), c("cancel"), len(d))
 ')" || die "could not read the check list for #$pr; gh returned:
 $(printf '%s' "$checks" | head -c 300)"
-    case "$fails$pend" in ''|*[!0-9]*) die "the check counts for #$pr came back as '$fails'/'$pend', which is not a number. Refusing." ;; esac
+    case "$fails$pend$pass_n$skip_n$cancel_n$total" in ''|*[!0-9]*) die "the check counts for #$pr came back as '$fails'/'$pend'/'$pass_n'/'$skip_n'/'$cancel_n'/'$total', which is not a number. Refusing." ;; esac
     [ "$fails" = 0 ] || die "#$pr has $fails failing check(s)"
     [ "$pend"  = 0 ] || die "#$pr has $pend pending check(s)"
+    [ "$cancel_n" = 0 ] || die "#$pr has $cancel_n cancelled check(s); a cancelled check never reported a verdict. Re-run it."
+    [ "$total" -gt 0 ] || die "#$pr has an empty check list; an empty board is a failure, not a pass"
+    [ $((pass_n + skip_n)) = "$total" ] || die "#$pr: $((pass_n + skip_n)) of $total checks are pass or skipping; the rest are in a bucket this gate does not accept"
+    [ "$pass_n" -gt 0 ] || die "#$pr: all $total checks were skipped, so nothing ran"
 
     # The condition that carries the weight. A rebase may move tests, docs and
     # the evidence artifact; if it moved production code, the receipt describes
@@ -1704,7 +1730,7 @@ $(printf '%s' "$diff" | sed 's/^/    /')
     fi
     git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
 
-    say "#$pr: approved, $pass_n checks pass, 0 fail, 0 pending, receipt valid"
+    say "#$pr: approved, $pass_n checks pass, $skip_n skipped, 0 fail, 0 pending, 0 cancelled, receipt valid"
     if [ "$POST" = off ]; then
         say "POST=off: every condition holds and the merge is NOT being made"
         say "         re-run with posting on to land it"

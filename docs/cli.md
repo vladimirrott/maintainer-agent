@@ -4,7 +4,9 @@ Five commands. Everything a person types is here; the subcommands `run.sh` calls
 on your behalf are listed at the bottom and are not meant to be typed.
 
 Every command reads the profile named by `MAINTAINER_PROFILE`, and refuses
-rather than guessing when more than one profile is deployed.
+rather than guessing when more than one profile is deployed. `maintainer --help`
+needs no profile: it prints every verb, from the table the command dispatches
+on. Defaults and the environment variables are in [Configuration](configuration.md).
 
 ## `maintainer`
 
@@ -12,7 +14,7 @@ rather than guessing when more than one profile is deployed.
 |---|---|
 | `maintainer status` | the front door: which version is deployed, which profile, whether it posts, what ran, what is due, what failed, and what it has spent |
 | `maintainer version` | the deployed version and commit, and whether your checkout has moved ahead of it |
-| `maintainer run <task>` | run one task now, through the same orchestrator the timer uses |
+| `maintainer run [--show-prompt] <task>` | run one task now, through the same orchestrator the timer uses. `--show-prompt` prints the prompt the run would send and starts nothing |
 | `maintainer screen <pr>` | may this pull request be executed on this host? Fails closed on anything it cannot classify |
 | `maintainer digest <run-id> [--compact]` | what one run did and what it cost |
 | `maintainer audit [run-id\|--all]` | compare a run's report against the transcript of what actually ran |
@@ -22,11 +24,11 @@ rather than guessing when more than one profile is deployed.
 | `maintainer release <issue> <user> <reason>` | retract an offer so `offers` stops counting it. It posts a comment carrying the marker `offers` reads, names that one person and refuses a reason naming a second, and reads the comment back before reporting success. A released person who is assigned is unassigned, and the claim label comes off. Prose alone does not retract anything: two offers withdrawn in public on 2026-09-22 still read as live holds, and the campaign that followed was told to hand work to the contributor those phantom holds ruled out. At `POST=off` it rehearses |
 | `maintainer offer <issue> <user> <text> [--second]` | offer one issue to one person, on that issue's own thread. It refuses an issue somebody already holds, one an open pull request already closes, one that is reserved, assigned or claimed, and anyone who already holds an open offer, all from the same ledger `offers` prints. It also refuses when the open pull requests cannot be read, and refuses text that names a second person. On 2026-10-01 three offers on sysknife were typed into pull-request reviews, where `holders` cannot see them, and two were offered again within hours to somebody else. The offer is read back before it reports success, and the issue gets the profile's `CLAIM_LABEL`, because GitHub will not assign a fresh issue to somebody who has not posted on it and the label is the only reservation others see. `--second` lets the maintainer give one person another issue when they decide to; the issue-side refusals still hold. At `POST=off` it prints what it would post |
 | `maintainer settle` | assign every answered offer to its holder. GitHub accepts the assignment once the holder has posted on the issue, so this is the step that turns an offer into an assignment. Each assignment is read back, and one GitHub dropped is named and makes the command exit non-zero |
-| `maintainer stale [days]` | name every hold nobody has touched for `days` days (default 9): no comment from the holder, no maintainer mention, no open pull request of theirs closing it. Read-only; free one with `release` |
+| `maintainer stale [days]` | name every hold nobody has touched for `days` days (default `STALE_HOLD_DAYS`, 9): no comment from the holder, no maintainer mention, no open pull request of theirs closing it. Read-only; free one with `release` |
 | `maintainer holders <issue>` | who the maintainer has pointed at one issue and not released, one handle per line. `maintainer-merge` calls this before merging a PR that closes an issue, so the gate and `offers` share one derivation instead of two |
 | `maintainer file-issue --title T --body-file F [--fingerprint FP] [--label L] [--dry-run]` | file one tracker issue for a finding, deduplicated by fingerprint. The only path issue creation takes; a bare `gh issue create` is denied. `--dry-run`, or `POST=off`, rehearses. An unreadable tracker stops it, since it cannot tell whether the finding is already filed |
 | `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`. Never touches `runs/` or `index.md` |
-| `maintainer log [n]` | the last n lines of the current run's log |
+| `maintainer log [n]` | the last n lines of the run index (`index.md`), default 10: one line per finished run. A run's own log is under the state directory's `logs/` |
 
 ## `maintainer-merge`
 
@@ -34,7 +36,9 @@ The only path to a merge.
 
 | command | what it does |
 |---|---|
-| `maintainer-merge verify <pr> <sha> <filter> <sed>` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit |
+| `maintainer-merge verify <pr> <sha> <filter> <sed> [suite]` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit. `suite` names a `verify.d` suite when the paths do not pick one; see [Verifying](verifying.md) |
+| `maintainer-merge verify-deps <pr> <sha>` | the receipt for a pull request that only bumps dependencies or pins: there is no guard to mutate, so the diff is classified and its pins and image digests are checked |
+| `maintainer-merge verify-part <pr> <sha> <filter> <sed> <suite>` | one suite's share of a diff no single suite covers. `merge` checks that the parts add up to every production path |
 | `maintainer-merge merge <pr>` | merge, if every condition holds. See the table in the README |
 | `maintainer-merge show [pr]` | print a recorded receipt |
 | `maintainer-merge receipt <pr> <sha> <proof>` | record a human's claim. Refused inside an unattended run, and a run may not merge on one |
@@ -44,7 +48,7 @@ The only path to a merge.
 | command | what it does |
 |---|---|
 | `maintainer-repo prune [--dry-run]` | delete branches merged into main, local and remote. Never a branch with an open PR |
-| `maintainer-repo release-check` | whether a release is owed and which digit moves, read from the CHANGELOG |
+| `maintainer-repo release-check` | whether a release is owed and which digit moves, read from the CHANGELOG. See [Releases](release.md) |
 
 ## `maintainer-doctor`
 

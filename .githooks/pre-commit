@@ -36,5 +36,6 @@ for pe in "$root"/profiles/*/profile.env; do
         env -u MAINTAINER_PROFILE MAINTAINER_PROFILE="$pn" bash "$root/evals/run-evals.sh"
 done
 step "shellcheck sweep"            bash "$root/scripts/shellcheck-sweep.sh"
+step "docs match the code"          python3 "$root/scripts/check_drift.py"
 step "README numbers are derived"  bash "$root/scripts/check_claims.sh"
 exit "$fail"

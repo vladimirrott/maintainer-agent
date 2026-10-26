@@ -46,6 +46,15 @@ suite_requires_name() { printf 'podman (for the :O overlay mount on ~/.cargo)'; 
 # Files the sed mutation is applied to inside the extracted tree.
 suite_mutate_glob() { printf '*.rs'; }
 
+# The container's memory and cargo's job count move together: each job is a
+# rustc holding about a gigabyte while it links, so four jobs in 2g (the
+# default for every suite) were OOM-killed twice on 2026-10-25, once in an
+# interactive verify and once in the 21:14 timer run. 6g holds four jobs.
+# Change one, change the other. MAINTAINER_VERIFY_MEMORY and
+# MAINTAINER_CARGO_JOBS override these for one run.
+suite_memory() { printf '6g'; }
+suite_jobs() { printf '4'; }
+
 # Extra podman arguments. The cargo cache is mounted with :O so writes stay in
 # an overlay and never reach the host's ~/.cargo.
 # CARGO_BUILD_JOBS is bounded on purpose. Unbounded, cargo takes one rustc per
@@ -70,7 +79,7 @@ suite_podman_args() {  # $1 = the container runtime, $2 = the extracted tree
     printf '%s\n' -v "$ovl" \
         -e CARGO_HOME=/cargo -e CARGO_TARGET_DIR=/repo/.container-target \
         -e CARGO_NET_OFFLINE=true \
-        -e "CARGO_BUILD_JOBS=${MAINTAINER_CARGO_JOBS:-4}"
+        -e "CARGO_BUILD_JOBS=${MAINTAINER_CARGO_JOBS:-$(suite_jobs)}"
 }
 
 # A dependency bump is a version the host cache does not hold, so `cargo test
