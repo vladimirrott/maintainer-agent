@@ -58,8 +58,14 @@ def _resolve_profile() -> str:
 # `--help` names no profile and must work with two deployed and none chosen, so
 # it skips resolution; main() answers it before anything reads PROFILE.
 _HELP = sys.argv[1:2] in (["--help"], ["-h"], ["help"])
-PROFILE = "" if _HELP else _resolve_profile()
-if not PROFILE and not _HELP:
+# `lease` needs a state directory and nothing else of a profile. When the caller
+# names the directory itself (maintainer-merge always does) there is no project
+# to guess, so it works with several profiles deployed and none chosen.
+_NO_PROFILE = _HELP or (sys.argv[1:2] in (["lease"], ["run-lease"])
+                        and bool(os.environ.get("MAINTAINER_STATE"))
+                        and not os.environ.get("MAINTAINER_PROFILE"))
+PROFILE = "" if _NO_PROFILE else _resolve_profile()
+if not PROFILE and not _NO_PROFILE:
     raise SystemExit("maintainer: no profile is deployed. Run ./install.sh from the repository,\n"
                      "            or set MAINTAINER_PROFILE to the one you mean.")
 # A profile name becomes a path AND, below, part of a shell command. Both need
@@ -69,7 +75,7 @@ if not PROFILE and not _HELP:
 # nothing when whoever sets the variable also creates the directory. That is
 # arbitrary shell inside a subprocess the deny wall never sees.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-if not _HELP and not _SAFE_NAME.match(PROFILE):
+if not _NO_PROFILE and not _SAFE_NAME.match(PROFILE):
     raise SystemExit(f"maintainer: refusing a profile name that is not a plain "
                      f"word: {PROFILE!r}")
 

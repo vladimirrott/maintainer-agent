@@ -6531,7 +6531,9 @@ cl_gh 0 claimant
 out="$(PATH="$stub_dir:/usr/bin:/bin" MAINTAINER_STATE="$cl" MAINTAINER_ACCOUNT=testuser \
     MAINTAINER_SLUG=o/r MAINTAINER_REPO="$clr" PROD_GLOBS="bin/*" CLAIM_LABEL=claimed \
     MAINTAINER_PROFILE=of MAINTAINER_POST=off bash "$nohelp/bin/maintainer-merge" merge 1 2>&1)"; rc=$?
-grep -q 'could not read' <<<"$out" \
+# The lease gate looks for the same helper first and refuses first, with its own words;
+# either refusal is the helper's absence being treated as "cannot ask", never as "free".
+grep -q 'could not read\|cannot tell whether' <<<"$out" \
     && ok "a missing holders helper refuses the merge" \
     || bad "with no helper on PATH the gate merged without asking who holds the issue: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-80)"
 grep -q 'maintainer' <<<"$out" \
@@ -8859,6 +8861,75 @@ grep -q 'warn.*lease.*#33' <<<"$(ldoc)" && ok "a lease file the doctor cannot re
 rm -f "$dlh/state/leases/"pr-*.json
 grep -q 'ok.*no lease' <<<"$(ldoc)" && ok "with nothing forgotten the doctor says so" || bad "no all-clear for leases: $(ldoc | grep -i lease)"
 rm -f "$stub_dir/gh"
+echo "== maintainer-merge yields to a lease another actor holds =="
+# verify builds the whole workspace twice and merge is the one irreversible step,
+# so both ask `maintainer lease check` first and refuse a PR somebody else has
+# leased. The holder itself is not in the way of its own work.
+mgl="$root/bin/maintainer-merge"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo testuser;; esac"
+lgate() {  # $1 = who ("me" or "run"), then the maintainer-merge arguments
+    local who="$1"; shift; local inrun=""; [ "$who" = run ] && inrun="magent/review"
+    PATH="$stub_dir:$PATH" MAINTAINER_IN_RUN="$inrun" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" \
+        bash "$mgl" "$@" 2>&1
+}
+lease_as me release 31 >/dev/null; lease_as me take 31 --for 'reviewing by hand' >/dev/null
+for verb in "verify 31 abcdef1234 t s/a/b/" "verify-deps 31 abcdef1234" "merge 31"; do
+    out="$(lgate run $verb)"; rc=$?
+    [ "$rc" != 0 ] && grep -q 'leased\|lease' <<<"$out" && grep -q 'interactive' <<<"$out" && grep -q 'reviewing by hand' <<<"$out" \
+        && ok "'${verb%% *}' from a run refuses a PR leased by the interactive session, naming it" \
+        || bad "'${verb%% *}' went ahead on a leased PR (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+done
+# Positive controls: the holder gets past the lease gate to the next one, and so does a free PR.
+out="$(lgate me merge 31)"; rc=$?
+grep -q 'no verification receipt' <<<"$out" && ! grep -qi 'leased' <<<"$out" \
+    && ok "the holder itself reaches the receipt check, so the refusals above are the lease's own" \
+    || bad "the holder was stopped by its own lease (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+out="$(lgate run merge 32)"; rc=$?
+grep -q 'no verification receipt' <<<"$out" && ok "an unleased PR reaches the receipt check" \
+    || bad "an unleased PR was refused (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+# An expired lease is nobody's.
+printf '{"holder":"interactive","kind":"interactive","note":"gone","acquired":1,"renewed":%s,"ttl_seconds":60}\n' \
+    "$(( $(date +%s) - 3600 ))" > "$lsd/leases/pr-33.json"
+out="$(lgate run merge 33)"
+grep -q 'no verification receipt' <<<"$out" && ok "an expired lease does not block a merge" || bad "an expired lease blocked: $out"
+# A lease it cannot read stops the gate: it never asked, so it cannot say free.
+printf '{junk' > "$lsd/leases/pr-34.json"
+out="$(lgate run merge 34)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -qi 'lease' <<<"$out" \
+    && ok "an unreadable lease refuses the merge instead of passing it" || bad "an unreadable lease let the merge through (rc=$rc): $out"
+# No helper to ask: refuse rather than assume free.
+mgcopy="$stub_dir/mgcopy"; rm -rf "$mgcopy"; mkdir -p "$mgcopy/lib"
+cp "$mgl" "$mgcopy/maintainer-merge"; cp "$root/lib/profile.sh" "$root/lib/defaults.env" "$mgcopy/lib/" 2>/dev/null
+out="$(PATH="/usr/bin:/bin" MAINTAINER_STATE="$lsd" MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_PROFILE=lease PROD_GLOBS="bin/*" bash "$mgcopy/maintainer-merge" merge 35 2>&1)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'no verification receipt' <<<"$out" && grep -q 'helper' <<<"$out" \
+    && ok "with no maintainer helper to ask, merge refuses rather than assuming the PR is free" \
+    || bad "merge passed the lease gate with no helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+rm -f "$lsd/leases/pr-3"[1-4].json "$stub_dir/gh"
+# The prompts carry the rule, because the agent reads them and never the code.
+for f in lib/preamble-core.md profiles/sysknife/prompts/review.md profiles/_template/prompts/review.md; do
+    grep -q 'maintainer lease check <pr>' "$root/$f" && grep -qi 'skip' "$root/$f" \
+        && ok "$f tells a review to check the lease and skip a leased PR" \
+        || bad "$f does not tell a review to run 'maintainer lease check <pr>'"
+done
+# The gate must not need a profile: maintainer-merge names the state directory itself, and an
+# operator with two profiles deployed and none chosen still gets an answer. Without a state
+# directory the same call must refuse, because then it would be guessing which project.
+two="$stub_dir/twoprof"; rm -rf "$two"
+mkdir -p "$two/.local/share/maintainer/profiles/a" "$two/.local/share/maintainer/profiles/b"
+printf 'REPO_SLUG="o/a"\n' > "$two/.local/share/maintainer/profiles/a/profile.env"
+printf 'REPO_SLUG="o/b"\n' > "$two/.local/share/maintainer/profiles/b/profile.env"
+out="$(env -u MAINTAINER_PROFILE HOME="$two" MAINTAINER_STATE="$lsd" python3 "$root/bin/maintainer" lease check 4242 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q free <<<"$out" && ok "lease check answers with two profiles deployed when the state directory is named" \
+    || bad "lease check needed a profile it had no use for (rc=$rc): $out"
+out="$(env -u MAINTAINER_PROFILE -u MAINTAINER_STATE -u MAINTAINER_STATE_DIR HOME="$two" python3 "$root/bin/maintainer" lease check 4242 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'profiles are deployed' <<<"$out" \
+    && ok "and with no state directory named it still refuses to guess a project" \
+    || bad "lease check guessed a project (rc=$rc): $out"
+out="$(env -u MAINTAINER_PROFILE HOME="$two" MAINTAINER_STATE="$lsd" python3 "$root/bin/maintainer" status 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'profiles are deployed' <<<"$out" \
+    && ok "naming a state directory excuses only the lease verbs, not status" || bad "status guessed a profile (rc=$rc): $out"
 # --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then

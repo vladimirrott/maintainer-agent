@@ -58,6 +58,14 @@ middle digit.
   about a lease last renewed more than `DOCTOR_LEASE_HOURS` ago (new default,
   12), naming the PRs and the `lease release` command; an unreadable lease is a
   warning, never a pass.
+- **`maintainer-merge` and the review prompts honour leases.** `verify`,
+  `verify-deps` and `merge` ask `maintainer lease check` first and refuse a PR
+  another actor holds, naming the holder; a lease they cannot read, or no helper
+  to ask, refuses too. The preamble and the review prompts tell a run to check
+  the lease before posting and to skip a leased PR in its report. The lease
+  verbs need only a state directory, so when the caller names one (as
+  `maintainer-merge` does) they answer with several profiles deployed and none
+  chosen; without one they still refuse to guess a project.
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

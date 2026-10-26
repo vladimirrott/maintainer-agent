@@ -35,7 +35,9 @@ on. Defaults and the environment variables are in [Configuration](configuration.
 
 ## `maintainer-merge`
 
-The only path to a merge.
+The only path to a merge. `verify`, `verify-deps` and `merge` refuse a pull request
+another actor has leased (`maintainer lease check` exits non-zero), naming the holder,
+and refuse when they cannot ask. See [the doctrine](maintainer-doctrine.md).
 
 | command | what it does |
 |---|---|

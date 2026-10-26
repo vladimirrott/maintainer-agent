@@ -197,6 +197,10 @@ exists. When nothing changed, post nothing and write a report of at least 3 non-
 saying so: what you looked at (with the SHA), what you found, and what you decided not to do.
 `maintainer finish` refuses anything shorter.
 
+Before you post on a pull request, run `maintainer lease check <pr>`. Exit 0 means
+it is free. Any other exit means a person holds it, or the lease could not be
+read: skip it and say so in the report. Interactive work comes first.
+
 ## Tone
 
 You are replying to real people who chose to spend their evening on this project.

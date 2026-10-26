@@ -2,6 +2,8 @@
 
 Read the context block at the end first. It lists what moved since your last
 review run. A PR whose head has not moved since you reviewed it gets nothing.
+Run `maintainer lease check <pr>` before you post on one, and skip a PR it
+reports as leased, saying so in the report.
 
 Two lines there answer different questions, and only one of them is yours.
 `main moved <old> -> <new> ... commit(s) YOU HAVE NOT REVIEWED` is the range

@@ -105,6 +105,32 @@ pr_or_die() {  # $1 = the pr argument -> echoes it back, or dies
     printf '%s' "$1"
 }
 
+# A pull request another actor has leased is theirs for now. `verify` builds the
+# whole workspace twice and `merge` is the one step nobody can take back, and an
+# interactive session and a timer run worked #637, #658 and #660 at once on
+# 2026-10-25. `maintainer lease check` is the one place that knows who holds
+# what: 0 free or ours, 1 held by someone else, 2 unreadable. Like the holders
+# check in cmd_merge this fails closed, because a gate that could not ask has
+# not said "free".
+lease_gate() {  # $1 = pr, $2 = what we were about to do
+    local mbin out rc=0
+    mbin="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/maintainer"
+    [ -x "$mbin" ] || mbin="$(command -v maintainer 2>/dev/null || true)"
+    [ -n "$mbin" ] || die "cannot tell whether #$1 is leased, so I will not $2 it:
+  no \`maintainer\` helper beside $(basename "${BASH_SOURCE[0]}") or on PATH.
+  Install the agent (./install.sh) or put \`maintainer\` on PATH, then retry."
+    out="$(MAINTAINER_STATE="$STATE" MAINTAINER_SLUG="$REPO_SLUG" \
+           MAINTAINER_PROFILE="${MAINTAINER_PROFILE:-}" "$mbin" lease check "$1" 2>&1)" || rc=$?
+    case "$rc" in
+        0) ;;
+        1) die "will not $2 #$1: another actor has leased it.
+  $out
+  Ask them, wait for it to expire, or have them \`maintainer lease release $1\`." ;;
+        *) die "could not read the lease on #$1, so I will not $2 it:
+  $out" ;;
+    esac
+}
+
 # One name per line in, "a, b" out. Splicing `tr '\n' ' '` into a sentence
 # left nothing after the last name, so a refusal read "TayfurYldzwas pointed at".
 join_names() { paste -sd, - <<<"$1" | sed 's/,/, /g'; }
@@ -243,6 +269,7 @@ PYEOF
 cmd_verify_deps() {
     local pr="${1:?pr}" sha="${2:?head sha}"
     pr="$(pr_or_die "$pr")" || exit 1
+    lease_gate "$pr" verify
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local classifier="${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/classify_dependency_bump.py"
     [ -f "$classifier" ] || die "no dependency classifier at $classifier; run ./install.sh"
@@ -836,6 +863,7 @@ verify_limit() {  # $1 = key in lib/defaults.env, $2 = the suite function that m
 cmd_verify() {
     local pr="${1:?pr}" sha="${2:?head sha}" filter="${3:?test filter}" mutation="${4:?sed expression}"
     pr="$(pr_or_die "$pr")" || exit 1
+    lease_gate "$pr" verify
     local named="${5:-}"
     [ ${#sha} -ge 7 ] || die "head sha looks truncated: $sha"
     local rt; rt="$(container_runtime)" || die "no container runtime; install podman or docker. No container, no receipt."
@@ -1336,6 +1364,7 @@ looks_environmental() {
 cmd_merge() {
     local pr="${1:?pr}"
     pr="$(pr_or_die "$pr")" || exit 1
+    lease_gate "$pr" merge
     [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
   whether production code moved since the receipt. Set it in profile.env, for example:
     PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
