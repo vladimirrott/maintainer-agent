@@ -32,6 +32,9 @@ same file, so a number is changed in one place.
 | `REPORT_MIN_LINES` | 3 | non-empty lines a run report needs below its heading before `finish` indexes it; `lib/preamble-core.md` asks a quiet run for exactly this many |
 | `CLAIM_STALE_DAYS` | 7 | days of silence after which `maintainer claims` marks a claim stale |
 | `STALE_HOLD_DAYS` | 9 | days of silence after which `maintainer stale` names a hold |
+| `FIXUP_QUIET_DAYS` | 10 | days an author must be silent after a review before `maintainer stalled` lists the pull request and `maintainer-repo fixup` may act on it |
+| `FIXUP_NOTICE_DAYS` | 5 | days between the heads-up comment and the fixup push. Covers the slowest comment reply seen on sysknife (4.0 days) |
+| `FIXUP_MAX_LINES` | 20 | most lines, added plus deleted, a fixup patch may change. Five times the 4 lines each past test-count edit changed |
 | `GH_LIST_LIMIT` | 1000 | rows requested from a gh list that must be complete. A listing exactly this long is refused, because gh cuts silently at the limit |
 | `CONTRIBUTOR_WINDOW` | 300 | merged pull requests read to find past contributors. A recency window, so filling it is not an error |
 | `GH_TRIES` | 3 | attempts `run.sh` makes to reach GitHub before recording an exit-75 failure |
