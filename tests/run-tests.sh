@@ -1243,10 +1243,12 @@ PYEOF
 echo "== no home path or username is committed =="
 # The needle is assembled at runtime so this file does not match itself, which
 # is how the check first "found" a leak that was only its own source line.
+# --exclude=.git as well as --exclude-dir: a linked worktree's .git is a FILE
+# holding the absolute path of the main checkout, which is the author's home.
 needle="entro""pia"
-if grep -rq "$needle" --exclude-dir=.git --exclude=run-tests.sh "$root"; then
+if grep -rq "$needle" --exclude-dir=.git --exclude=.git --exclude=run-tests.sh "$root"; then
     bad "a home path leaked into the repository"
-    grep -rn "$needle" --exclude-dir=.git --exclude=run-tests.sh "$root" | head -3
+    grep -rn "$needle" --exclude-dir=.git --exclude=.git --exclude=run-tests.sh "$root" | head -3
 else
     ok "no home path committed"
 fi
