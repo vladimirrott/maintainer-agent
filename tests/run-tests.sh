@@ -7947,7 +7947,7 @@ drift_fresh; sed -i 's/^POST="${MAINTAINER_POST:-on}"/POST="${MAINTAINER_POST:-o
 drift_bites readme-profiles 'magent' "a profile whose POST default disagrees with the README table is caught"
 drift_fresh; sed -i '/^\[0.6.1\]:/d' "$dr/CHANGELOG.md"
 drift_bites changelog-links '0.6.1' "a CHANGELOG version heading with no link reference is caught"
-drift_fresh; sed -i 's#compare/v0.7.2...HEAD#compare/v0.4.1...HEAD#' "$dr/CHANGELOG.md"
+drift_fresh; sed -i 's#compare/v[0-9.]*\.\.\.HEAD#compare/v0.4.1...HEAD#' "$dr/CHANGELOG.md"
 drift_bites changelog-links 'Unreleased' "an [Unreleased] link that stops at an old version is caught"
 rm -rf "$dr"
 # A checker nothing runs is decoration (MISTAKES 7): the hook, CI and the suite

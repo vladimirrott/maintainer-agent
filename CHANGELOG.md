@@ -10,6 +10,12 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-26
+
+A timer run and an interactive session can see each other through leases, a pull
+request stalled on mechanical review items can be finished by a script, and
+every tunable has one default that the docs are checked against.
+
 ### Added
 
 - **`maintainer stalled` and `maintainer-repo fixup`: finish a pull request the
@@ -1246,7 +1252,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.7.2...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.0
 [0.7.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.2
 [0.7.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.1
 [0.7.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.0
