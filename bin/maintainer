@@ -2556,6 +2556,238 @@ def cmd_file_issue(args: list[str]) -> None:
     print((p.stdout or "").strip())
 
 
+# --- leases -----------------------------------------------------------------
+# A lease is a small file naming who is working one pull request, until when and
+# doing what, so the second actor asks instead of finding out with `ps`. The
+# pattern is a Kubernetes Lease (holder, duration, renew time) on the local
+# filesystem: a timer run and an interactive session share one host and one
+# GitHub account, so a file is enough. There is no daemon, no heartbeat and no
+# label. The incidents are docs/lessons.md 8, 80 and 2026-10-25.
+LEASES = ROOT / "leases"
+_DURATION = re.compile(r"^([1-9][0-9]*)([smhd]?)$")
+_UNIT = {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def _lease_actor() -> tuple[str, str]:
+    """(kind, holder) of whoever is asking. Inside a run it is that run's task."""
+    in_run = os.environ.get("MAINTAINER_IN_RUN", "")
+    return ("run", f"run:{in_run}") if in_run else ("interactive", "interactive")
+
+
+def _lease_pr(arg: str) -> str:
+    """A pull request number, or refuse: it becomes part of a file name."""
+    if not re.fullmatch(r"[0-9]+", arg or ""):
+        raise SystemExit(f"maintainer lease: {arg!r} is not a pull request number")
+    return arg
+
+
+def _lease_seconds(text: str) -> int:
+    m = _DURATION.match(text or "")
+    if not m:
+        raise SystemExit(f"maintainer lease: {text!r} is not a duration: a whole number "
+                         f"of seconds, or one with s, m, h or d (10m, 2h)")
+    return int(m.group(1)) * _UNIT[m.group(2)]
+
+
+class _LeaseMutex:
+    """A short flock on leases/.mutex, so a take is one read-decide-write step.
+
+    Two takers that both read "free" would both write and both believe they
+    hold it. The lock covers the decision and the write, nothing longer.
+    """
+    def __enter__(self):
+        import fcntl
+        LEASES.mkdir(parents=True, exist_ok=True)
+        self.fd = os.open(LEASES / ".mutex", os.O_RDWR | os.O_CREAT, 0o600)
+        fcntl.flock(self.fd, fcntl.LOCK_EX)
+        return self
+
+    def __exit__(self, *exc):
+        os.close(self.fd)        # closing drops the flock
+
+
+def _lease_path(pr: str) -> Path:
+    return LEASES / f"pr-{pr}.json"
+
+
+class _LeaseUnreadable(Exception):
+    pass
+
+
+def _lease_read(pr: str) -> dict | None:
+    """The lease on one PR, None when there is none. An unreadable file refuses.
+
+    A file that cannot be parsed is not a free pull request: answering "free"
+    for it is a guard that answered when it could not ask.
+    """
+    f = _lease_path(pr)
+    try:
+        text = f.read_text()
+    except FileNotFoundError:
+        return None
+    try:
+        d = json.loads(text)
+        for k in ("holder", "kind", "renewed", "ttl_seconds"):
+            d[k]
+        d["renewed"], d["ttl_seconds"] = int(d["renewed"]), int(d["ttl_seconds"])
+    except (ValueError, KeyError, TypeError):
+        raise _LeaseUnreadable(f"maintainer lease: {f} cannot be read as a lease, so #{pr} is "
+                               f"neither free nor held.\n"
+                               f"                  Look at it, then remove it if it is junk.")
+    return d
+
+
+def _lease_expires(d: dict) -> int:
+    return d["renewed"] + d["ttl_seconds"]
+
+
+def _lease_expired(d: dict, now: float) -> bool:
+    return now >= _lease_expires(d)
+
+
+def _lease_write(pr: str, d: dict) -> None:
+    f = _lease_path(pr)
+    tmp = f.with_name(f".{f.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(d, sort_keys=True) + "\n")
+    os.replace(tmp, f)
+
+
+def _ago(seconds: float) -> str:
+    """A span as 45s, 12m, 3h or 2.5d. Not _duration, which says "in" and "overdue"."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    if s < 86400:
+        return f"{s / 3600:.1f}h".replace(".0h", "h")
+    return f"{s / 86400:.1f}d".replace(".0d", "d")
+
+
+def _lease_describe(pr: str, d: dict, now: float) -> str:
+    note = f', "{d["note"]}"' if d.get("note") else ""
+    left = _lease_expires(d) - now
+    when = f"expires in {_ago(left)}" if left > 0 else f"expired {_ago(-left)} ago"
+    return f"#{pr} held by {d['holder']} ({d['kind']}){note}; {when}"
+
+
+def cmd_lease(args: list[str]) -> None:
+    try:
+        _lease_main(args)
+    except _LeaseUnreadable as e:
+        # 2, not 1: "held by someone else" and "could not tell" are different
+        # answers, and a caller that treats both as "skip" is right to.
+        print(e, file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _lease_main(args: list[str]) -> None:
+    if not args or args[0] not in ("take", "release", "check"):
+        raise _Usage
+    verb, rest = args[0], args[1:]
+    if verb == "check":
+        if len(rest) != 1:
+            raise _Usage
+        raise SystemExit(_lease_check(_lease_pr(rest[0])))
+    ttl, note, prs, i = None, "", [], 0
+    while i < len(rest):
+        a = rest[i]
+        if verb == "take" and a in ("--ttl", "--for"):
+            if i + 1 >= len(rest):
+                raise _Usage
+            if a == "--ttl":
+                ttl = _lease_seconds(rest[i + 1])
+            else:
+                note = rest[i + 1]
+            i += 2
+            continue
+        if a.startswith("--"):
+            raise _Usage
+        prs.append(_lease_pr(a))
+        i += 1
+    if not prs:
+        raise _Usage
+    if verb == "take":
+        raise SystemExit(_lease_take(prs, ttl if ttl is not None else _tunable_int("LEASE_TTL_SECONDS"), note))
+    raise SystemExit(_lease_release(prs))
+
+
+def _lease_check(pr: str) -> int:
+    _, me = _lease_actor()
+    now = datetime.now().timestamp()
+    d = _lease_read(pr)
+    if d is None:
+        print(f"#{pr} is free")
+        return 0
+    if _lease_expired(d, now):
+        print(f"#{pr} is free ({_lease_describe(pr, d, now)}, so it is ignored)")
+        return 0
+    if d["holder"] == me:
+        print(f"#{pr} is leased to you: {_lease_describe(pr, d, now)}")
+        return 0
+    print(_lease_describe(pr, d, now))
+    return 1
+
+
+def _lease_take(prs: list[str], ttl: int, note: str) -> int:
+    kind, me = _lease_actor()
+    now = int(datetime.now().timestamp())
+    with _LeaseMutex():
+        held, took = [], []
+        for pr in prs:
+            d = _lease_read(pr)
+            if d is None or d["holder"] == me:
+                continue
+            if _lease_expired(d, now):
+                took.append((pr, d))
+            else:
+                held.append((pr, d))
+        if held:
+            # All or nothing: a partial take would leave the caller holding half
+            # of what it asked for and believing it was refused.
+            for pr, d in held:
+                print(f"refused: {_lease_describe(pr, d, now)}")
+            return 1
+        for pr in prs:
+            d = _lease_read(pr)
+            mine = d is not None and d["holder"] == me
+            _lease_write(pr, {
+                "pr": int(pr), "holder": me, "kind": kind,
+                "note": note or (d.get("note", "") if mine else ""),
+                "acquired": d["acquired"] if mine else now,
+                "renewed": now, "ttl_seconds": ttl})
+            print(f"#{pr} {'renewed' if mine else 'leased'} to {me} for {_ago(ttl)}")
+        for pr, d in took:
+            print(f"took over #{pr} from {d['holder']}, whose lease had expired "
+                  f"{_ago(now - _lease_expires(d))} ago")
+    if kind == "interactive":
+        _warn_live_run()
+    return 0
+
+
+def _lease_release(prs: list[str]) -> int:
+    _, me = _lease_actor()
+    now = datetime.now().timestamp()
+    rc = 0
+    with _LeaseMutex():
+        for pr in prs:
+            d = _lease_read(pr)
+            if d is None:
+                print(f"#{pr} had no lease")
+            elif d["holder"] != me and not _lease_expired(d, now):
+                print(f"refused: {_lease_describe(pr, d, now)}")
+                rc = 1
+            else:
+                _lease_path(pr).unlink(missing_ok=True)
+                print(f"#{pr} released")
+    return rc
+
+
+def _warn_live_run() -> None:
+    pass
+
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -2882,6 +3114,9 @@ COMMANDS = {
                       cmd_file_issue),
     "gc": Cmd("gc [--dry-run]", "prune logs and drafts past RETENTION_DAYS",
               lambda a: cmd_gc("--dry-run" in a)),
+    "lease": Cmd("lease take <pr>... [--ttl D] [--for TEXT] | release <pr>... | check <pr>",
+                 "say who is working a pull request, until when; a run yields to a lease",
+                 cmd_lease, 2),
     "log": Cmd("log [n]", "the last n lines of the run index (default 10)",
                lambda a: cmd_log(int(a[0]) if a else 10)),
     "start": Cmd("start <task>", "refresh, diff against the last run, open a report",

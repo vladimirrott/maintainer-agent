@@ -33,6 +33,16 @@ middle digit.
   nothing. The write happens in the script, never through the model. Story 15 is
   no longer a gap. New `maintainer fixup-check <pr>` prints the check the script
   runs.
+- **`maintainer lease`: say who is working a pull request.** A timer run and an
+  interactive session worked #637, #658 and #660 at the same time on 2026-10-25
+  (docs/lessons.md 8 and 80 are the same fault), and the run's report could not
+  tell whose review it had found. `lease take <pr>... [--ttl D] [--for TEXT]`
+  writes a small file under `leases/` naming the holder, the note, and when it
+  expires; `take` refuses another holder's live lease and names them, renews
+  its own, and prints a takeover of an expired one; `check <pr>` exits 0 free or
+  yours, 1 held, 2 unreadable (never free); `release <pr>...` frees yours. The
+  read-decide-write step runs under a short flock, so of two simultaneous takes
+  exactly one wins. New default `LEASE_TTL_SECONDS` (3600).
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

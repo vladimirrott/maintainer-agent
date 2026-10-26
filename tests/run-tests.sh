@@ -8521,6 +8521,151 @@ for zk in FIXUP_QUIET_DAYS FIXUP_NOTICE_DAYS FIXUP_MAX_LINES; do
 done
 
 # ===== Z: stalled pull requests (end) =====
+# --- branch Y: leases (begin) ---------------------------------------------------
+echo "== leases: who holds a pull request, until when, doing what =="
+# Three times an interactive session and a timer run worked one PR blind (lessons
+# 8, 80 and 2026-10-25). A lease is a small file per PR naming its holder, so the
+# second actor can ask instead of finding out with `ps`.
+lsd="$stub_dir/lease"; mkdir -p "$lsd"
+lease_as() {  # $1 = "me" (interactive) or "run" (inside a run); then the lease arguments
+    local who="$1"; shift
+    local inrun=""; [ "$who" = run ] && inrun="magent/review"
+    MAINTAINER_IN_RUN="$inrun" MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+        MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease python3 "$root/bin/maintainer" lease "$@" 2>&1
+}
+jget() { python3 -c 'import json,sys; v=json.load(open(sys.argv[1])).get(sys.argv[2]); print("" if v is None else v)' "$1" "$2"; }
+# Rewrites one field, to age a lease without sleeping.
+jset() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d[sys.argv[2]]=json.loads(sys.argv[3]); json.dump(d,open(sys.argv[1],"w"))' "$1" "$2" "$3"; }
+
+grep -q '^LEASE_TTL_SECONDS=' "$root/lib/defaults.env" \
+    && ok "the lease TTL has a declared default in lib/defaults.env" \
+    || bad "no LEASE_TTL_SECONDS in lib/defaults.env, so a lease would carry a number nobody chose"
+out="$(lease_as me take 658 --for 'reviewing the retry fix')"; rc=$?
+[ "$rc" = 0 ] && [ -f "$lsd/leases/pr-658.json" ] \
+    && ok "take writes leases/pr-658.json" || bad "take wrote no lease (rc=$rc): $out"
+[ "$(jget "$lsd/leases/pr-658.json" holder)" = interactive ] && [ "$(jget "$lsd/leases/pr-658.json" kind)" = interactive ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" note)" = 'reviewing the retry fix' ] \
+    && ok "the record names its holder, kind and note" || bad "lease record fields wrong: $(cat "$lsd/leases/pr-658.json")"
+[ "$(jget "$lsd/leases/pr-658.json" ttl_seconds)" = "$(dget LEASE_TTL_SECONDS)" ] \
+    && ok "with no --ttl the lease carries the default from lib/defaults.env" \
+    || bad "ttl_seconds is '$(jget "$lsd/leases/pr-658.json" ttl_seconds)', not the default $(dget LEASE_TTL_SECONDS)"
+out="$(lease_as run check 658)"; rc=$?
+[ "$rc" = 1 ] && grep -q 'interactive' <<<"$out" && grep -q 'reviewing the retry fix' <<<"$out" && grep -qi 'expires' <<<"$out" \
+    && ok "check from a run: exit 1, naming the holder, the note and the expiry" \
+    || bad "check on a PR held by someone else (rc=$rc): $out"
+out="$(lease_as me check 658)"; rc=$?
+[ "$rc" = 0 ] && ok "check by the holder itself is exit 0" || bad "the holder was refused its own lease (rc=$rc): $out"
+out="$(lease_as run check 659)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'free' <<<"$out" && ok "check on an unleased PR: exit 0, free" || bad "unleased PR not free (rc=$rc): $out"
+out="$(lease_as run take 658 --for 'timer pass')"; rc=$?
+[ "$rc" = 1 ] && grep -q 'interactive' <<<"$out" && [ "$(jget "$lsd/leases/pr-658.json" holder)" = interactive ] \
+    && ok "take is refused while another holder's lease is live, and the file is untouched" \
+    || bad "a live lease was taken over (rc=$rc): $out"
+# Renewal: the same holder takes again, acquired stays and renewed moves.
+jset "$lsd/leases/pr-658.json" renewed "$(( $(date +%s) - 600 ))"
+a0="$(jget "$lsd/leases/pr-658.json" acquired)"
+out="$(lease_as me take 658 --ttl 10m)"; rc=$?
+[ "$rc" = 0 ] && [ "$(jget "$lsd/leases/pr-658.json" acquired)" = "$a0" ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" renewed)" -gt "$(( $(date +%s) - 60 ))" ] \
+    && [ "$(jget "$lsd/leases/pr-658.json" ttl_seconds)" = 600 ] \
+    && ok "take again renews (acquired kept, renewed moved, --ttl 10m is 600 s)" \
+    || bad "renewal wrong (rc=$rc): $(cat "$lsd/leases/pr-658.json")"
+# Release.
+out="$(lease_as run release 658)"; rc=$?
+[ "$rc" = 1 ] && [ -f "$lsd/leases/pr-658.json" ] \
+    && ok "release by a non-holder is refused and the lease stays" || bad "a non-holder released someone's lease (rc=$rc): $out"
+out="$(lease_as me release 658)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$lsd/leases/pr-658.json" ] && ok "release by the holder removes it" \
+    || bad "release left the lease (rc=$rc): $out"
+out="$(lease_as me release 658)"; rc=$?
+[ "$rc" = 0 ] && ok "releasing what is not held is not an error" || bad "release of nothing failed (rc=$rc): $out"
+# Expiry: a lease past renewed + ttl_seconds is free to anyone, and the takeover is said aloud.
+printf '{"holder":"run:magent/review","kind":"run","note":"old pass","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(( $(date +%s) - 9000 ))" "$(( $(date +%s) - 7200 ))" > "$lsd/leases/pr-700.json"
+out="$(lease_as me check 700)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'expired' <<<"$out" && ok "an expired lease reads as free, and says it was expired" \
+    || bad "an expired lease still blocked (rc=$rc): $out"
+out="$(lease_as me take 700)"; rc=$?
+[ "$rc" = 0 ] && grep -qi 'took over' <<<"$out" && grep -q 'run:magent/review' <<<"$out" \
+    && [ "$(jget "$lsd/leases/pr-700.json" holder)" = interactive ] \
+    && ok "taking an expired lease is allowed and names whose it was" \
+    || bad "expired takeover (rc=$rc): $out"
+# A lease that is exactly at its expiry is expired: renewed + ttl <= now.
+printf '{"holder":"run:magent/review","kind":"run","note":"edge","acquired":1,"renewed":%s,"ttl_seconds":100}\n' \
+    "$(( $(date +%s) - 100 ))" > "$lsd/leases/pr-701.json"
+out="$(lease_as me check 701)"; rc=$?
+[ "$rc" = 0 ] && ok "a lease at exactly its TTL is expired" || bad "an expired-at-the-boundary lease blocked (rc=$rc): $out"
+# The boundary needs a clock the test controls, so call the predicate itself.
+out="$(MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease \
+    python3 -B - "$root/bin/maintainer" <<'PYEOF' 2>&1
+import importlib.machinery, importlib.util, sys
+path = sys.argv[1]; sys.argv = ["maintainer", "--help"]
+loader = importlib.machinery.SourceFileLoader("maintainer_cli", path)
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("maintainer_cli", loader))
+loader.exec_module(m)
+d = {"renewed": 100, "ttl_seconds": 50}
+print(m._lease_expired(d, 150), m._lease_expired(d, 149.9), m._lease_expired(d, 151))
+PYEOF
+)"
+[ "$out" = "True False True" ] && ok "a lease is expired at renewed + ttl exactly, and not a moment before" \
+    || bad "the expiry boundary is wrong: $out"
+# Several at once are all-or-nothing.
+lease_as me take 710 >/dev/null
+out="$(lease_as run take 711 710 --for both)"; rc=$?
+[ "$rc" = 1 ] && [ ! -e "$lsd/leases/pr-711.json" ] \
+    && ok "taking several is all-or-nothing: one held PR takes none" \
+    || bad "a partial take left pr-711 behind (rc=$rc): $out"
+out="$(lease_as me release 710 711)"
+[ ! -e "$lsd/leases/pr-710.json" ] && ok "release takes several" || bad "release 710 711 left 710"
+# Arguments that would become a path, or a TTL nobody can mean.
+for badpr in '../x' 'abc' '12a' ''; do
+    before="$(ls -A "$lsd/leases" | wc -l)"
+    out="$(lease_as me take "$badpr")"; rc=$?
+    [ "$rc" != 0 ] && [ "$(ls -A "$lsd/leases" | wc -l)" = "$before" ] && grep -q 'not a pull request number' <<<"$out" \
+        && ok "take refuses the pull request '$badpr'" || bad "take accepted '$badpr' (rc=$rc): $out"
+done
+for badttl in 0 -5 abc 10x ''; do
+    out="$(lease_as me take 720 --ttl "$badttl")"; rc=$?
+    [ "$rc" != 0 ] && [ ! -e "$lsd/leases/pr-720.json" ] && grep -q 'not a duration' <<<"$out" \
+        && ok "take refuses --ttl '$badttl'" || bad "take accepted --ttl '$badttl' (rc=$rc): $out"
+done
+out="$(lease_as me take 720 --ttl 2h)"
+[ "$(jget "$lsd/leases/pr-720.json" ttl_seconds)" = 7200 ] && ok "--ttl 2h is 7200 s" || bad "--ttl 2h gave $(jget "$lsd/leases/pr-720.json" ttl_seconds)"
+lease_as me release 720 >/dev/null
+out="$(MAINTAINER_LEASE_TTL_SECONDS=77 MAINTAINER_IN_RUN='' MAINTAINER_STATE="$lsd" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease python3 "$root/bin/maintainer" lease take 721 2>&1)"
+[ "$(jget "$lsd/leases/pr-721.json" ttl_seconds)" = 77 ] && ok "MAINTAINER_LEASE_TTL_SECONDS beats the default" \
+    || bad "the env override did not reach the lease: $out"
+lease_as me release 721 >/dev/null
+# A file that cannot be read is not a free PR.
+printf '{not json' > "$lsd/leases/pr-730.json"
+out="$(lease_as me check 730)"; rc=$?
+[ "$rc" = 2 ] && ok "an unreadable lease file is exit 2, never free" || bad "unreadable lease read as free or held (rc=$rc): $out"
+out="$(lease_as me take 730)"; rc=$?
+[ "$rc" != 0 ] && [ "$(cat "$lsd/leases/pr-730.json")" = '{not json' ] \
+    && ok "take will not overwrite a lease it cannot read" || bad "take clobbered an unreadable lease (rc=$rc)"
+rm -f "$lsd/leases/pr-730.json"
+# Two takes at once: exactly one wins. Each round races an interactive take and a run take.
+wins=0; rounds=0; allone=1
+for n in $(seq 800 819); do
+    lease_as me take "$n" >/dev/null & p1=$!
+    lease_as run take "$n" >/dev/null & p2=$!
+    wait "$p1"; r1=$?; wait "$p2"; r2=$?
+    rounds=$((rounds+1))
+    if { [ "$r1" = 0 ] && [ "$r2" != 0 ]; } || { [ "$r1" != 0 ] && [ "$r2" = 0 ]; }; then wins=$((wins+1)); else allone=0; fi
+done
+[ "$allone" = 1 ] && ok "two simultaneous takes: exactly one wins, in all $rounds rounds" \
+    || bad "only $wins of $rounds races had exactly one winner"
+# The mutex is what makes that true rather than lucky, so hold it and watch take wait.
+mkdir -p "$lsd/leases"; : > "$lsd/leases/.mutex"
+flock -x "$lsd/leases/.mutex" sleep 3 & hold=$!
+sleep 0.4
+lease_as me take 900 >/dev/null & tk=$!
+sleep 1
+if kill -0 "$tk" 2>/dev/null; then ok "take waits while the lease mutex is held"; else bad "take did not wait for the mutex, so two takers can both win"; fi
+wait "$hold"; wait "$tk"; rc=$?
+[ "$rc" = 0 ] && [ -f "$lsd/leases/pr-900.json" ] && ok "and completes once the mutex is free" || bad "take never completed after the mutex was released (rc=$rc)"
+# --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
