@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Merge a pull request, but only against a recorded verification.
 #
-#   maintainer-merge receipt <pr> <head-sha> <what-was-proved>
-#   maintainer-merge merge   <pr>
-#   maintainer-merge show    [pr]
+#   maintainer-merge verify      <pr> <head-sha> <test-filter> <sed-mutation> [suite]
+#   maintainer-merge verify-deps <pr> <head-sha>
+#   maintainer-merge verify-part <pr> <head-sha> <test-filter> <sed-mutation> <suite>
+#   maintainer-merge receipt     <pr> <head-sha> <what-was-proved>
+#   maintainer-merge merge       <pr>
+#   maintainer-merge show        [pr]
 #
 # The point is not to merge. The point is that a merge is impossible unless
 # somebody proved the guard bites, at a head whose production code is identical

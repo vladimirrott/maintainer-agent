@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """Refresh the profile's checkout and keep an auditable record of each maintenance run.
 
-    maintainer version                         which build is deployed, and whether it is stale
-    maintainer status                          what has run, what is due, is it posting
-    maintainer run [--show-prompt] <task>      run one task now, or print its prompt
-    maintainer start  <task>                   refresh, diff against the last run, open a report
-    maintainer finish <run_id>                 close the run and append it to the index
-    maintainer screen <pr>                     may this PR be built on the host?
-    maintainer log    [n]                      show the last n runs
+    maintainer <verb> [arguments]        `maintainer --help` lists every verb
 
 `start` refuses to touch a dirty tree. It never stashes, resets or force-updates
 anything: a run that would have to discard local work is a run that stops and
@@ -24,6 +18,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 # Profile-driven, in this order: the environment run.sh exports, then the
 # DEPLOYED profile.env, then a default.
@@ -59,8 +54,11 @@ def _resolve_profile() -> str:
         f"            Set MAINTAINER_PROFILE to say which one you mean.")
 
 
-PROFILE = _resolve_profile()
-if not PROFILE:
+# `--help` names no profile and must work with two deployed and none chosen, so
+# it skips resolution; main() answers it before anything reads PROFILE.
+_HELP = sys.argv[1:2] in (["--help"], ["-h"], ["help"])
+PROFILE = "" if _HELP else _resolve_profile()
+if not PROFILE and not _HELP:
     raise SystemExit("maintainer: no profile is deployed. Run ./install.sh from the repository,\n"
                      "            or set MAINTAINER_PROFILE to the one you mean.")
 # A profile name becomes a path AND, below, part of a shell command. Both need
@@ -70,7 +68,7 @@ if not PROFILE:
 # nothing when whoever sets the variable also creates the directory. That is
 # arbitrary shell inside a subprocess the deny wall never sees.
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
-if not _SAFE_NAME.match(PROFILE):
+if not _HELP and not _SAFE_NAME.match(PROFILE):
     raise SystemExit(f"maintainer: refusing a profile name that is not a plain "
                      f"word: {PROFILE!r}")
 
@@ -260,10 +258,6 @@ def _gh_mentions(body: str) -> set:
         out.add(_login(m))
     return out
 
-# Subcommands run.sh calls and a person does not. They are deliberately absent
-# from docs/cli.md, and tests/run-tests.sh requires that every OTHER subcommand
-# appears there: six had accumulated undocumented before anything checked.
-INTERNAL_COMMANDS = {"start", "finish", "abort", "failed", "ok"}
 # No default list: a profile that declares no TASKS runs nothing, and `start`
 # and `status` say so. This inherited one project's four task names.
 TASKS = _setting("MAINTAINER_TASKS", "TASKS", "").split()
@@ -2478,63 +2472,123 @@ def cmd_digest(run_id: str, compact: bool) -> None:
     print("\n".join(digest_lines(run_id, compact)))
 
 
+class _Usage(Exception):
+    """Raised by a handler whose arguments do not fit, so main() prints the usage."""
+
+
+def cmd_version(_args: list[str]) -> None:
+    v = deployed_version()
+    for k in ("version", "commit", "installed_at", "installed_from"):
+        print(f"{k:15} {v.get(k, '?')}")
+    if v["drift"]:
+        print(f"{'drift':15} {v['drift']}")
+    raise SystemExit(1 if v["version"] == "unstamped" else 0)
+
+
+def _offer(a: list[str]) -> None:
+    if len(a) == 4 and a[3] != "--second":
+        raise _Usage
+    cmd_offer(a[0], a[1], a[2], second=len(a) == 4)
+
+
+# The one list of verbs. main() dispatches on it, `--help` prints it, and
+# tests/run-tests.sh and scripts/check_drift.py read it, so a verb added here
+# shows up in all three or fails a check. Fields: the usage line after
+# `maintainer`, what it does in one line, the handler (given the arguments after
+# the verb), the fewest and most arguments it takes (None = any number; a
+# handler that needs more checks for itself), and whether run.sh calls it and a
+# person does not. This replaces a chain of `cmd == "..."` branches and a
+# docstring listing seven of twenty-two verbs.
+class Cmd(NamedTuple):
+    usage: str
+    summary: str
+    run: object
+    lo: int = 0
+    hi: int | None = None
+    internal: bool = False
+
+
+COMMANDS = {
+    "status": Cmd("status", "which build, which profile, whether it posts, what ran, what is due",
+                  lambda a: cmd_status()),
+    "version": Cmd("version", "which build is deployed, and whether the checkout has moved ahead",
+                   cmd_version),
+    "run": Cmd("run [--show-prompt] <task>", "run one task now, or print its prompt",
+               cmd_run),
+    "screen": Cmd("screen <pr>", "may this pull request be executed on this host?",
+                  lambda a: cmd_screen(a[0]), 1, 1),
+    "digest": Cmd("digest <run-id> [--compact]", "what one run did and what it cost",
+                  lambda a: cmd_digest(a[0], "--compact" in a[1:]), 1),
+    "audit": Cmd("audit [run-id|--all]", "compare a run's report with what actually ran",
+                 lambda a: cmd_audit(a[0] if a else "--all")),
+    "claims": Cmd("claims", "who has claimed what, and how long they have been quiet",
+                  lambda a: cmd_claims()),
+    "offers": Cmd("offers", "who can be offered an issue, who is over the one-offer rule",
+                  lambda a: cmd_offers()),
+    "assign": Cmd("assign <issue> <user>", "assign an issue and read the assignee list back",
+                  lambda a: cmd_assign(a[0], a[1]), 2, 2),
+    "release": Cmd("release <issue> <user> <reason>", "retract an offer so `offers` stops counting it",
+                   lambda a: cmd_release(a[0], a[1], a[2]), 3, 3),
+    "offer": Cmd("offer <issue> <user> <text> [--second]", "offer one issue to one person, on its own thread",
+                 _offer, 3, 4),
+    "settle": Cmd("settle", "assign every answered offer to its holder",
+                  lambda a: cmd_settle()),
+    "stale": Cmd("stale [days]", "name every hold nobody has touched for that many days",
+                 lambda a: cmd_stale(int(a[0]) if a else _tunable_int("STALE_HOLD_DAYS")), 0, 1),
+    "holders": Cmd("holders <issue>", "who the maintainer has pointed at one issue and not released",
+                   lambda a: cmd_holders(a[0]), 1, 1),
+    "file-issue": Cmd("file-issue --title T --body-file F [--fingerprint FP] [--label L] [--dry-run]",
+                      "file one tracker issue for a finding, once, by fingerprint",
+                      cmd_file_issue),
+    "gc": Cmd("gc [--dry-run]", "prune logs and drafts past RETENTION_DAYS",
+              lambda a: cmd_gc("--dry-run" in a)),
+    "log": Cmd("log [n]", "the last n lines of the run index (default 10)",
+               lambda a: cmd_log(int(a[0]) if a else 10)),
+    "start": Cmd("start <task>", "refresh, diff against the last run, open a report",
+                 lambda a: cmd_start(a[0]), 1, 1, True),
+    "finish": Cmd("finish <run-id>", "close the run and append it to the index",
+                  lambda a: cmd_finish(a[0]), 1, 1, True),
+    "abort": Cmd("abort <run-id> <reason>", "record that a run started and produced nothing",
+                 lambda a: cmd_abort(a[0], a[1]), 2, None, True),
+    "failed": Cmd("failed <task> <reason> [log]", "write a failure marker for a task",
+                  lambda a: record_failure(a[0], a[1], a[2] if len(a) > 2 else ""), 2, None, True),
+    "ok": Cmd("ok <task>", "clear a task's failure marker",
+              lambda a: clear_failure(a[0]), 1, 1, True),
+}
+
+
+def help_text() -> str:
+    """The module description and every verb, generated from COMMANDS."""
+    def rows(internal: bool) -> list[str]:
+        out = []
+        for c in COMMANDS.values():
+            if c.internal != internal:
+                continue
+            head = f"    maintainer {c.usage}"
+            # A usage line that would run into its summary puts the summary below.
+            out.append(f"{head:<54} {c.summary}" if len(head) < 54 else f"{head}\n{'':54} {c.summary}")
+        return out
+    return "\n".join([(__doc__ or "").rstrip(), "", "Verbs:", *rows(False), "",
+                      "Called by run.sh, not by you:", *rows(True)])
+
+
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SystemExit(__doc__)
-    cmd = sys.argv[1]
-    if cmd == "version":
-        v = deployed_version()
-        for k in ("version", "commit", "installed_at", "installed_from"):
-            print(f"{k:15} {v.get(k, '?')}")
-        if v["drift"]:
-            print(f"{'drift':15} {v['drift']}")
-        raise SystemExit(1 if v["version"] == "unstamped" else 0)
-    elif cmd == "status":
-        cmd_status()
-    elif cmd == "run":
-        cmd_run(sys.argv[2:])
-    elif cmd == "start" and len(sys.argv) == 3:
-        cmd_start(sys.argv[2])
-    elif cmd == "finish" and len(sys.argv) == 3:
-        cmd_finish(sys.argv[2])
-    elif cmd == "screen" and len(sys.argv) == 3:
-        cmd_screen(sys.argv[2])
-    elif cmd == "gc":
-        cmd_gc("--dry-run" in sys.argv[2:])
-    elif cmd == "assign" and len(sys.argv) == 4:
-        cmd_assign(sys.argv[2], sys.argv[3])
-    elif cmd == "release" and len(sys.argv) == 5:
-        cmd_release(sys.argv[2], sys.argv[3], sys.argv[4])
-    elif cmd == "offer" and len(sys.argv) == 5:
-        cmd_offer(sys.argv[2], sys.argv[3], sys.argv[4])
-    elif cmd == "offer" and len(sys.argv) == 6 and sys.argv[5] == "--second":
-        cmd_offer(sys.argv[2], sys.argv[3], sys.argv[4], second=True)
-    elif cmd == "settle":
-        cmd_settle()
-    elif cmd == "stale" and len(sys.argv) <= 3:
-        cmd_stale(int(sys.argv[2]) if len(sys.argv) == 3 else _tunable_int("STALE_HOLD_DAYS"))
-    elif cmd == "holders" and len(sys.argv) == 3:
-        cmd_holders(sys.argv[2])
-    elif cmd == "offers":
-        cmd_offers()
-    elif cmd == "claims":
-        cmd_claims()
-    elif cmd == "audit":
-        cmd_audit(sys.argv[2] if len(sys.argv) > 2 else "--all")
-    elif cmd == "abort" and len(sys.argv) >= 4:
-        cmd_abort(sys.argv[2], sys.argv[3])
-    elif cmd == "failed" and len(sys.argv) >= 4:
-        record_failure(sys.argv[2], sys.argv[3], sys.argv[4] if len(sys.argv) > 4 else "")
-    elif cmd == "ok" and len(sys.argv) == 3:
-        clear_failure(sys.argv[2])
-    elif cmd == "file-issue":
-        cmd_file_issue(sys.argv[2:])
-    elif cmd == "digest" and len(sys.argv) >= 3:
-        cmd_digest(sys.argv[2], "--compact" in sys.argv[3:])
-    elif cmd == "log":
-        cmd_log(int(sys.argv[2]) if len(sys.argv) > 2 else 10)
-    else:
-        raise SystemExit(__doc__)
+    argv = sys.argv[1:]
+    if argv and argv[0] in ("--help", "-h", "help"):
+        print(help_text())
+        raise SystemExit(0)
+    spec = COMMANDS.get(argv[0]) if argv else None
+    if spec is None:
+        if argv:
+            print(f"maintainer: no verb named {argv[0]!r}\n", file=sys.stderr)
+        raise SystemExit(help_text())
+    args = argv[1:]
+    if len(args) < spec.lo or (spec.hi is not None and len(args) > spec.hi):
+        raise SystemExit(f"usage: maintainer {spec.usage}\n\n{help_text()}")
+    try:
+        spec.run(args)
+    except _Usage:
+        raise SystemExit(f"usage: maintainer {spec.usage}\n\n{help_text()}")
 
 
 if __name__ == "__main__":

@@ -32,6 +32,17 @@ middle digit.
   stop, naming `MAINTAINER_GH_LIST_LIMIT`, when a listing comes back exactly
   that long. The merged-PR contributor scan stays a window.
 
+### Fixed
+
+- **`maintainer --help` lists every verb and works with no profile chosen.** The
+  docstring listed seven of twenty-two verbs, and `--help` was not handled: it
+  printed to stderr with exit 1, and with two profiles deployed it died in
+  profile resolution before it printed anything. `bin/maintainer` now dispatches
+  through one table (`COMMANDS`), `--help`, `-h` and `help` print it to stdout
+  and exit 0, and a wrong argument count prints that verb's usage. The test
+  suite reads the verb list from the same table. `maintainer-merge`'s header now
+  lists its six verbs, not three.
+
 ### Changed
 
 - **No tool guesses which project it acts on.** `maintainer run` read

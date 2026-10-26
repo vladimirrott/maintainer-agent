@@ -81,6 +81,25 @@ suite_origin="$stub_dir/suite-origin.git"
 git init -q --bare "$suite_origin"
 export MAINTAINER_REPO_ORIGIN="$suite_origin"
 
+# The verbs bin/maintainer dispatches, read from its COMMANDS table by importing
+# it, which `--help` lets it do with no profile deployed. Prints "<verb> <0|1>",
+# the second field being whether run.sh calls it and a person does not. Every
+# test that needs the verb list reads it here, so there is one source in the
+# tests as well as in the tool. Fails loudly on an unreadable table.
+cli_table() {
+    python3 -B - "$root/bin/maintainer" <<'PYEOF' || return 1
+import importlib.machinery, importlib.util, sys
+path = sys.argv[1]
+sys.argv = ["maintainer", "--help"]
+loader = importlib.machinery.SourceFileLoader("maintainer_cli", path)
+spec = importlib.util.spec_from_loader("maintainer_cli", loader)
+m = importlib.util.module_from_spec(spec)
+loader.exec_module(m)
+for verb, c in m.COMMANDS.items():
+    print(verb, int(c.internal))
+PYEOF
+}
+
 echo "== argument handling =="
 out=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" nosuchprofile review 2>&1); rc=$?
 check "unknown profile is rejected" "$rc" "64"
@@ -1667,12 +1686,13 @@ echo "== every command a person can type is documented =="
 # compared the two. A command nobody can find is a command nobody uses, and the
 # drift is silent in both directions: a doc naming a command that was renamed
 # out of existence is the defect in docs/lessons.md 12.
-python3 - "$root" <<'PYEOF'
-import pathlib, re, sys
+CLI_TABLE="$(cli_table)" python3 - "$root" <<'PYEOF'
+import os, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
 src = (root / "bin/maintainer").read_text()
-internal = set(re.findall(r'"([a-z_-]+)"', re.search(r'INTERNAL_COMMANDS = \{(.*?)\}', src, re.S).group(1)))
-cmds = set(re.findall(r'cmd == "([a-z_-]+)"', src))
+table = [ln.split() for ln in os.environ["CLI_TABLE"].splitlines()]
+internal = {v for v, i in table if i == "1"}
+cmds = {v for v, _ in table}
 for f, pat in (("bin/maintainer-merge", r'^\s+(receipt|verify|merge|show)\)'),
                ("bin/maintainer-repo", r'^\s+(prune|release-check)\)')):
     tool = f.split("/")[-1]
@@ -7735,6 +7755,57 @@ printf 'owner = "zzacct"\n' >> "$cm/bin/maintainer"
 python3 "$chk" --root "$cm" --only repo-names >/dev/null 2>&1 \
     && bad "the checker passed an account name" || ok "and on a GitHub account"
 rm -rf "$cm"
+
+echo "== --help tells the truth, from the table main() dispatches on =="
+# The docstring listed seven verbs and main() dispatched twenty-two, so --help
+# hid fifteen commands. It also was not handled at all: it raised SystemExit
+# with the text, to stderr, exit 1, and _resolve_profile() ran at import, so with
+# two profiles deployed even that failed before it printed.
+hh="$stub_dir/helphome"; rm -rf "$hh"
+mkdir -p "$hh/.local/share/maintainer/profiles/one" "$hh/.local/share/maintainer/profiles/two"
+: > "$hh/.local/share/maintainer/profiles/one/profile.env"; : > "$hh/.local/share/maintainer/profiles/two/profile.env"
+for flag in --help -h help; do
+    hout="$(env -u MAINTAINER_PROFILE HOME="$hh" python3 "$root/bin/maintainer" "$flag" 2>"$stub_dir/help.err")"; hrc=$?
+    [ "$hrc" = 0 ] && [ -n "$hout" ] && [ ! -s "$stub_dir/help.err" ] \
+        && ok "maintainer $flag prints to stdout and exits 0, with two profiles deployed and none named" \
+        || bad "maintainer $flag: rc=$hrc, stderr: $(head -c 120 "$stub_dir/help.err")"
+done
+hout="$(env -u MAINTAINER_PROFILE HOME="$hh" python3 "$root/bin/maintainer" --help 2>&1)"
+verbs="$(cli_table | awk '{print $1}')"
+nverbs="$(wc -w <<<"$verbs")"
+[ "$nverbs" -ge 20 ] && ok "the dispatch table has $nverbs verbs" \
+    || bad "could not read the dispatch table from bin/maintainer ($nverbs verbs)"
+missing=""
+for v in $verbs; do grep -qE "^ +maintainer $v( |\$)" <<<"$hout" || missing="$missing $v"; done
+[ -z "$missing" ] && ok "--help lists every verb the table dispatches" \
+    || bad "--help does not list:$missing"
+grep -q 'maintainer run \[--show-prompt\] <task>' <<<"$hout" \
+    && ok "and spells the arguments each one takes" || bad "--help drops the argument shapes"
+# One source: main() no longer carries its own chain of verb comparisons.
+grep -qE '^\s+(el)?if cmd == "' "$root/bin/maintainer" \
+    && bad "main() still dispatches on its own if-chain, which is a second list of verbs" \
+    || ok "main() dispatches through the table, not a second list"
+# A wrong argument count prints the same text to stderr and exits non-zero.
+herr="$(env HOME="$hh" MAINTAINER_PROFILE=one python3 "$root/bin/maintainer" assign 1 2>&1 >/dev/null)"; hrc=$?
+[ "$hrc" != 0 ] && grep -q 'usage: maintainer assign <issue> <user>' <<<"$herr" \
+    && ok "a wrong argument count names the usage of that verb" \
+    || bad "assign with one argument: rc=$hrc, $(printf '%s' "$herr" | head -c 120)"
+herr="$(env HOME="$hh" MAINTAINER_PROFILE=one python3 "$root/bin/maintainer" nosuchverb 2>&1 >/dev/null)"; hrc=$?
+[ "$hrc" != 0 ] && grep -q 'nosuchverb' <<<"$herr" && grep -q 'maintainer status' <<<"$herr" \
+    && ok "an unknown verb is named and the verb list follows" || bad "an unknown verb gave: $(printf '%s' "$herr" | head -c 120)"
+# Internal verbs are listed, but apart from the ones a person types.
+grep -n 'Called by run.sh' <<<"$hout" >/dev/null \
+    && [ "$(grep -n 'Called by run.sh' <<<"$hout" | head -1 | cut -d: -f1)" -gt "$(grep -n 'maintainer status' <<<"$hout" | head -1 | cut -d: -f1)" ] \
+    && [ "$(grep -n 'maintainer start' <<<"$hout" | head -1 | cut -d: -f1)" -gt "$(grep -n 'Called by run.sh' <<<"$hout" | head -1 | cut -d: -f1)" ] \
+    && ok "the verbs run.sh calls are listed apart, under their own heading" \
+    || bad "internal verbs are mixed in with the ones a person types"
+
+# maintainer-merge's header and dispatcher agree.
+mg_head="$(sed -n '1,16p' "$root/bin/maintainer-merge" | grep -oE '^#   maintainer-merge [a-z-]+' | awk '{print $3}' | sort | paste -sd' ')"
+mg_case="$(sed -n '/^_executed || return 0/,$p' "$root/bin/maintainer-merge" | grep -oE '^    [a-z-]+\)' | tr -d ' )' | sort | paste -sd' ')"
+[ -n "$mg_case" ] && [ "$mg_head" = "$mg_case" ] \
+    && ok "maintainer-merge's header lists the verbs its dispatcher takes ($mg_case)" \
+    || bad "maintainer-merge's header says '$mg_head', its dispatcher takes '$mg_case'"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
