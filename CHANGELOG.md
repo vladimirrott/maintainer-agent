@@ -43,6 +43,15 @@ middle digit.
   yours, 1 held, 2 unreadable (never free); `release <pr>...` frees yours. The
   read-decide-write step runs under a short flock, so of two simultaneous takes
   exactly one wins. New default `LEASE_TTL_SECONDS` (3600).
+- **A run says it is running.** `run.sh` writes `leases/run.json` (task, pid, run
+  id) right after it takes `run.lock` and removes it on every exit, through an
+  internal `maintainer run-lease` verb. Liveness is never read from the file or
+  a pid: `maintainer status` asks the lock, so a file left by a killed run
+  beside a free lock prints as stale and is ignored. `status` gains a `leases`
+  block (the run, then each PR lease with holder, note, renewed-ago and
+  expires-in; expired ones marked and ignored). An interactive `lease take`
+  while a run is live warns with the run id and `maintainer abort`, and still
+  takes: runs yield to interactive work.
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

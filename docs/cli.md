@@ -67,7 +67,8 @@ identity, the repository, the scheduler, a real container, and the audit trail.
 
 ## Called by run.sh, not by you
 
-`start`, `finish`, `abort`, `failed`, `ok`. They open a run, close it, record
-that one produced nothing, write a failure marker and clear it. `run.sh` calls
+`start`, `finish`, `abort`, `failed`, `ok`, `run-lease`. They open a run, close
+it, record that one produced nothing, write a failure marker and clear it, and
+write or remove `leases/run.json`, the label `status` reads beside `run.lock`. `run.sh` calls
 them in order; typing them by hand puts the audit trail out of step with what
 happened.

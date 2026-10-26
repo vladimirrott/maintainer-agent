@@ -8665,6 +8665,150 @@ sleep 1
 if kill -0 "$tk" 2>/dev/null; then ok "take waits while the lease mutex is held"; else bad "take did not wait for the mutex, so two takers can both win"; fi
 wait "$hold"; wait "$tk"; rc=$?
 [ "$rc" = 0 ] && [ -f "$lsd/leases/pr-900.json" ] && ok "and completes once the mutex is free" || bad "take never completed after the mutex was released (rc=$rc)"
+echo "== the run lease: a pass says it is running, and the lock says whether that is true =="
+# run.sh already takes run.lock. Beside it, a file says WHICH run holds it, so an
+# interactive session can ask instead of running `ps`. The file is only a label:
+# liveness is "ask the lock", and a leftover file with a free lock is stale.
+rl="$lsd"; rm -rf "$rl/leases"; rm -f "$rl/run.lock"
+rlrun() { MAINTAINER_STATE="$rl" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=lease \
+    python3 "$root/bin/maintainer" "$@" 2>&1; }
+out="$(rlrun run-lease review 4242 2031-02-03T04-05-review)"; rc=$?
+[ "$rc" = 0 ] && [ "$(jget "$rl/leases/run.json" task)" = review ] && [ "$(jget "$rl/leases/run.json" pid)" = 4242 ] \
+    && [ "$(jget "$rl/leases/run.json" run_id)" = 2031-02-03T04-05-review ] \
+    && ok "run-lease writes leases/run.json with the task, pid and run id" \
+    || bad "run-lease (rc=$rc): $out $(cat "$rl/leases/run.json" 2>&1)"
+out="$(rlrun run-lease review 4242)"; rc=$?
+[ "$rc" = 0 ] && [ -z "$(jget "$rl/leases/run.json" run_id)" ] \
+    && ok "before the run id exists the file carries the task and pid alone" \
+    || bad "run-lease without a run id (rc=$rc): $(cat "$rl/leases/run.json")"
+rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+out="$(rlrun run-lease --clear)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$rl/leases/run.json" ] && ok "run-lease --clear removes it" || bad "run-lease --clear left the file (rc=$rc): $out"
+out="$(rlrun run-lease --clear)"; rc=$?
+[ "$rc" = 0 ] && ok "and clearing nothing is not an error" || bad "clearing an absent run lease failed (rc=$rc): $out"
+out="$(rlrun run-lease 'bad task' 1)"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$rl/leases/run.json" ] && grep -q 'plain words' <<<"$out" \
+    && ok "a task that is not a plain word is refused" || bad "run-lease accepted 'bad task' (rc=$rc): $out"
+out="$(rlrun run-lease review notapid)"; rc=$?
+[ "$rc" != 0 ] && [ ! -e "$rl/leases/run.json" ] && grep -q 'plain words' <<<"$out" \
+    && ok "and so is a pid that is not a number" || bad "run-lease accepted a non-numeric pid (rc=$rc): $out"
+# The run id arrives after the start; the start time must survive it.
+rlrun run-lease review 4242 >/dev/null; t0="$(jget "$rl/leases/run.json" started)"
+sleep 1.1; rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+[ "$(jget "$rl/leases/run.json" started)" = "$t0" ] && [ -n "$t0" ] \
+    && ok "adding the run id keeps the original start time" || bad "the start time moved when the run id was added"
+rlrun run-lease --clear >/dev/null
+
+# A status home, as the status block above builds one: a deployed profile and a scratch state directory.
+sl_home="$stub_dir/leasehome"; rm -rf "$sl_home"
+mkdir -p "$sl_home/.local/share/maintainer/profiles/sk"
+cat > "$sl_home/.local/share/maintainer/profiles/sk/profile.env" <<'ENVSK'
+PROFILE_NAME="sk"
+REPO_SLUG="acme/sk"
+REPO_PATH="$HOME/src/sk"
+STATE_DIR="$HOME/.local/state/sk-maint"
+TASKS="review"
+POST="on"
+GH_ACCOUNT="acmebot"
+ENVSK
+make_stub systemctl 'exit 0'
+rlstatus() { PATH="$stub_dir:$PATH" HOME="$sl_home" MAINTAINER_PROFILE=sk MAINTAINER_STATE="$rl" \
+    env -u MAINTAINER_STATE_DIR MAINTAINER_STATE="$rl" python3 "$root/bin/maintainer" status 2>&1; }
+mkdir -p "$rl/leases"
+out="$(rlstatus)"
+grep -qi 'leases' <<<"$out" && grep -qi 'idle\|no run' <<<"$out" \
+    && ok "status shows a leases block, and says no run holds the lock" || bad "status has no leases block: $(tail -5 <<<"$out")"
+# A leftover file and a FREE lock: stale, ignored, and never described as running.
+rlrun run-lease review 4242 2031-02-03T04-05-review >/dev/null
+out="$(rlstatus)"
+grep -qi 'stale' <<<"$out" && grep -qi 'ignored' <<<"$out" && ! grep -qi 'LIVE' <<<"$out" \
+    && ok "a run lease with a free lock is stale and ignored" || bad "a stale run lease read as live: $(grep -i -A3 lease <<<"$out")"
+# The same file with the lock really held by another process: live, naming the run.
+: > "$rl/run.lock"
+flock -x "$rl/run.lock" sleep 6 & lockpid=$!
+sleep 0.4
+if flock -n "$rl/run.lock" true; then bad "the positive control failed: the lock is not held, so the next cases prove nothing"
+else ok "positive control: run.lock is really held by pid $lockpid"; fi
+out="$(rlstatus)"
+grep -qi 'live' <<<"$out" && grep -q '2031-02-03T04-05-review' <<<"$out" \
+    && ok "with the lock held, status shows the run lease as live, with its run id" \
+    || bad "a held lock was not shown as a live run: $(grep -i -A3 lease <<<"$out")"
+# Taking a PR while a run is live: warn, name the run and the abort hint, never refuse.
+out="$(lease_as me take 950 --for 'looking at it')"; rc=$?
+[ "$rc" = 0 ] && [ -f "$rl/leases/pr-950.json" ] && grep -q '2031-02-03T04-05-review' <<<"$out" && grep -q 'maintainer abort' <<<"$out" \
+    && ok "an interactive take during a live run warns with the run id and the abort hint, and still takes" \
+    || bad "take during a live run (rc=$rc): $out"
+lease_as me release 950 >/dev/null
+out="$(lease_as run take 951)"; rc=$?
+grep -q 'maintainer abort' <<<"$out" && bad "a run was told to abort itself" || ok "a take from inside a run does not print the abort hint"
+lease_as run release 951 >/dev/null
+wait "$lockpid"
+out="$(lease_as me take 952)"; rc=$?
+[ "$rc" = 0 ] && ! grep -q 'maintainer abort' <<<"$out" \
+    && ok "once the lock is free the leftover file warns nobody" || bad "a stale run lease still warned (rc=$rc): $out"
+lease_as me release 952 >/dev/null
+# PR leases in status: holder, note, renewed-ago, expires-in; an expired one marked and ignored.
+printf '{"holder":"interactive","kind":"interactive","note":"fixing the retry","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(( $(date +%s) - 900 ))" "$(( $(date +%s) - 300 ))" > "$rl/leases/pr-901.json"
+printf '{"holder":"run:sk/review","kind":"run","note":"old pass","acquired":1,"renewed":%s,"ttl_seconds":1800}\n' \
+    "$(( $(date +%s) - 10800 ))" > "$rl/leases/pr-902.json"
+out="$(rlstatus)"
+l901="$(grep '#901' <<<"$out")"; l902="$(grep '#902' <<<"$out")"
+grep -q 'interactive' <<<"$l901" && grep -q 'fixing the retry' <<<"$l901" && grep -Eq 'renewed [0-9]+m ago' <<<"$l901" && grep -Eq 'expires in [0-9]+m' <<<"$l901" \
+    && ok "status lists a live PR lease with holder, note, renewed-ago and expires-in" || bad "the live PR lease line: '$l901'"
+grep -qi 'expired' <<<"$l902" && grep -qi 'ignored' <<<"$l902" && ! grep -qi 'expires in' <<<"$l902" \
+    && ok "and marks an expired one as expired and ignored" || bad "the expired PR lease line: '$l902'"
+rm -f "$rl/leases/pr-901.json" "$rl/leases/pr-902.json" "$rl/leases/run.json"
+
+# run.sh itself: the lease exists while the pass runs and the lock is held, and is gone after.
+lk="$stub_dir/runlease"; rm -rf "$lk"; mkdir -p "$lk/.local/bin" "$lk/bin" "$lk/state/state" "$lk/state/runs"
+lk_repo="$lk/repo"; git init -q -b main "$lk_repo"
+printf '{"permissions":{"deny":[]}}\n' > "$lk/settings.json"
+# No flock stub here: the suite's global one always succeeds, and this case is about the real lock.
+printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"auth token"*) echo TOKENTOKENTOKENTOKEN;; *"api user"*) echo vladimirrott;; esac\n' > "$lk/bin/gh"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$lk/bin/notify-send"
+cat > "$lk/bin/claude" <<LKEOF
+#!/usr/bin/env bash
+# What a pass sees while it runs: is the lease there, and is the lock really held?
+[ -f "$lk/state/leases/run.json" ] && cp "$lk/state/leases/run.json" "$lk/seen.json"
+if flock -n "$lk/state/run.lock" true; then echo free > "$lk/lockstate"; else echo held > "$lk/lockstate"; fi
+exit 0
+LKEOF
+cat > "$lk/.local/bin/maintainer" <<LKEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$lk/helper.log"
+case "\$1" in
+  run-lease) MAINTAINER_PROFILE=sysknife exec python3 "$root/bin/maintainer" "\$@" ;;
+  start) echo "=== maintainer 2031-02-03T04-05-review ==="; echo "context" ;;
+  *) exit 0 ;;
+esac
+LKEOF
+chmod +x "$lk/bin/"* "$lk/.local/bin/maintainer"
+PATH="$lk/bin:$lk/.local/bin:$PATH" HOME="$lk" MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$lk/settings.json" \
+    MAINTAINER_STATE_DIR="$lk/state" MAINTAINER_REPO_PATH="$lk_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >"$lk/run.out" 2>&1
+[ "$(cat "$lk/lockstate" 2>/dev/null)" = held ] \
+    && ok "the pass ran with run.lock really held (positive control for the cases below)" \
+    || bad "the pass did not see the lock held: $(cat "$lk/lockstate" 2>&1); $(tail -3 "$lk/run.out")"
+[ "$(jget "$lk/seen.json" task 2>/dev/null)" = review ] && [ "$(jget "$lk/seen.json" run_id 2>/dev/null)" = 2031-02-03T04-05-review ] \
+    && ok "while the pass ran, leases/run.json named its task and its run id" \
+    || bad "the pass saw no run lease: $(cat "$lk/seen.json" 2>&1)"
+case "$(jget "$lk/seen.json" pid 2>/dev/null)" in ''|*[!0-9]*) bad "the run lease carries no pid" ;; *) ok "and its pid" ;; esac
+[ ! -e "$lk/state/leases/run.json" ] && ok "when the run ends the lease is gone" || bad "run.sh left leases/run.json behind"
+first="$(grep -n '^run-lease' "$lk/helper.log" | head -1 | cut -d: -f1)"; started="$(grep -n '^start' "$lk/helper.log" | head -1 | cut -d: -f1)"
+[ -n "$first" ] && [ -n "$started" ] && [ "$first" -lt "$started" ] \
+    && ok "the lease is written before the refresh, not after it: the lock is already held" \
+    || bad "run-lease is not called ahead of start (run-lease line ${first:-none}, start line ${started:-none})"
+
+# An exit before the run reaches its own cleanup (here the identity gate) still takes the lease down.
+rm -f "$lk/helper.log"; printf '#!/usr/bin/env bash\ncase "$*" in *"auth switch"*) exit 0;; *"api user"*) echo someone-else;; esac\n' > "$lk/bin/gh"
+PATH="$lk/bin:$lk/.local/bin:$PATH" HOME="$lk" MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$lk/settings.json" \
+    MAINTAINER_STATE_DIR="$lk/state" MAINTAINER_REPO_PATH="$lk_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >"$lk/run2.out" 2>&1; rc=$?
+grep -q '^run-lease review' "$lk/helper.log" && [ "$rc" = 1 ] \
+    && ok "positive control: a run refused at the identity gate had already written its lease" \
+    || bad "the early-exit case never got past the lock (rc=$rc): $(tail -3 "$lk/run2.out")"
+[ ! -e "$lk/state/leases/run.json" ] && ok "and an exit that early still removes it" || bad "a run refused at the identity gate left leases/run.json behind"
 # --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then

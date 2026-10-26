@@ -2783,8 +2783,114 @@ def _lease_release(prs: list[str]) -> int:
     return rc
 
 
+def _lock_held(path: Path) -> bool:
+    """Is an flock held on this file right now? Ask the lock, never a pid.
+
+    A pid recorded in a file outlives the process, and a process-name pattern
+    matches the shell asking (docs/lessons.md). `flock -n` on the same file is
+    the question run.sh's own lock answers. A missing file is a free lock.
+    """
+    import fcntl
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return False
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return True
+    finally:
+        os.close(fd)             # closing drops a lock this call just took
+    return False
+
+
+def _run_lease() -> tuple[str, dict]:
+    """("live" | "stale" | "idle", the record). The lock decides, the file only labels.
+
+    run.sh writes leases/run.json after it takes run.lock and removes it on
+    exit, so a file beside a free lock is what a killed run leaves behind.
+    """
+    f = LEASES / "run.json"
+    held = _lock_held(ROOT / "run.lock")
+    try:
+        d = json.loads(f.read_text())
+        if not isinstance(d, dict):
+            raise ValueError
+    except FileNotFoundError:
+        return ("live", {}) if held else ("idle", {})
+    except ValueError:
+        d = {}
+    return ("live" if held else "stale", d)
+
+
 def _warn_live_run() -> None:
-    pass
+    """A take during a live run warns and goes ahead: runs yield to interactive work."""
+    state, d = _run_lease()
+    if state != "live":
+        return
+    rid = d.get("run_id") or "(run id not recorded yet)"
+    print(f"warning: a run is live ({d.get('task', '?')}, {rid}) and may already be on this PR.")
+    if d.get("run_id"):
+        print(f"         To stop it: maintainer abort {d['run_id']} \"<reason>\"")
+
+
+def cmd_run_lease(args: list[str]) -> None:
+    """Write or clear leases/run.json. Called by run.sh, which holds run.lock."""
+    if args == ["--clear"]:
+        (LEASES / "run.json").unlink(missing_ok=True)
+        return
+    if len(args) not in (2, 3) or not _SAFE_NAME.match(args[0]) or not args[1].isdigit() \
+            or (len(args) == 3 and not _SAFE_NAME.match(args[2])):
+        raise SystemExit("maintainer run-lease: expects <task> <pid> [run-id], or --clear; "
+                         "the task and run id must be plain words")
+    LEASES.mkdir(parents=True, exist_ok=True)
+    rec = {"task": args[0], "pid": int(args[1]), "started": int(datetime.now().timestamp())}
+    if len(args) == 3:
+        rec["run_id"] = args[2]
+    f = LEASES / "run.json"
+    try:
+        before = json.loads(f.read_text())
+        if before.get("pid") == rec["pid"]:
+            rec["started"] = before.get("started", rec["started"])     # the run id arrives later
+    except (OSError, ValueError, AttributeError):
+        pass
+    tmp = f.with_name(f".run.json.{os.getpid()}")
+    tmp.write_text(json.dumps(rec, sort_keys=True) + "\n")
+    os.replace(tmp, f)
+
+
+def _lease_status_lines(now: float) -> list[str]:
+    state, d = _run_lease()
+    out = ["leases"]
+    if state == "live":
+        since = f", started {_ago(now - d['started'])} ago" if d.get("started") else ""
+        out.append(f"  run     LIVE  {d.get('task', '?')}, {d.get('run_id') or 'run id not recorded yet'}"
+                   f"{since}")
+    elif state == "stale":
+        what = " ".join(x for x in (d.get("task"), d.get("run_id")) if x) or "a run"
+        out.append(f"  run     stale: leases/run.json names {what}, but run.lock is free, so it is ignored")
+    else:
+        out.append("  run     idle: no run holds the lock")
+    for f in sorted(LEASES.glob("pr-*.json"), key=lambda p: int(p.stem[3:]) if p.stem[3:].isdigit() else 0):
+        pr = f.stem[3:]
+        try:
+            lease = _lease_read(pr)
+        except _LeaseUnreadable:
+            out.append(f"  #{pr:<6} UNREADABLE lease file; `check` refuses it and it blocks nobody")
+            continue
+        if lease is None:
+            continue
+        note = f' "{lease["note"]}"' if lease.get("note") else ""
+        head = f" @{str(lease['head_sha'])[:8]}" if lease.get("head_sha") else ""
+        left = _lease_expires(lease) - now
+        if left <= 0:
+            out.append(f"  #{pr:<6} {lease['holder']}{note}{head}  EXPIRED {_ago(-left)} ago, ignored")
+        else:
+            out.append(f"  #{pr:<6} {lease['holder']}{note}{head}  renewed {_ago(now - lease['renewed'])} ago, "
+                       f"expires in {_ago(left)}")
+    if len(out) == 2 and state == "idle":
+        out.append("  no pull request is leased")
+    return out
 
 
 
@@ -2890,6 +2996,8 @@ def cmd_status() -> None:
     if rec:
         print(f"\n{len(rec)} verification receipt(s) open: "
               + ", ".join("#" + p.stem for p in rec))
+    print()
+    print("\n".join(_lease_status_lines(datetime.now().timestamp())))
 
 
 def cmd_run(args: list[str]) -> None:
@@ -3125,6 +3233,8 @@ COMMANDS = {
                   lambda a: cmd_finish(a[0]), 1, 1, True),
     "abort": Cmd("abort <run-id> <reason>", "record that a run started and produced nothing",
                  lambda a: cmd_abort(a[0], a[1]), 2, None, True),
+    "run-lease": Cmd("run-lease <task> <pid> [run-id] | --clear", "write or clear leases/run.json for the run holding run.lock",
+                     cmd_run_lease, 1, 3, True),
     "failed": Cmd("failed <task> <reason> [log]", "write a failure marker for a task",
                   lambda a: record_failure(a[0], a[1], a[2] if len(a) > 2 else ""), 2, None, True),
     "ok": Cmd("ok <task>", "clear a task's failure marker",
