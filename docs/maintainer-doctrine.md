@@ -91,6 +91,15 @@ Deliberately, and not because of capability:
   agent files a draft advisory and says in the public thread that the rest is
   handled privately.
 - **Merging without a receipt.** See below.
+- **Other people's branches.** The agent never pushes to a contributor's branch
+  by typing a command, and never takes a pull request over. One narrow path
+  exists for a pull request the author has left on mechanical review items (a
+  rebase, a test count, one doc line): after `FIXUP_QUIET_DAYS` of silence and a
+  posted heads-up, a script (`maintainer-repo fixup`) pushes the fixup with the
+  author credited, and the merge gate then decides as it always does. The script
+  refuses substantive items, conflicts, production and workflow paths, bots and
+  any sign of the author since the review; each refusal is in code and has a
+  test that goes red without it.
 
 ## Merging, and why a receipt rather than a rule
 

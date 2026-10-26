@@ -10,13 +10,14 @@ scheduled job.
 """
 from __future__ import annotations
 
+import fnmatch
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -138,7 +139,7 @@ def _profile_env(profile: str = PROFILE) -> dict:
     # key this file reads out of _ENV against this tuple.
     keys = ("REPO_PATH", "REPO_SLUG", "STATE_DIR", "TASKS", "POST", "GH_ACCOUNT",
             "MAINTAINER_NAME", "REQUIRED_COMMANDS", "CLAIM_LABEL",
-            "CLAIM_STALE_DAYS", "RETENTION_DAYS") + tuple(DEFAULTS)
+            "CLAIM_STALE_DAYS", "RETENTION_DAYS", "PROD_GLOBS") + tuple(DEFAULTS)
     # The path goes in as an ARGUMENT, never interpolated into the script. The
     # key names are a literal tuple in this file, so they are the only thing
     # that reaches the command text.
@@ -517,6 +518,23 @@ INERT_SUFFIXES = (".md", ".json", ".yml", ".yaml", ".txt", ".lock.example", ".sv
 def _sh(*args: str) -> tuple[int, str]:
     p = _spawn(args, cwd=REPO)
     return p.returncode, p.stdout
+
+
+def _screen_blocks(paths: list[str]) -> list[tuple[str, str]]:
+    """Every (path, why) among `paths` that can execute on a build or in a gate.
+
+    One classification, used by `screen` and by `fixup-check`: a patch the
+    fixup may apply is held to exactly what a screen would call safe to read.
+    """
+    blocks: list[tuple[str, str]] = []
+    for path in paths:
+        for marker, why in EXECUTES_ON_BUILD:
+            if path == marker or path.endswith("/" + marker) or (marker.endswith("/") and marker in path):
+                blocks.append((path, f"build-time: {why}"))
+        for suffix, why in EXECUTED_BY_GATES:
+            if path.endswith(suffix):
+                blocks.append((path, f"test-time: {why}"))
+    return blocks
 
 
 def cmd_abort(run_id: str, reason: str) -> None:
@@ -1359,6 +1377,330 @@ def cmd_stale(days: int) -> None:
         print(f"no hold is older than {days} days.")
 
 
+# ---------------------------------------------------------------------------
+# Stalled pull requests: finishing the mechanical items
+# ---------------------------------------------------------------------------
+# A contributor pull request can sit on CHANGES_REQUESTED for weeks when what is
+# left is a rebase, a count that moved under it or one line of a doc. These
+# functions decide, read-only, whether the maintainer may finish it. The push
+# itself is `maintainer-repo fixup`, a script, and it asks `fixup-check` again
+# at the current head: the model never types the write.
+#
+# Every refusal here is a sentence, and an unreadable pull request is an error,
+# never "not stalled" (the same rule as `_open_prs`).
+FIXUP_KINDS = ("rebase", "test-count", "doc-line")
+FIXUP_PATCH_KINDS = ("test-count", "doc-line")
+_FIXUP_ITEMS = re.compile(r"^<!-- maintainer: fixup-items v1 head=([0-9a-f]{40}) (\[.*\]) -->$")
+_FIXUP_NOTICE = re.compile(r"^<!-- maintainer: fixup-notice v1 head=([0-9a-f]{40}) -->$")
+_FIXUP_FILE = re.compile(r"^[A-Za-z0-9._@+-]+(?:/[A-Za-z0-9._@+-]+)*$")
+_FIXUP_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+_FIXUP_FIELDS = ("number,state,isDraft,author,reviewDecision,maintainerCanModify,headRefOid,"
+                 "headRefName,baseRefName,headRepository,headRepositoryOwner,reviews,comments,commits")
+
+
+class _Refused(Exception):
+    """A precondition does not hold. Not an error: the answer is no."""
+
+
+class _Unreadable(Exception):
+    """GitHub could not be asked. Never the same answer as no."""
+
+
+def _ts(value) -> datetime:
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        raise _Unreadable(f"GitHub returned a timestamp I cannot read: {value!r}")
+
+
+def _last_line(body) -> str:
+    lines = [l.strip() for l in (body or "").splitlines() if l.strip()]
+    return lines[-1] if lines else ""
+
+
+def _gh_ndjson(*args: str):
+    """gh output of one JSON object per line, or None when it could not be read."""
+    p = _spawn(("gh", *args), cwd=REPO)
+    if p.returncode != 0:
+        return None
+    out = []
+    for line in p.stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            return None
+    return out
+
+
+def _fixup_items(body: str):
+    """(head, [(kind, file)]) from the marker on a review's LAST line, or refuse.
+
+    The last line only: a review that quotes the marker earlier, as this file's
+    own sentinel was once quoted by the report it guards, must not be read as
+    carrying one. `kind` is a closed enum and an unknown one makes the whole
+    review substantive; the class is never inferred from the review's prose.
+    """
+    m = _FIXUP_ITEMS.match(_last_line(body))
+    if not m:
+        raise _Refused("the review carries no fixup marker on its last line, so its items are substantive")
+    try:
+        raw = json.loads(m.group(2))
+    except ValueError:
+        raise _Refused("the fixup marker's item list is not JSON")
+    if not isinstance(raw, list) or not raw:
+        raise _Refused("the fixup marker lists no item")
+    items = []
+    for it in raw:
+        kind = it.get("kind") if isinstance(it, dict) else None
+        if kind not in FIXUP_KINDS:
+            raise _Refused(f"item kind {kind!r} is not one of {', '.join(FIXUP_KINDS)}: the review is substantive")
+        if set(it) - {"kind", "file"}:
+            raise _Refused(f"a {kind} item carries an unknown key {sorted(set(it) - {'kind', 'file'})}")
+        f = it.get("file")
+        if kind in FIXUP_PATCH_KINDS:
+            if not isinstance(f, str) or not _FIXUP_FILE.match(f) or any(p in (".", "..", ".git") for p in f.split("/")):
+                raise _Refused(f"a {kind} item must name one plain relative file, got {f!r}")
+        elif f is not None:
+            raise _Refused("a rebase item names no file")
+        items.append((kind, f))
+    return m.group(1), items
+
+
+def _fixup_eval(pr: str, days: int) -> dict:
+    """Every precondition for finishing pull request `pr`, at its current head.
+
+    Returns the facts the script needs. Raises _Refused for a no and
+    _Unreadable for "could not ask". The order runs from what one call tells us
+    to what needs three more.
+    """
+    me = _owner()
+    if not me:
+        raise _Unreadable("no maintainer account is configured, so my reviews cannot be told from anyone's")
+    meta = gh_json("pr", "view", pr, "--repo", SLUG, "--json", _FIXUP_FIELDS)
+    if not isinstance(meta, dict):
+        raise _Unreadable(f"could not read pull request {pr} from gh")
+    who = meta.get("author") or {}
+    author = _login(who.get("login"))
+    head = meta.get("headRefOid") or ""
+    if not author or not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise _Unreadable(f"could not read the author or head of pull request {pr}")
+    if meta.get("state") != "OPEN":
+        raise _Refused("the pull request is not open")
+    if meta.get("isDraft"):
+        raise _Refused("it is a draft")
+    if who.get("is_bot") or author.endswith("[bot]") or author.startswith("app/"):
+        raise _Refused("the author is a bot")
+    if meta.get("maintainerCanModify") is not True:
+        raise _Refused("maintainerCanModify is not true, so GitHub would refuse the push")
+    if meta.get("reviewDecision") != "CHANGES_REQUESTED":
+        raise _Refused(f"reviewDecision is {meta.get('reviewDecision') or 'empty'}, not CHANGES_REQUESTED")
+
+    # The latest standing verdict of each reviewer. A COMMENTED review changes
+    # nothing, so it is skipped; somebody else's open request is never ours to
+    # call mechanical.
+    verdict: dict = {}
+    for r in sorted(meta.get("reviews") or [], key=lambda r: _ts(r.get("submittedAt"))):
+        if r.get("state") in ("CHANGES_REQUESTED", "APPROVED", "DISMISSED"):
+            verdict[_login((r.get("author") or {}).get("login"))] = (_ts(r["submittedAt"]), r["state"], r.get("body") or "")
+    for name, (_t, state, _b) in verdict.items():
+        if name != me and state == "CHANGES_REQUESTED":
+            raise _Refused(f"another reviewer, {name}, has a standing CHANGES_REQUESTED, and that is not mine to call mechanical")
+    mine = verdict.get(me)
+    if not mine or mine[1] != "CHANGES_REQUESTED":
+        raise _Refused("the latest verdict from the maintainer's account is not CHANGES_REQUESTED")
+    reviewed, _state, body = mine
+    marker_head, items = _fixup_items(body)
+    if marker_head != head:
+        raise _Refused(f"the review's marker is for head {marker_head[:8]} and the pull request is at {head[:8]}: it moved since")
+    now = datetime.now(timezone.utc)
+    age = (now - reviewed).days
+    if age < days:
+        raise _Refused(f"the review is only {age} days old and the quiet window is {days}")
+
+    # Silence is the whole licence. Any trace of the author after the review,
+    # in any of the four places they leave one, ends it.
+    for c in meta.get("commits") or []:
+        if _ts(c.get("committedDate")) > reviewed:
+            raise _Refused("there is a commit after the review: author activity")
+    for c in meta.get("comments") or []:
+        if _login((c.get("author") or {}).get("login")) == author and _ts(c.get("createdAt")) > reviewed:
+            raise _Refused("the author commented after the review: activity")
+    for r in meta.get("reviews") or []:
+        if _login((r.get("author") or {}).get("login")) == author and _ts(r.get("submittedAt")) > reviewed:
+            raise _Refused("the author posted a review after the review: activity")
+    threads = _gh_ndjson("api", f"repos/{SLUG}/pulls/{pr}/comments", "--paginate",
+                         "--jq", ".[]|{u:.user.login,t:.created_at}")
+    if threads is None:
+        raise _Unreadable(f"could not read the review threads of pull request {pr}")
+    if any(_login(t.get("u")) == author and _ts(t.get("t")) > reviewed for t in threads):
+        raise _Refused("the author replied in a review thread after the review: activity")
+
+    runs = gh_json("api", f"repos/{SLUG}/actions/runs?head_sha={head}&per_page=100",
+                   "--jq", "[.workflow_runs[]|{s:.status,c:.conclusion}]")
+    if runs is None:
+        raise _Unreadable(f"could not read the workflow runs for head {head[:8]}")
+    if any("action_required" in (r.get("s"), r.get("c")) for r in runs):
+        raise _Refused("a workflow run for this head sits at action_required: a first-time contributor's run waits for approval")
+
+    owner_login, repo_name = (meta.get("headRepositoryOwner") or {}).get("login"), (meta.get("headRepository") or {}).get("name")
+    branch, base = meta.get("headRefName") or "", meta.get("baseRefName") or ""
+    if not (_FIXUP_NAME.match(owner_login or "") and _FIXUP_NAME.match(repo_name or "")):
+        raise _Refused("the fork's owner or name is not a plain GitHub name")
+    for ref in (branch, base):
+        if not re.fullmatch(r"[A-Za-z0-9._@+/-]+", ref) or ref.startswith(("-", "/")) or ".." in ref or ref.endswith(".lock"):
+            raise _Refused(f"the branch name {ref!r} is not one I will pass to git")
+
+    # The heads-up. One of mine, for THIS head, after the review.
+    notice = None
+    for c in meta.get("comments") or []:
+        m = _FIXUP_NOTICE.match(_last_line(c.get("body")))
+        if m and m.group(1) == head and _login((c.get("author") or {}).get("login")) == me:
+            t = _ts(c.get("createdAt"))
+            if t > reviewed and (notice is None or t > notice):
+                notice = t
+    wait = _tunable_int("FIXUP_NOTICE_DAYS")
+    state, ripe = "notice", None
+    if notice is not None:
+        ripe = notice + timedelta(days=wait)
+        state = "ready" if now >= ripe else "wait"
+    return {"state": state, "head": head, "base": base, "branch": branch, "author": author,
+            "fork": f"{owner_login}/{repo_name}", "items": items, "age": age,
+            "notice_days": wait, "notice_due": (now + timedelta(days=wait)).strftime("%Y-%m-%d"),
+            "ripe": ripe.strftime("%Y-%m-%d") if ripe else ""}
+
+
+def _fixup_find_patch(pr: str):
+    """The patch a run left for this pull request, newest first, or None."""
+    found = [p for p in (list(DRAFTS.glob(f"*/fixup-{pr}.patch")) + [DRAFTS / f"fixup-{pr}.patch"])
+             if os.path.lexists(p)]
+    return max(found, key=lambda p: p.lstat().st_mtime) if found else None
+
+
+def _fixup_patch_policy(patch: Path, files: set) -> None:
+    """Refuse a patch that touches anything a fixup may not. Raises _Refused.
+
+    What a fixup may edit is what `screen` calls inert, minus everything the
+    profile calls production, minus `.github/`, and only the files the review
+    named. It may not create, delete, rename or re-mode a file, and it is capped
+    at FIXUP_MAX_LINES: a patch is a mechanical edit or it is a code change.
+    """
+    if patch.is_symlink() or not patch.is_file():
+        raise _Refused(f"{patch} is not a regular file (a symlink?), so it is not read as a patch")
+    text = patch.read_text(errors="replace")
+    if re.search(r"^index [0-9a-f]+\.\.[0-9a-f]+ (120000|160000)$", text, re.M):
+        raise _Refused("the patch edits a symlink or a submodule")
+    where = str(patch.parent)
+    summary = _spawn(("git", "apply", "--summary", str(patch)), cwd=where)
+    stat = _spawn(("git", "apply", "--numstat", "-z", str(patch)), cwd=where)
+    if summary.returncode != 0 or stat.returncode != 0:
+        raise _Refused("git cannot read the patch")
+    if summary.stdout.strip():
+        raise _Refused("the patch creates, deletes, renames or changes the mode of a file: "
+                       + summary.stdout.strip().splitlines()[0].strip())
+    cap, total, paths = _tunable_int("FIXUP_MAX_LINES"), 0, []
+    for rec in (r for r in stat.stdout.split("\0") if r):
+        added, deleted, path = rec.split("\t", 2)
+        if "-" in (added, deleted):
+            raise _Refused(f"{path} is a binary change")
+        total += int(added) + int(deleted)
+        paths.append(path)
+    if not paths:
+        raise _Refused("the patch changes nothing")
+    if total > cap:
+        raise _Refused(f"the patch changes {total} lines, over FIXUP_MAX_LINES ({cap}): that is a code change, not a fixup")
+    globs = (_ENV.get("PROD_GLOBS") or "").split()
+    for p in paths:
+        if p not in files:
+            raise _Refused(f"{p} is not named by any item in the review")
+        if p.startswith(".github/"):
+            raise _Refused(f"{p} is under .github/, which a fixup never edits")
+        if not globs:
+            raise _Refused("this profile declares no PROD_GLOBS, so I cannot say a patch avoids production")
+        if any(fnmatch.fnmatchcase(p, g) for g in globs):
+            raise _Refused(f"{p} is a production path (PROD_GLOBS)")
+        blocks = _screen_blocks([p])
+        if blocks:
+            raise _Refused(f"{p} fails the screen: {blocks[0][1]}")
+        if not p.endswith(INERT_SUFFIXES):
+            raise _Refused(f"{p} is not a kind of file the screen can class as inert")
+
+
+def cmd_fixup_check(pr: str) -> None:
+    """May `maintainer-repo fixup` act on this pull request, right now? Read-only.
+
+    Prints `key=value` lines for the script and exits 0 when the answer is
+    yes (`state=notice` means the heads-up is due first, `state=ready` means
+    the push may follow), and exits 1 saying why when it is no.
+    """
+    if not pr.isdigit():
+        raise _Usage
+    try:
+        info = _fixup_eval(pr, _tunable_int("FIXUP_QUIET_DAYS"))
+        patch_files = {f for k, f in info["items"] if k in FIXUP_PATCH_KINDS}
+        patch = _fixup_find_patch(pr) if patch_files else None
+        if patch is not None:
+            _fixup_patch_policy(patch, patch_files)
+        elif patch_files and info["state"] == "ready":
+            raise _Refused(f"the review has a {'/'.join(sorted({k for k, _ in info['items'] if k in FIXUP_PATCH_KINDS}))} "
+                           f"item and the run wrote no patch: put it at {DRAFTS}/<run>/fixup-{pr}.patch")
+        if info["state"] == "wait":
+            raise _Refused(f"the heads-up is not ripe: the author has until {info['ripe']} "
+                           f"(FIXUP_NOTICE_DAYS={info['notice_days']}) and I wait for it")
+    except (_Refused, _Unreadable) as e:
+        raise SystemExit(f"maintainer: fixup-check #{pr}: {e}")
+    print(f"state={info['state']}")
+    print(f"head={info['head']}")
+    print(f"base={info['base']}")
+    print(f"branch={info['branch']}")
+    print(f"fork={info['fork']}")
+    print(f"author={info['author']}")
+    print("items=" + " ".join(k + (f":{f}" if f else "") for k, f in info["items"]))
+    if patch is not None:
+        print(f"patch={patch}")
+    print(f"review_age={info['age']}")
+    print(f"notice_days={info['notice_days']}")
+    print(f"notice_due={info['notice_due']}")
+    print(f"notice_marker=<!-- maintainer: fixup-notice v1 head={info['head']} -->")
+
+
+def cmd_stalled(days: int) -> None:
+    """Name every open pull request whose only open items are mechanical and
+    whose author has been silent for `days` days. Read-only.
+
+    The same check `maintainer-repo fixup` runs, minus the heads-up: this is
+    the list of what a fixup could be asked to finish.
+    """
+    rows = gh_list("pr", "list", "--state", "open",
+                   "--json", "number,reviewDecision,isDraft,maintainerCanModify")
+    if rows is None:
+        raise SystemExit("maintainer: could not list the open pull requests, so I cannot say which are stalled")
+    found, errors = [], []
+    for r in sorted(rows, key=lambda r: r["number"]):
+        if r.get("reviewDecision") != "CHANGES_REQUESTED" or r.get("isDraft") or r.get("maintainerCanModify") is not True:
+            continue
+        try:
+            found.append((r["number"], _fixup_eval(str(r["number"]), days)))
+        except _Refused:
+            continue
+        except _Unreadable as e:
+            errors.append((r["number"], str(e)))
+    for n, i in found:
+        what = ", ".join(k + (f" {f}" if f else "") for k, f in i["items"])
+        step = {"notice": "heads-up due", "wait": f"heads-up sent, ripe {i['ripe']}", "ready": "ready to push"}[i["state"]]
+        print(f"STALLED #{n:<5} {i['author']:<20} {i['age']}d since the review  {what}  ({step})")
+    for n, why in errors:
+        print(f"UNREADABLE #{n:<5} {why}")
+    if found:
+        print(f"\n{len(found)} pull request(s) quiet for {days}+ days with only mechanical items left. Finish one with:\n"
+              f"  maintainer-repo fixup <pr> [--dry-run]")
+    elif not errors:
+        print(f"no pull request has been quiet for {days} days with only mechanical items left.")
+    if errors:
+        raise SystemExit(1)
+
+
 def cmd_holders(number: str) -> None:
     """Print who the maintainer has pointed at one issue, one handle per line.
 
@@ -1701,14 +2043,7 @@ def cmd_screen(pr: str) -> None:
     declared = meta.get("changedFiles", len(paths))
     truncated = declared > len(paths)
 
-    blocks: list[tuple[str, str]] = []
-    for path in paths:
-        for marker, why in EXECUTES_ON_BUILD:
-            if path == marker or path.endswith("/" + marker) or (marker.endswith("/") and marker in path):
-                blocks.append((path, f"build-time: {why}"))
-        for suffix, why in EXECUTED_BY_GATES:
-            if path.endswith(suffix):
-                blocks.append((path, f"test-time: {why}"))
+    blocks = _screen_blocks(paths)
 
     rc, diff = _sh("gh", "pr", "diff", pr, "--patch")
     if rc != 0:
@@ -2536,6 +2871,10 @@ COMMANDS = {
                   lambda a: cmd_settle()),
     "stale": Cmd("stale [days]", "name every hold nobody has touched for that many days",
                  lambda a: cmd_stale(int(a[0]) if a else _tunable_int("STALE_HOLD_DAYS")), 0, 1),
+    "stalled": Cmd("stalled [days]", "pull requests left on mechanical items by an author gone quiet",
+                   lambda a: cmd_stalled(int(a[0]) if a else _tunable_int("FIXUP_QUIET_DAYS")), 0, 1),
+    "fixup-check": Cmd("fixup-check <pr>", "may `maintainer-repo fixup` act on this pull request, and why not",
+                       lambda a: cmd_fixup_check(a[0]), 1, 1),
     "holders": Cmd("holders <issue>", "who the maintainer has pointed at one issue and not released",
                    lambda a: cmd_holders(a[0]), 1, 1),
     "file-issue": Cmd("file-issue --title T --body-file F [--fingerprint FP] [--label L] [--dry-run]",

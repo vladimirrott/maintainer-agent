@@ -80,8 +80,16 @@ Ask for the unrelated part to be split, and be specific about which hunks.
 Do not merge a change whose diff you cannot summarise in one sentence. **[task]**
 
 **15. A pull request from an author who has gone quiet mid-review.**
-Wait. Do not push to their branch, do not take it over, and do not close it for
-inactivity while a maintainer's question is the last message. **[GAP]** → #13.
+Wait for `FIXUP_QUIET_DAYS` of silence after the maintainer's review. If every
+open item in it is mechanical (a rebase, a test count, one doc line, named in the
+review's `fixup-items` marker), post one heads-up, wait `FIXUP_NOTICE_DAYS` more,
+and let `maintainer-repo fixup` push the fixup to the contributor's own branch
+with `Co-authored-by` credit, then read the head back. The merge gate then
+decides, unchanged. Anything substantive, a conflict, a production or `.github/`
+path, `maintainerCanModify=false`, a bot, a first-time contributor's runs at
+`action_required`, or any author activity after the review is left alone. Never
+take the pull request over, close it for inactivity, or merge it.
+**[code]** `maintainer stalled`, `maintainer-repo fixup`.
 
 **16. A hacktoberfest-season whitespace pull request.**
 Close it politely, once, without a lecture. **[GAP]** → issue #13.
@@ -191,7 +199,7 @@ another run. **[code]** `flock`, `MAINTAINER_IN_RUN`.
 
 ## The finding
 
-**Fourteen of forty have no governing rule**: 3, 4, 5, 7, 10, 13, 15, 16, 21,
+**Thirteen of forty have no governing rule**: 3, 4, 5, 7, 10, 13, 16, 21,
 23, 24, 26, 31, 32.
 
 They cluster. Almost every gap is about **saying no to a person**, or about

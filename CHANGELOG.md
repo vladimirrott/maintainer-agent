@@ -12,6 +12,27 @@ middle digit.
 
 ### Added
 
+- **`maintainer stalled` and `maintainer-repo fixup`: finish a pull request the
+  author left on mechanical review items.** Contributor pull requests sat on
+  CHANGES_REQUESTED for days when all that remained was a rebase, a test count
+  that moved under them or one doc line, and the doctrine forbade touching their
+  branch (story 15). The review prompts now end every CHANGES_REQUESTED body with
+  a hidden `fixup-items` marker naming the head and a closed list of kinds
+  (`rebase`, `test-count`, `doc-line`). `stalled` lists the pull requests whose
+  maintainer review carries one for the current head, with no author commit,
+  comment, review or thread reply since, older than `FIXUP_QUIET_DAYS` (10).
+  `fixup` posts one heads-up, waits `FIXUP_NOTICE_DAYS` (5), then works in a
+  scratch clone with no hook run: it rebases or applies a patch the run wrote
+  (capped at `FIXUP_MAX_LINES`, 20; never production, `.github/` or anything the
+  screen calls executable; a test count must match the profile's own
+  `FIXUP_COUNT_CMD`), commits as the maintainer with a `Co-authored-by` trailer
+  for the author, pushes with `--force-with-lease` against the checked head when
+  it rewrites, and reads the head back before it says it worked. Substantive
+  items, conflicts, `maintainerCanModify=false`, bots, `action_required` runs and
+  any author activity are refused in code, and `--dry-run` and `POST=off` push
+  nothing. The write happens in the script, never through the model. Story 15 is
+  no longer a gap. New `maintainer fixup-check <pr>` prints the check the script
+  runs.
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

@@ -8013,6 +8013,515 @@ grep -q 'failing check' <<<"$out" && ok "failing is still reported ahead of pend
     || bad "a failing and a pending check: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
 rm -f "$stub_dir/gh" "$MAINTAINER_STATE/receipts/31.json"
 
+# ===== Z: stalled pull requests (begin) =====
+echo "== stalled pull requests: a fixup the author left undone =="
+# Z block. A pull request that has sat on mechanical review items (a rebase, a
+# test count, one doc line) is finished by a SCRIPT, never by the model, so the
+# cases below are all refusals plus the one path that pushes. Nothing here
+# reaches GitHub: gh is a stub that logs every call and exits 97 on one it does
+# not know, the fork is a local bare repository, and git is told to allow no
+# transport but file, so a URL the rewrite missed fails instead of connecting.
+zf="$stub_dir/zfix"; rm -rf "$zf"
+zprof="$zf/home/.local/share/maintainer/profiles/fx"
+mkdir -p "$zprof" "$zf/bin" "$zf/state/drafts/r1" "$zf/checkout"
+cat > "$zprof/profile.env" <<ZEOF
+REPO_PATH="$zf/checkout"
+REPO_SLUG="o/r"
+GH_ACCOUNT="owner"
+STATE_DIR="$zf/state"
+PROD_GLOBS="src/* Makefile"
+FIXUP_COUNT_CMD="grep -c '^fn test_' src/lib.rs"
+ZEOF
+cat > "$zf/gitconfig" <<ZEOF
+[url "$zf/fork.git"]
+	insteadOf = https://github.com/contrib/repo.git
+[url "$zf/origin.git"]
+	insteadOf = https://github.com/o/r.git
+ZEOF
+cat > "$zf/bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FX/calls.log"
+case "$*" in
+  *'auth switch'*) exit 0 ;;
+  'api user --jq'*) [ -x "$FX/on_me" ] && "$FX/on_me"; cat "$FX/me"; exit 0 ;;
+  'api users/'*) [ -x "$FX/on_author" ] && "$FX/on_author"; cat "$FX/author"; exit 0 ;;
+  'pr view'*'--json headRefOid --jq'*)
+      if [ -f "$FX/readback" ]; then cat "$FX/readback"
+      else git --git-dir="$FX/fork.git" rev-parse refs/heads/fix-x; fi; exit 0 ;;
+  'pr view'*) [ -f "$FX/pr.fail" ] && exit 1; cat "$FX/pr.json"; exit 0 ;;
+  'api repos/o/r/pulls/'*'/comments'*) [ -f "$FX/threads.fail" ] && exit 1; cat "$FX/threads"; exit 0 ;;
+  'api repos/o/r/actions/runs'*) [ -f "$FX/runs.fail" ] && exit 1; cat "$FX/runs.json"; exit 0 ;;
+  'pr list'*) cat "$FX/list.json"; exit 0 ;;
+  'pr comment'*)
+      f=""; prev=""; for a in "$@"; do [ "$prev" = --body-file ] && f="$a"; prev="$a"; done
+      [ -n "$f" ] && cp "$f" "$FX/notice.body"
+      # What GitHub would do next: the comment appears on the pull request.
+      [ -f "$FX/nocomment" ] || python3 - "$FX" "$f" <<'PY'
+import datetime, json, sys
+fx, f = sys.argv[1:3]
+pr = json.load(open(fx + "/pr.json"))
+pr["comments"].append({"author": {"login": "owner"}, "body": open(f).read(),
+                       "createdAt": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")})
+json.dump(pr, open(fx + "/pr.json", "w"))
+PY
+      exit 0 ;;
+esac
+echo "unstubbed gh call: $*" >&2; exit 97
+GHEOF
+chmod +x "$zf/bin/gh"
+printf '1234\towner\n' > "$zf/me"
+printf '5678\tcontrib\n' > "$zf/author"
+zenv() { env -u PROD_GLOBS -u FIXUP_COUNT_CMD PATH="$zf/bin:$PATH" HOME="$zf/home" FX="$zf" GIT_CONFIG_GLOBAL="$zf/gitconfig" \
+    GIT_CONFIG_NOSYSTEM=1 GIT_ALLOW_PROTOCOL=file GIT_TERMINAL_PROMPT=0 MAINTAINER_PROFILE=fx \
+    MAINTAINER_SLUG=o/r MAINTAINER_REPO="$zf/checkout" MAINTAINER_ACCOUNT=owner \
+    MAINTAINER_STATE="$zf/state" PROFILE_DIR="$zprof" MAINTAINER_POST=on MAINTAINER_GH_BACKOFF=0 "$@"; }
+cat > "$zf/gen.py" <<'PYEOF'
+import json, os, datetime as D
+e = os.environ.get
+now = D.datetime.now(D.timezone.utc)
+def ago(days):
+    return (now - D.timedelta(days=float(days))).strftime("%Y-%m-%dT%H:%M:%SZ")
+fx = e("FX")
+head = e("HEAD")
+age = e("REVIEW_AGE", "15")
+items = e("ITEMS", '[{"kind":"rebase"}]')
+mh = e("MARKER_HEAD", head)
+marker = f"<!-- maintainer: fixup-items v1 head={mh} {items} -->"
+mode = e("MARKER_MODE", "normal")
+body = "Two mechanical items remain.\n\n"
+if mode == "normal":   body += marker
+elif mode == "none":   body += "Please rebase."
+elif mode == "quoted": body = marker + "\n\nI quoted my own marker above and then wrote more words after it."
+elif mode == "prose":  body += marker + "\nthen a closing line"
+own = {"author": {"login": "owner"}, "state": "CHANGES_REQUESTED", "submittedAt": ago(age), "body": body}
+reviews = [own]
+if mode == "other":
+    reviews = [dict(own, author={"login": "someone"}, state="COMMENTED", body=marker),
+               {"author": {"login": "owner"}, "state": "CHANGES_REQUESTED", "submittedAt": ago(age), "body": "see my comments"}]
+if e("OTHER_CR"):
+    reviews.append({"author": {"login": "reviewer2"}, "state": "CHANGES_REQUESTED", "submittedAt": ago(float(age) + 1), "body": "also no"})
+if e("OWN_LATER"):
+    reviews.append({"author": {"login": "owner"}, "state": e("OWN_LATER"), "submittedAt": ago(float(age) - 1), "body": "later"})
+if e("REVIEW_AFTER"):
+    reviews.append({"author": {"login": "contrib"}, "state": "COMMENTED", "submittedAt": ago(e("REVIEW_AFTER")), "body": "pushing soon"})
+comments = []
+if e("COMMENT_AFTER"):
+    comments.append({"author": {"login": "contrib"}, "createdAt": ago(e("COMMENT_AFTER")), "body": "will do"})
+if e("NOTICE_AGE"):
+    nh = e("NOTICE_HEAD", head)
+    comments.append({"author": {"login": e("NOTICE_BY", "owner")}, "createdAt": ago(e("NOTICE_AGE")),
+                     "body": f"No reply for 10 days.\n\n<!-- maintainer: fixup-notice v1 head={nh} -->"})
+commits = [{"oid": "1" * 40, "committedDate": ago(float(age) + 3), "authoredDate": ago(float(age) + 3)}]
+if e("COMMIT_AFTER"):
+    commits.append({"oid": "2" * 40, "committedDate": ago(e("COMMIT_AFTER")), "authoredDate": ago(e("COMMIT_AFTER"))})
+pr = {"number": 12, "state": e("STATE", "OPEN"), "isDraft": e("DRAFT") == "1",
+      "author": {"login": "contrib", "is_bot": e("BOT") == "1"},
+      "reviewDecision": e("DECISION", "CHANGES_REQUESTED"),
+      "maintainerCanModify": e("CAN_MODIFY", "1") == "1",
+      "headRefOid": head, "headRefName": "fix-x", "baseRefName": "main", "isCrossRepository": True,
+      "headRepository": {"name": "repo"}, "headRepositoryOwner": {"login": "contrib"},
+      "reviews": reviews, "comments": comments, "commits": commits}
+open(f"{fx}/pr.json", "w").write(json.dumps(pr))
+th = []
+if e("THREAD_AFTER"):
+    th.append({"u": "contrib", "t": ago(e("THREAD_AFTER"))})
+open(f"{fx}/threads", "w").write("".join(json.dumps(x) + "\n" for x in th))
+runs = [{"s": "completed", "c": e("RUN_CONCL", "success")}]
+open(f"{fx}/runs.json", "w").write(json.dumps(runs))
+open(f"{fx}/list.json", "w").write(json.dumps([{"number": 12, "author": {"login": "contrib"},
+    "reviewDecision": pr["reviewDecision"], "isDraft": pr["isDraft"], "maintainerCanModify": pr["maintainerCanModify"]}]))
+for f in ("pr.fail", "threads.fail", "runs.fail"):
+    p = f"{fx}/{f}"
+    if os.path.exists(p): os.remove(p)
+for k in ("PR_FAIL", "THREADS_FAIL", "RUNS_FAIL"):
+    if e(k): open(f"{fx}/{k.lower().replace('_f', '.f')}", "w").write("")
+PYEOF
+# The fork and the base. The contributor branch fix-x is one commit behind main,
+# so a rebase has something to do. ZCONFLICT=1 makes main touch the same file.
+zrepo() {
+    rm -rf "$zf/origin.git" "$zf/fork.git" "$zf/seed"
+    git init -q --bare -b main "$zf/origin.git"; git init -q --bare -b main "$zf/fork.git"
+    git init -q -b main "$zf/seed"
+    ( cd "$zf/seed" || exit 1
+      export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+      git config user.email m@m; git config user.name maint
+      mkdir -p src docs .github/workflows
+      printf 'It has 7 tests.\n' > README.md
+      printf 'guide line one\nguide line two\n' > docs/guide.md
+      for i in 1 2 3 4 5 6 7 8 9; do printf 'fn test_%s() {}\n' "$i"; done > src/lib.rs
+      printf 'all:\n\ttrue\n' > Makefile
+      printf 'name: ci\n' > .github/workflows/ci.yml
+      printf 'version: 1\n' > .github/dependabot.yml
+      printf 'base\n' > notes.txt
+      printf '{"name":"x"}\n' > package.json
+      printf 'key=1\n' > settings.cfg
+      git add -A; git commit -qm base
+      git push -q "$zf/origin.git" main; git push -q "$zf/fork.git" main
+      git checkout -q -b fix-x
+      printf 'contrib work\n' >> notes.txt
+      GIT_AUTHOR_NAME=contrib GIT_AUTHOR_EMAIL=5678+contrib@users.noreply.github.com git commit -qam "contrib change${ZSIGN:+
+
+Signed-off-by: contrib <c@c>}"
+      git push -q "$zf/fork.git" fix-x
+      git checkout -q main
+      if [ "${ZCONFLICT:-0}" = 1 ]; then printf 'main change\n' >> notes.txt; git commit -qam "main moves notes"
+      else printf 'elsewhere\n' > other.txt; git add other.txt; git commit -qm "main moves elsewhere"; fi
+      git push -q "$zf/origin.git" main )
+}
+zhead() { git --git-dir="$zf/fork.git" rev-parse refs/heads/fix-x; }
+# Regenerate the pull request the stub serves. Every knob is an env var.
+zmk() { env FX="$zf" HEAD="$(zhead)" "$@" python3 "$zf/gen.py"; }
+zpatch() {  # $1 = path in the tree, $2 = sed expression: write the run's patch for #12
+    local t; t="$(mktemp -d "$zf/pt.XXXXXX")"
+    git clone -q --branch fix-x "$zf/fork.git" "$t/w" 2>/dev/null
+    ( cd "$t/w" || exit 1; sed -i "$2" "$1"; git diff > "$zf/state/drafts/r1/fixup-12.patch" )
+    rm -rf "$t"
+}
+zcheck() { zenv "$@" python3 "$root/bin/maintainer" fixup-check 12 2>&1; }
+zrefused() {  # $1 label, $2 regex the refusal must match. The fixture is already built.
+    local out rc; out="$(zcheck)"; rc=$?
+    if [ "$rc" != 0 ] && grep -q '^maintainer: fixup-check #12: ' <<<"$out" && grep -qiE -- "$2" <<<"$out"; then ok "$1"
+    else bad "$1 (rc=$rc, wanted /$2/): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-150)"; fi
+}
+zstate() {  # $1 label, $2 expected state
+    local out rc; out="$(zcheck)"; rc=$?
+    if [ "$rc" = 0 ] && grep -q "^state=$2\$" <<<"$out"; then ok "$1"
+    else bad "$1 (rc=$rc, wanted state=$2): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-150)"; fi
+}
+zrepo
+rm -f "$zf/calls.log"
+
+# --- fixup-check: the preconditions, one refusal each -------------------------
+# Positive control first. Every refusal below changes ONE knob of this fixture,
+# so a case that refuses for an unrelated reason cannot pass for the wrong one.
+zmk; zstate "a stalled pull request with a rebase item is accepted, and a notice is due first" notice
+zmk NOTICE_AGE=6; zstate "a notice older than FIXUP_NOTICE_DAYS makes it ready" ready
+out="$(zcheck)"
+grep -q '^items=rebase$' <<<"$out" && grep -q "^head=$(zhead)\$" <<<"$out" && grep -q '^author=contrib$' <<<"$out" \
+    && ok "the check reports the items, the head and the author for the script to use" \
+    || bad "fixup-check output lacks items, head or author: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-150)"
+
+zmk NOTICE_AGE=1; zrefused "a notice younger than FIXUP_NOTICE_DAYS is refused, with the date it ripens" 'notice.*(wait|until|not before)'
+zmk NOTICE_AGE=6 NOTICE_HEAD="$(printf 'b%.0s' $(seq 40))"; zstate "a notice written for a different head does not count, so a fresh one is due" notice
+zmk NOTICE_AGE=6 NOTICE_BY=stranger; zstate "a notice posted by anyone but the maintainer's account does not count" notice
+
+zmk DECISION=APPROVED;           zrefused "a pull request that is not CHANGES_REQUESTED is refused" 'CHANGES_REQUESTED'
+zmk STATE=CLOSED;                zrefused "a closed pull request is refused" 'not open'
+zmk DRAFT=1;                     zrefused "a draft is refused" 'draft'
+zmk BOT=1;                       zrefused "a bot's pull request is refused" 'bot'
+zmk CAN_MODIFY=0;                zrefused "maintainerCanModify=false is refused: the push would be refused by GitHub anyway" 'maintainerCanModify'
+zmk RUN_CONCL=action_required;   zrefused "a first-time contributor's runs sitting at action_required are refused" 'action_required'
+zmk REVIEW_AGE=9;                zrefused "a review nine days old is refused when the window is ten" '(younger|only 9|not yet 10|quiet)'
+zmk REVIEW_AGE=11 NOTICE_AGE=6;  zstate "a review eleven days old passes the window" ready
+zmk MARKER_HEAD="$(printf 'c%.0s' $(seq 40))"; zrefused "a marker written for another head is refused: the PR moved since the review" 'head'
+zmk ITEMS='[{"kind":"rebase"},{"kind":"rename-everything"}]'; zrefused "a kind outside the enum makes the whole review substantive" 'kind'
+zmk ITEMS='[]';                  zrefused "an empty item list is refused" '(empty|no item)'
+zmk ITEMS='[{"kind":"rebase","extra":1}]'; zrefused "an item with an unknown key is refused" 'key'
+zmk ITEMS='[{"kind":"test-count"}]'; zrefused "a test-count item that names no file is refused" 'file'
+zmk ITEMS='[{"kind":"doc-line","file":"../etc/passwd"}]'; zrefused "an item naming a path outside the tree is refused" 'file'
+zmk MARKER_MODE=none;            zrefused "a review with no marker is substantive" 'marker'
+zmk MARKER_MODE=other;           zrefused "a marker in somebody else's review is contributor text, not an instruction" 'marker|CHANGES_REQUESTED'
+zmk MARKER_MODE=quoted;          zrefused "a marker quoted earlier in the body is ignored: only the final line counts" 'marker'
+zmk MARKER_MODE=prose;           zrefused "a marker followed by more text is refused" 'marker'
+zmk OTHER_CR=1;                  zrefused "another reviewer's standing CHANGES_REQUESTED is substantive and blocks the fixup" 'reviewer2|another reviewer'
+zmk OWN_LATER=APPROVED;          zrefused "the maintainer's own later approval means the request is no longer standing" 'CHANGES_REQUESTED|latest'
+zmk COMMIT_AFTER=2;              zrefused "an author commit after the review is refused" 'activity|commit'
+zmk COMMENT_AFTER=2;             zrefused "an author comment after the review is refused" 'activity|comment'
+zmk REVIEW_AFTER=2;              zrefused "an author review after the review is refused" 'activity|review'
+zmk THREAD_AFTER=2;              zrefused "an author reply in a review thread after the review is refused" 'activity|thread'
+zmk COMMENT_AFTER=40 NOTICE_AGE=6; zstate "an author comment from BEFORE the review is not activity" ready
+# An unreadable pull request is an error, never "not stalled".
+zmk PR_FAIL=1;                   zrefused "a pull request gh cannot read is an error that says so" 'could not read'
+zmk THREADS_FAIL=1;              zrefused "unreadable review threads are an error, not silence" 'could not read'
+zmk RUNS_FAIL=1;                 zrefused "unreadable workflow runs are an error, not a green board" 'could not read'
+
+# --- stalled: the listing ------------------------------------------------------
+zmk REVIEW_AGE=15
+out="$(zenv python3 "$root/bin/maintainer" stalled 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q '#12' <<<"$out" && grep -q 'contrib' <<<"$out" && grep -q 'rebase' <<<"$out" \
+    && ok "stalled lists a pull request that passes every precondition" \
+    || bad "stalled did not list the positive control (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-150)"
+zmk REVIEW_AGE=9
+out="$(zenv python3 "$root/bin/maintainer" stalled 2>&1)"
+grep -q '#12' <<<"$out" && bad "stalled listed a review nine days old under the default window" \
+    || ok "stalled's default window is FIXUP_QUIET_DAYS (10): a nine-day-old review is not listed"
+out="$(zenv python3 "$root/bin/maintainer" stalled 7 2>&1)"
+grep -q '#12' <<<"$out" && ok "and an explicit window overrides it" || bad "stalled 7 did not list a nine-day-old review: $out"
+out="$(zenv MAINTAINER_FIXUP_QUIET_DAYS=8 python3 "$root/bin/maintainer" stalled 2>&1)"
+grep -q '#12' <<<"$out" && ok "MAINTAINER_FIXUP_QUIET_DAYS changes the default" || bad "the env override of the window was ignored: $out"
+zmk REVIEW_AGE=15 COMMENT_AFTER=1
+out="$(zenv python3 "$root/bin/maintainer" stalled 2>&1)"
+grep -q '#12' <<<"$out" && bad "stalled listed a pull request whose author answered" || ok "stalled leaves out a pull request whose author answered"
+zmk REVIEW_AGE=15 PR_FAIL=1
+out="$(zenv python3 "$root/bin/maintainer" stalled 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -qi 'could not read' <<<"$out" && ok "stalled exits non-zero and names a pull request it could not read" \
+    || bad "an unreadable pull request was reported as not stalled (rc=$rc): $out"
+
+# --- patch policy: what a run's patch may touch --------------------------------
+# Each case is ready to push (aged notice) so the refusal is the patch's own.
+zready() { zmk NOTICE_AGE=6 "$@"; }
+zrepo
+ZDOC='[{"kind":"doc-line","file":"docs/guide.md"}]'
+zready ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+zstate "a one-line doc patch on a doc the item names passes the policy" ready
+zrm() { rm -f "$zf/state/drafts/r1/fixup-12.patch"; }
+zrm; zready ITEMS="$ZDOC"; zrefused "a doc-line item with no patch written by the run is refused" 'patch'
+zready ITEMS='[{"kind":"doc-line","file":"src/lib.rs"}]'; zpatch src/lib.rs 's/test_1()/test_one()/'
+zrefused "a patch to a PROD_GLOBS path is refused" 'production'
+zready ITEMS='[{"kind":"doc-line","file":"Makefile"}]'; zpatch Makefile 's/true/false/'
+zrefused "a patch to the Makefile is refused" 'production'
+zready ITEMS='[{"kind":"doc-line","file":".github/dependabot.yml"}]'; zpatch .github/dependabot.yml 's/1/2/'
+zrefused "a patch under .github/ is refused even when the profile does not call it production" 'under \.github/'
+sed -i '/^PROD_GLOBS/d' "$zprof/profile.env"
+zready ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+zrefused "a profile that declares no PROD_GLOBS gets no patch: the check cannot say what is production" 'PROD_GLOBS'
+printf 'PROD_GLOBS="src/* Makefile"\n' >> "$zprof/profile.env"
+zstate "and the same patch passes once the profile declares them (so that refusal was the declaration's)" ready
+zready ITEMS='[{"kind":"doc-line","file":"package.json"}]'; zpatch package.json 's/x/y/'
+zrefused "a patch to package.json is refused: the screen says npm would run its scripts" 'screen|build-time|executes'
+zready ITEMS='[{"kind":"doc-line","file":"settings.cfg"}]'; zpatch settings.cfg 's/1/2/'
+zrefused "a patch to a file the screen cannot classify is refused, not assumed inert" 'classif|inert'
+zready ITEMS='[{"kind":"doc-line","file":"README.md"}]'; zpatch docs/guide.md 's/line one/line 1/'
+zrefused "a patch to a file no item names is refused" 'not named|no item names'
+zready ITEMS="$ZDOC"
+( t="$(mktemp -d "$zf/pt.XXXXXX")"; git clone -q --branch fix-x "$zf/fork.git" "$t/w" 2>/dev/null; cd "$t/w" || exit 1
+  for i in $(seq 1 25); do printf 'extra %s\n' "$i" >> docs/guide.md; done; git diff > "$zf/state/drafts/r1/fixup-12.patch"; rm -rf "$t" )
+zrefused "a patch over FIXUP_MAX_LINES is refused" 'lines|cap|exceeds'
+out="$(zcheck MAINTAINER_FIXUP_MAX_LINES=40)"; grep -q '^state=ready$' <<<"$out" \
+    && ok "MAINTAINER_FIXUP_MAX_LINES raises the cap, so the limit is not a literal" \
+    || bad "the cap override was ignored: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+zready ITEMS='[{"kind":"doc-line","file":"docs/new.md"}]'
+( t="$(mktemp -d "$zf/pt.XXXXXX")"; git clone -q --branch fix-x "$zf/fork.git" "$t/w" 2>/dev/null; cd "$t/w" || exit 1
+  printf 'new\n' > docs/new.md; git add -N docs/new.md; git diff > "$zf/state/drafts/r1/fixup-12.patch"; rm -rf "$t" )
+zrefused "a patch that creates a file is refused" 'create|new file|rename|summary|mode'
+zready ITEMS='[{"kind":"doc-line","file":"docs/moved.md"}]'
+( t="$(mktemp -d "$zf/pt.XXXXXX")"; git clone -q --branch fix-x "$zf/fork.git" "$t/w" 2>/dev/null; cd "$t/w" || exit 1
+  git mv docs/guide.md docs/moved.md; git add -A; git diff --cached -M > "$zf/state/drafts/r1/fixup-12.patch"; rm -rf "$t" )
+zrefused "a patch that renames a file is refused" 'create|rename|summary|mode'
+zready ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+zrm; zready ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+mv "$zf/state/drafts/r1/fixup-12.patch" "$zf/state/drafts/r1/real.patch"; ln -s real.patch "$zf/state/drafts/r1/fixup-12.patch"
+zrefused "a patch that is a symlink is refused" 'symlink|regular'
+rm -f "$zf/state/drafts/r1/fixup-12.patch" "$zf/state/drafts/r1/real.patch"
+
+# --- maintainer-repo fixup: the write ------------------------------------------
+zfix() { zenv "$@" bash "$root/bin/maintainer-repo" fixup 12 $ZARGS 2>&1; }
+ZARGS=""
+ztip() { git --git-dir="$zf/fork.git" rev-parse refs/heads/fix-x; }
+zhasprefix() { grep -q -- "$1" <<<"$2"; }
+
+# 1. no notice yet: the first call posts one, and pushes nothing.
+zrepo; zmk ITEMS='[{"kind":"rebase"}]'; : > "$zf/calls.log"; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'pr comment' "$zf/calls.log" && [ "$(ztip)" = "$before" ] \
+    && ok "with no notice on the PR, fixup posts the heads-up and pushes nothing" \
+    || bad "first call (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+grep -q "<!-- maintainer: fixup-notice v1 head=$before -->" "$zf/notice.body" 2>/dev/null \
+    && grep -q 'rebase' "$zf/notice.body" && grep -Eq '[0-9]{4}-[0-9]{2}-[0-9]{2}' "$zf/notice.body" \
+    && ok "the notice carries its marker (with the head), the items and a date" \
+    || bad "the notice body is wrong: $(tr '\n' ' ' < "$zf/notice.body" 2>/dev/null | cut -c1-200)"
+[ -s "$zf/notice.body" ] && ! grep -qiE 'claude|generated|assistant|\bAI\b' "$zf/notice.body" \
+    && ok "the notice says nothing about how it was written" || bad "the notice is missing or discloses automation"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && ok "a second call right after is refused: the notice has not aged" \
+    || bad "a second call did not wait (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# The notice must be visible on the PR afterwards, or "I told them" is a claim.
+zrepo; zmk; : > "$zf/nocomment"; : > "$zf/calls.log"
+out="$(zfix)"; rc=$?; rm -f "$zf/nocomment"
+[ "$rc" != 0 ] && grep -qi 'read it back' <<<"$out" \
+    && ok "a notice that does not show up on the PR afterwards is reported as a failure" \
+    || bad "an unconfirmed notice was reported as posted (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+# POST=off rehearses: no comment either.
+zrepo; zmk; : > "$zf/calls.log"
+out="$(zfix MAINTAINER_POST=off)"; rc=$?
+[ "$rc" = 0 ] && ! grep -q 'pr comment' "$zf/calls.log" && grep -q 'POST=off' <<<"$out" \
+    && ok "POST=off posts no notice and says it is rehearsing" || bad "POST=off still wrote (rc=$rc): $out"
+
+# 2. ready, rebase only: the branch is rewritten, the contributor stays the author.
+zrepo; zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"}]'; : > "$zf/calls.log"; before="$(ztip)"
+mainhead="$(git --git-dir="$zf/origin.git" rev-parse main)"
+out="$(zfix)"; rc=$?; after="$(ztip)"
+if [ "$rc" = 0 ] && [ "$after" != "$before" ] && git --git-dir="$zf/fork.git" merge-base --is-ancestor "$mainhead" "$after"; then
+    ok "a rebase fixup rewrites the contributor's branch onto the base, and reads the head back"
+else bad "rebase fixup (rc=$rc, tip $before -> $after): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; fi
+[ "$after" != "$before" ] && [ "$(git --git-dir="$zf/fork.git" log -1 --format=%an "$after")" = contrib ] \
+    && ok "the rebased commit is still the contributor's: credit is kept" || bad "the rebase changed the author"
+grep -q "$after" <<<"$out" && ok "success names the new head" || bad "success did not name the head: $out"
+# Every gh call the whole thing made, against an allowlist. Nothing here may
+# label, close, approve, dismiss, edit or merge, and nothing may touch claimed
+# or twir-listed.
+zgh_ok() { [ -s "$zf/calls.log" ] && ! grep -qiE '(^| )(pr (close|merge|edit|review|ready|reopen)|issue |label|release|api -X|api --method|--approve|dismiss|claimed|twir-listed)' "$zf/calls.log" \
+    && ! grep -qvE '^(auth switch|api user --jq|api users/|pr view|pr comment|api repos/o/r/(pulls|actions)|pr list)' "$zf/calls.log"; }
+zgh_ok && ok "the only gh calls were reads and the one notice comment; no label, close, approval or merge" \
+    || bad "an unexpected gh call: $(grep -viE '^(auth switch|api user|api users/|pr view|pr comment|api repos/o/r/(pulls|actions)|pr list)' "$zf/calls.log" | head -3 | tr '\n' ' ')"
+compgen -G "$zf/state/fixup-*" >/dev/null && bad "the scratch clone was left behind" || ok "the scratch clone is removed afterwards"
+
+# 3. rebase conflict: abort the whole fixup, remote untouched.
+ZCONFLICT=1 zrepo; zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"}]'; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && grep -qi 'conflict' <<<"$out" \
+    && ok "a rebase conflict aborts the fixup and the remote is untouched" \
+    || bad "a conflicted rebase (rc=$rc, tip moved: $([ "$(ztip)" = "$before" ] && echo no || echo YES)): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+
+# 4. test-count patch: derived by the profile's command, committed as the maintainer.
+zrepo; ZCOUNT='[{"kind":"test-count","file":"README.md"}]'
+zmk NOTICE_AGE=6 ITEMS="$ZCOUNT"; zpatch README.md 's/7 tests/9 tests/'; before="$(ztip)"
+out="$(zfix)"; rc=$?; after="$(ztip)"
+msg="$(git --git-dir="$zf/fork.git" log -1 --format=%B "$after" 2>/dev/null)"
+if [ "$rc" = 0 ] && [ "$after" != "$before" ] && git --git-dir="$zf/fork.git" merge-base --is-ancestor "$before" "$after"; then
+    ok "adding a commit is a plain push: the old head is still an ancestor"
+else bad "test-count fixup (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"; fi
+git --git-dir="$zf/fork.git" show "$after:README.md" 2>/dev/null | grep -q '9 tests' \
+    && ok "the patch landed: README says 9 tests, the count the profile's own command derived" || bad "README was not updated"
+grep -q '^Co-authored-by: contrib <5678+contrib@users.noreply.github.com>$' <<<"$msg" \
+    && ok "the commit credits the author with a Co-authored-by trailer built from the API's id" \
+    || bad "no Co-authored-by trailer: $(printf '%s' "$msg" | tr '\n' ' ')"
+[ "$(git --git-dir="$zf/fork.git" log -1 --format='%an <%ae>' "$after")" = "owner <1234+owner@users.noreply.github.com>" ] \
+    && ok "the commit is the maintainer's, under the account the identity check confirmed" \
+    || bad "the commit author is $(git --git-dir="$zf/fork.git" log -1 --format='%an <%ae>' "$after")"
+[ -n "$msg" ] && ! grep -qiE 'claude|generated|assistant|co-authored-by: .*(noreply@anthropic|bot)|\bAI\b' <<<"$msg" \
+    && ok "no AI attribution in the commit" || bad "the commit message is missing or discloses automation"
+[ -n "$msg" ] && ! grep -q '^Signed-off-by:' <<<"$msg" && ok "a repo with no sign-off convention gets none" \
+    || bad "a Signed-off-by appeared in a repo that does not use them"
+
+# 5. the count is re-derived, never typed.
+zrepo; zmk NOTICE_AGE=6 ITEMS="$ZCOUNT"; zpatch README.md 's/7 tests/8 tests/'; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && grep -qiE 'derive|count' <<<"$out" \
+    && ok "a count the profile's command does not produce is refused: 8 typed, 9 derived" \
+    || bad "a typed count was pushed (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+sed -i '/^FIXUP_COUNT_CMD/d' "$zprof/profile.env"
+zrepo; zmk NOTICE_AGE=6 ITEMS="$ZCOUNT"; zpatch README.md 's/7 tests/9 tests/'; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && grep -q 'declares no FIXUP_COUNT_CMD' <<<"$out" \
+    && ok "with no FIXUP_COUNT_CMD a count item is refused, and the message names the key" \
+    || bad "a count was pushed with no way to derive it (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+printf 'FIXUP_COUNT_CMD="grep -c '"'"'^fn test_'"'"' src/lib.rs"\n' >> "$zprof/profile.env"
+
+# 6. a patch that does not apply leaves the remote alone.
+zrepo; zmk NOTICE_AGE=6 ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+sed -i 's/^ guide line two/ something else entirely/' "$zf/state/drafts/r1/fixup-12.patch"
+sed -i 's/^-guide line one/-not the real line/' "$zf/state/drafts/r1/fixup-12.patch"; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && grep -qi 'apply' <<<"$out" && ok "a patch that does not apply is refused and the remote is untouched" \
+    || bad "a stale patch (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+
+# 7. rehearsals push nothing and show the diff.
+zrepo; zmk NOTICE_AGE=6 ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'; before="$(ztip)"; : > "$zf/calls.log"
+ZARGS="--dry-run"; out="$(zfix)"; rc=$?; ZARGS=""
+[ "$rc" = 0 ] && [ "$(ztip)" = "$before" ] && grep -q '+guide line 1' <<<"$out" \
+    && ok "--dry-run prints the plan and the diff and pushes nothing" \
+    || bad "--dry-run (rc=$rc, moved: $([ "$(ztip)" = "$before" ] || echo YES)): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+out="$(zfix MAINTAINER_POST=off)"; rc=$?
+[ "$rc" = 0 ] && [ "$(ztip)" = "$before" ] && grep -q 'POST=off' <<<"$out" && grep -q '+guide line 1' <<<"$out" \
+    && ok "POST=off is the same rehearsal" || bad "POST=off pushed or printed no diff (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+
+# 8. the lease: the branch moved between the check and the push.
+zrepo; zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"},{"kind":"doc-line","file":"docs/guide.md"}]'; zpatch docs/guide.md 's/line one/line 1/'
+cat > "$zf/on_author" <<'HOOK'
+#!/usr/bin/env bash
+# The contributor pushes while the fixup is being prepared.
+t="$(mktemp -d)"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+git clone -q --branch fix-x "$FX/fork.git" "$t/w" 2>/dev/null; cd "$t/w" || exit 1
+git config user.email c@c; git config user.name c; printf 'late push\n' >> notes.txt
+git commit -qam "late push"; git push -q origin fix-x; rm -rf "$t"
+HOOK
+chmod +x "$zf/on_author"
+out="$(zfix)"; rc=$?; rm -f "$zf/on_author"
+git --git-dir="$zf/fork.git" log -1 --format=%s refs/heads/fix-x | grep -q 'late push' \
+    && [ "$rc" != 0 ] && ok "a rewrite refuses when the remote moved (force-with-lease), and the late push survives" \
+    || bad "the fixup overwrote a push it never saw (rc=$rc, tip: $(git --git-dir="$zf/fork.git" log -1 --format=%s refs/heads/fix-x)): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+# And a move before the clone is caught at the clone.
+zrepo; zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"}]'
+cat > "$zf/on_me" <<'HOOK'
+#!/usr/bin/env bash
+t="$(mktemp -d)"; export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
+git clone -q --branch fix-x "$FX/fork.git" "$t/w" 2>/dev/null; cd "$t/w" || exit 1
+git config user.email c@c; git config user.name c; printf 'early push\n' >> notes.txt
+git commit -qam "early push"; git push -q origin fix-x; rm -rf "$t"
+HOOK
+chmod +x "$zf/on_me"
+out="$(zfix)"; rc=$?; rm -f "$zf/on_me"
+[ "$rc" != 0 ] && git --git-dir="$zf/fork.git" log -1 --format=%s refs/heads/fix-x | grep -q 'early push' && grep -qi 'has moved since the check' <<<"$out" \
+    && ok "a head that moved after the check is refused at the clone" \
+    || bad "a moved head was rewritten (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+
+# 9. success is the pull request's head, not the push's exit code.
+zrepo; zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"}]'
+printf '%s\n' "$(printf 'd%.0s' $(seq 40))" > "$zf/readback"
+out="$(zfix)"; rc=$?; rm -f "$zf/readback"
+[ "$rc" != 0 ] && grep -qiE 'readback|read back|does not match|reports' <<<"$out" && ! grep -qi 'fixup pushed' <<<"$out" \
+    && ok "a head the PR does not report back is a failure, not a success" \
+    || bad "an unconfirmed push was reported as done (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+
+# 10. the repo's own sign-off convention is followed.
+ZSIGN=1 zrepo; zmk NOTICE_AGE=6 ITEMS="$ZDOC"; zpatch docs/guide.md 's/line one/line 1/'
+out="$(zfix)"; rc=$?
+git --git-dir="$zf/fork.git" log -1 --format=%B refs/heads/fix-x | grep -q '^Signed-off-by: owner <1234+owner@users.noreply.github.com>$' \
+    && ok "when the contributor signs off, the fixup signs off too" \
+    || bad "the sign-off convention was not followed (rc=$rc): $(git --git-dir="$zf/fork.git" log -1 --format=%B refs/heads/fix-x | tr '\n' ' ')"
+
+# 10b. the account must be the maintainer's, before a comment or a push.
+zrepo; zmk; printf '1234\tsomeone\n' > "$zf/me"; : > "$zf/calls.log"; before="$(ztip)"
+out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'pr comment' "$zf/calls.log" && grep -q 'not owner' <<<"$out" \
+    && ok "authenticated as somebody else: no heads-up is posted" || bad "a wrong account got as far as a comment (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"}]'; out="$(zfix)"; rc=$?
+[ "$rc" != 0 ] && [ "$(ztip)" = "$before" ] && grep -q 'not owner' <<<"$out" \
+    && ok "and no push is made either" || bad "a wrong account pushed (rc=$rc)"
+printf '1234\towner\n' > "$zf/me"
+
+# 11. no contributor code and no hook runs: a hook path set globally must not reach the clone.
+zrepo; mkdir -p "$zf/evilhooks"
+printf '#!/bin/sh\ntouch "%s/HOOK-RAN"\n' "$zf" > "$zf/evilhooks/pre-commit"; cp "$zf/evilhooks/pre-commit" "$zf/evilhooks/pre-rebase"
+cp "$zf/evilhooks/pre-commit" "$zf/evilhooks/post-checkout"; cp "$zf/evilhooks/pre-commit" "$zf/evilhooks/post-rewrite"
+chmod +x "$zf"/evilhooks/*
+printf '[core]\n\thooksPath = %s/evilhooks\n' "$zf" >> "$zf/gitconfig"
+zmk NOTICE_AGE=6 ITEMS='[{"kind":"rebase"},{"kind":"doc-line","file":"docs/guide.md"}]'; zpatch docs/guide.md 's/line one/line 1/'
+out="$(zfix)"; rc=$?
+[ "$rc" = 0 ] && [ ! -e "$zf/HOOK-RAN" ] && ok "no git hook ran in the scratch clone, though the global config names a hook path" \
+    || bad "a hook ran or the control failed (rc=$rc, hook ran: $([ -e "$zf/HOOK-RAN" ] && echo yes || echo no)): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-140)"
+head -n -2 "$zf/gitconfig" > "$zf/gitconfig.new"; mv "$zf/gitconfig.new" "$zf/gitconfig"
+
+# 12. arguments.
+out="$(zenv bash "$root/bin/maintainer-repo" fixup 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'usage: maintainer-repo.*fixup' <<<"$out" && ok "fixup with no pull request number prints usage" || bad "fixup with no number (rc=$rc): $out"
+out="$(zenv bash "$root/bin/maintainer-repo" fixup '12; rm -rf x' 2>&1)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'usage: maintainer-repo.*fixup' <<<"$out" && ok "a pull request number that is not a number is refused" || bad "a non-numeric number was accepted (rc=$rc): $out"
+zrepo
+
+# --- the prompts, the defaults and the docs agree with the code ----------------
+for zp in sysknife magent _template; do
+    zf_prompt="$root/profiles/$zp/prompts/review.md"
+    grep -q 'maintainer: fixup-items v1 head=' "$zf_prompt" && grep -q '`maintainer stalled`' "$zf_prompt" \
+        && grep -q 'maintainer-repo fixup <pr> --dry-run' "$zf_prompt" \
+        && ok "$zp: the review prompt tells the run to write the marker and to run stalled and fixup" \
+        || bad "$zp: its review prompt lacks the fixup marker or the stalled/fixup steps"
+done
+# The marker the prompts show must be one the parser accepts, or every review
+# written from them is substantive and the whole path is dead.
+python3 -B - "$root" <<'PYEOF' && ok "the marker example in the prompts parses, kinds and all" || bad "the prompts' marker example is rejected by the parser"
+import importlib.machinery, importlib.util, re, sys
+root = sys.argv[1]
+sys.argv = ["maintainer", "--help"]
+loader = importlib.machinery.SourceFileLoader("m", root + "/bin/maintainer")
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("m", loader))
+loader.exec_module(m)
+for prof in ("sysknife", "magent", "_template"):
+    t = open(f"{root}/profiles/{prof}/prompts/review.md").read()
+    line = next(l for l in t.splitlines() if l.startswith("    <!-- maintainer: fixup-items v1"))
+    line = line.strip().replace("<the 40-hex head you reviewed>", "a" * 40)
+    head, items = m._fixup_items("Words.\n\n" + line)
+    assert head == "a" * 40 and [k for k, _ in items] == ["rebase", "test-count"], (prof, items)
+PYEOF
+for zk in FIXUP_QUIET_DAYS FIXUP_NOTICE_DAYS FIXUP_MAX_LINES; do
+    grep -q "^$zk=[0-9]\+\$" "$root/lib/defaults.env" && ! grep -nE "(^|[^A-Z_])$zk *= *[0-9]" "$root/bin/maintainer" "$root/bin/maintainer-repo" >/dev/null \
+        && ok "$zk has its default in lib/defaults.env and no literal in the code" \
+        || bad "$zk is missing from lib/defaults.env or has a literal in bin/"
+done
+
+# ===== Z: stalled pull requests (end) =====
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
