@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Refresh the sysknife checkout and keep an auditable record of each maintenance run.
+"""Refresh the profile's checkout and keep an auditable record of each maintenance run.
 
     maintainer version                         which build is deployed, and whether it is stale
     maintainer status                          what has run, what is due, is it posting
@@ -60,6 +60,9 @@ def _resolve_profile() -> str:
 
 
 PROFILE = _resolve_profile()
+if not PROFILE:
+    raise SystemExit("maintainer: no profile is deployed. Run ./install.sh from the repository,\n"
+                     "            or set MAINTAINER_PROFILE to the one you mean.")
 # A profile name becomes a path AND, below, part of a shell command. Both need
 # it to be a plain name. Measured on 2026-09-03: MAINTAINER_PROFILE set to
 # `pwn"; touch /tmp/INJECTED; :"` with a matching directory ran the touch,
@@ -261,7 +264,9 @@ def _gh_mentions(body: str) -> set:
 # from docs/cli.md, and tests/run-tests.sh requires that every OTHER subcommand
 # appears there: six had accumulated undocumented before anything checked.
 INTERNAL_COMMANDS = {"start", "finish", "abort", "failed", "ok"}
-TASKS = _setting("MAINTAINER_TASKS", "TASKS", "review issues ci audit").split()
+# No default list: a profile that declares no TASKS runs nothing, and `start`
+# and `status` say so. This inherited one project's four task names.
+TASKS = _setting("MAINTAINER_TASKS", "TASKS", "").split()
 SKILL = os.environ.get("MAINTAINER_SKILL", "")
 
 
@@ -1881,6 +1886,9 @@ def cmd_start(skill: str) -> None:
     if "-" in skill:
         raise SystemExit(f"maintainer: task names cannot contain a hyphen ({skill!r}): "
                          "run.sh builds MODEL_<task> as a shell variable name")
+    if not TASKS:
+        raise SystemExit(f"maintainer: profile '{PROFILE}' declares no TASKS, so it runs nothing.\n"
+                         f"            Set TASKS in its profile.env.")
     if skill not in TASKS:
         raise SystemExit(f"maintainer: unknown task {skill!r}; this profile runs {', '.join(TASKS)}")
     # An empty command record, created up front. Without this a run that died
@@ -2258,6 +2266,8 @@ def cmd_status() -> None:
     nxt = _next_runs(env["_profile"])
     held = False
     print()
+    if not TASKS:
+        print(f"profile '{PROFILE}' declares no TASKS, so there is nothing to run or to be due.")
     print(f"{'task':10} {'last run':22} {'age':>6}  {'report':>10}  {'spend':>7}  next")
     for task in TASKS:
         f = STATE / f"last-{task}.json"
@@ -2327,7 +2337,10 @@ def cmd_run(args: list[str]) -> None:
     the one thing a new maintainer has to be told twice. The cadence gate still
     applies; MAINTAINER_FORCE=1 overrides it.
     """
-    profile = os.environ.get("MAINTAINER_PROFILE", "sysknife")
+    # PROFILE, resolved once at import by _resolve_profile(). This read the
+    # variable itself with a project's name as the fallback, so with one other
+    # profile deployed `run` started the wrong repository's run.
+    profile = PROFILE
     runsh = Path.home() / ".local/share/maintainer/run.sh"
     if not runsh.exists():
         raise SystemExit(f"maintainer: {runsh} not found. Run ./install.sh from the repository.")

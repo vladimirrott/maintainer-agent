@@ -34,6 +34,18 @@ middle digit.
 
 ### Changed
 
+- **No tool guesses which project it acts on.** `maintainer run` read
+  `MAINTAINER_PROFILE` itself with `sysknife` as the fallback, so with one other
+  profile deployed it started the wrong repository's run; it now uses the
+  profile resolved once at import, and a machine with none refuses. A profile
+  that declares no `TASKS` runs nothing instead of inheriting four task names.
+  `install-launchd.sh`, `install-cron.sh` and `Install-Maintainer.ps1` require
+  the profile name (`install.sh --uninstall` now strips each deployed profile's
+  cron block by name, where it used to strip only the default's). The sysknife
+  review prompt names the profile's own checkout (`$MAINTAINER_REPO`) instead of
+  a path on the author's laptop.
+  `scripts/check_drift.py --only repo-names` holds the README claim that no
+  executable line in `bin/` or `lib/` names a project; the test suite runs it.
 - **The sysknife rust suite verifies in 6g, not 2g.** 2g OOM-killed rustc twice
   on 2026-10-25, in an interactive verify and in the 21:14 timer run, which had
   to retry with `MAINTAINER_CARGO_JOBS=2`. The suite declares `suite_memory`

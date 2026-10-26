@@ -324,13 +324,16 @@ spelled, so `POST=off` would not have blocked a single GitHub write verb there.
 
 ```sh
 ./install.sh --timers                                # Linux
-./install.sh && platform/macos/install-launchd.sh    # macOS
+./install.sh && platform/macos/install-launchd.sh myrepo    # macOS
 ./install.sh                                         # Windows, then:
-#   platform\windows\Install-Maintainer.ps1
+#   platform\windows\Install-Maintainer.ps1 -ProfileName myrepo
+MAINTAINER_PROFILE=myrepo platform/posix/install-cron.sh    # everything else
 ```
 
 All three read the task list from the deployed `profile.env`, so a second
-repository needs a profile and no edit to any of them. The PowerShell installer
+repository needs a profile and no edit to any of them. Each takes the profile
+name and refuses to guess one: an installer that defaulted to a project would
+register that project's agents on a machine whose operator meant another. The PowerShell installer
 is parsed by a real `pwsh` in a container when the image is present locally;
 counting braces was the previous check, and it would pass a file PowerShell
 refuses to load.
@@ -435,9 +438,12 @@ timer per task. Then rewrite `profiles/widget/prompts/*.md` for the project.
 The generic ones are a starting point; `profiles/sysknife/prompts/` is the
 worked set.
 
-Nothing in `bin/` or `lib/` carries a repository's name. The task list, the
-skill each task loads, the models, the cadences, the deny wall and the state
-directory all come from `profile.env`. `CONTRIBUTING.md` has claimed that since
+No executable line in `bin/` or `lib/` carries a repository's name:
+comments and docstrings cite the incidents that taught each rule and those name
+their repositories, but no code path does, and `scripts/check_drift.py` fails
+the commit if one starts to. The task list, the skill each task loads, the
+models, the cadences, the deny wall and the state directory all come from
+`profile.env`. `CONTRIBUTING.md` has claimed that since
 the beginning; before `new-profile.sh` it was not true, because adding a
 repository meant editing a hardcoded skill map in `bin/maintainer` and
 hand-writing four unit files.
@@ -597,12 +603,12 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 1048 offline tests
+./tests/run-tests.sh        # 1067 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ```
 
-1048 offline tests: no network, no GitHub, no model call. Every case tests a
+1067 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

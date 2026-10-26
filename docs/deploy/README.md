@@ -4,9 +4,9 @@ Four ways, in order of how much you have to trust the machine.
 
 ## 1. A timer on a machine you own (what this repo does)
 
-`./install.sh --timers` on Linux, `platform/macos/install-launchd.sh` on macOS,
-`Install-Maintainer.ps1` on Windows, `platform/posix/install-cron.sh` anywhere
-else. The agent runs as you, with your `gh` credentials and your model
+`./install.sh --timers` on Linux, `platform/macos/install-launchd.sh <profile>` on
+macOS, `Install-Maintainer.ps1 -ProfileName <profile>` on Windows,
+`MAINTAINER_PROFILE=<profile> platform/posix/install-cron.sh` anywhere else. The agent runs as you, with your `gh` credentials and your model
 subscription.
 
 **Trust:** total. It is your machine and your token. This is why `POST=off` is

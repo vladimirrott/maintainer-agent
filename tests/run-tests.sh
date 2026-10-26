@@ -7618,6 +7618,124 @@ grep -q 'it is stale' <<<"$(doc_run MAINTAINER_DENY_WALL_MIN_RULES=3)" \
     || ok "and MAINTAINER_DENY_WALL_MIN_RULES moves it"
 rm -f "$stub_dir/gh"
 
+echo "== no repository, profile or account is written into bin/ and lib/ =="
+# `maintainer run` read `os.environ.get("MAINTAINER_PROFILE", "sysknife")` while
+# _resolve_profile() already answered the question for the whole file. With one
+# other profile deployed and the variable unset, `run review` started a real
+# run of the wrong repository. A default that names a project is a guess, and
+# the guess is wrong the first time somebody adopts this for a second one.
+r2h="$stub_dir/runhome"; rm -rf "$r2h"
+mkdir -p "$r2h/.local/share/maintainer/profiles/solo" "$r2h/.local/bin"
+printf 'REPO_SLUG="o/r"\nTASKS="alpha beta"\n' > "$r2h/.local/share/maintainer/profiles/solo/profile.env"
+cat > "$r2h/.local/share/maintainer/run.sh" <<'EOF'
+#!/usr/bin/env bash
+printf 'run.sh args: %s\n' "$*"
+EOF
+r2() {  # env assignments, then the maintainer arguments after --
+    local -a envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+    env -u MAINTAINER_PROFILE -u MAINTAINER_TASKS MAINTAINER_STATE_DIR="$r2h/state" \
+        PATH="$stub_dir:$PATH" HOME="$r2h" "${envs[@]}" python3 "$root/bin/maintainer" "$@" 2>&1; }
+out="$(r2 -- run alpha)"
+[ "$out" = "run.sh args: solo alpha" ] \
+    && ok "'maintainer run' acts on the one deployed profile, not on a name written in the code" \
+    || bad "'maintainer run' passed '$out' to run.sh, not 'solo alpha'"
+out="$(r2 MAINTAINER_PROFILE=named -- run alpha)"
+[ "$out" = "run.sh args: named alpha" ] && ok "and on the profile the environment names" \
+    || bad "MAINTAINER_PROFILE=named was not what run.sh received: $out"
+out="$(r2 HOME="$stub_dir/nohome" -- run alpha)"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'run.sh args' <<<"$out" && grep -qi 'no profile' <<<"$out" \
+    && ok "with no profile deployed it refuses instead of running a default one" \
+    || bad "with no profile deployed 'run' went ahead (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+
+# A profile that declares no TASKS runs nothing. It used to inherit another
+# project's four task names.
+printf 'REPO_SLUG="o/r"\n' > "$r2h/.local/share/maintainer/profiles/solo/profile.env"
+out="$(r2 -- start review)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'declares no TASKS' <<<"$out" \
+    && ok "a profile with no TASKS refuses to start a task, saying so" \
+    || bad "a profile with no TASKS still started 'review' (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+out="$(r2 -- status)"
+grep -q 'declares no TASKS' <<<"$out" && ! grep -qE '^(review|issues|ci|audit) ' <<<"$out" \
+    && ok "and 'status' says it declares none instead of listing another project's tasks" \
+    || bad "status listed tasks for a profile that declares none: $(grep -E '^(review|issues|ci|audit) ' <<<"$out" | head -2 | tr '\n' ' ')"
+
+# The three installers took `sysknife` as the profile when told nothing.
+echo "== the installers do not guess a profile =="
+ih2="$stub_dir/instprof"; rm -rf "$ih2"; mkdir -p "$ih2/.local/share/maintainer/profiles/sysknife" "$ih2/.local/bin"
+printf 'TASKS="review"\nSTATE_DIR="%s/state"\n' "$ih2" > "$ih2/.local/share/maintainer/profiles/sysknife/profile.env"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$ih2/.local/share/maintainer/run.sh"; chmod +x "$ih2/.local/share/maintainer/run.sh"
+make_stub crontab 'echo "crontab called: $*" >> "$CRON_LOG"; exit 0'
+make_stub launchctl 'echo "launchctl called: $*" >> "$CRON_LOG"; exit 0'
+export CRON_LOG="$stub_dir/cron.log"; : > "$CRON_LOG"
+for inst in platform/posix/install-cron.sh platform/macos/install-launchd.sh; do
+    out="$(env -u MAINTAINER_PROFILE PATH="$stub_dir:$PATH" HOME="$ih2" bash "$root/$inst" 2>&1)"; rc=$?
+    [ "$rc" != 0 ] && grep -qi 'profile name' <<<"$out" && [ ! -s "$CRON_LOG" ] \
+        && ok "$(basename "$inst") refuses to run without a profile name, and registers nothing" \
+        || bad "$(basename "$inst") ran without being told a profile (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-110)"
+done
+rm -f "$stub_dir/crontab" "$stub_dir/launchctl"
+# Uninstall used to lean on that default, so with two profiles deployed it
+# stripped one cron block and left the other. It removes each deployed profile's.
+uh2="$stub_dir/unin2"; rm -rf "$uh2"; mkdir -p "$uh2"
+HOME="$uh2" "$root/install.sh" >/dev/null 2>&1
+make_stub crontab 'case "$1" in -l) exit 0 ;; *) echo "removed for ${MAINTAINER_PROFILE:-NONE}" >> "$CRON_LOG"; cat >/dev/null ;; esac'
+# A systemctl stub is not optional here: without one, uninstall reads the REAL
+# user timers and, with MAINTAINER_UNINSTALL_YES=1, would disable them (the
+# 2026-09-04 incident the guard in install.sh exists for).
+make_stub systemctl 'exit 0'
+: > "$CRON_LOG"
+PATH="$stub_dir:$PATH" HOME="$uh2" MAINTAINER_UNINSTALL_YES=1 "$root/install.sh" --uninstall >/dev/null 2>&1
+rm -f "$stub_dir/systemctl"
+[ "$(sort "$CRON_LOG" | paste -sd,)" = "removed for magent,removed for sysknife" ] \
+    && ok "uninstall strips the cron block of every deployed profile, by name" \
+    || bad "uninstall's cron removal did not cover each profile: $(paste -sd, "$CRON_LOG")"
+rm -f "$stub_dir/crontab"
+grep -qE "ProfileName *= *'" "$root/platform/windows/Install-Maintainer.ps1" \
+    && bad "Install-Maintainer.ps1 still defaults ProfileName to a project" \
+    || ok "Install-Maintainer.ps1 gives ProfileName no default"
+grep -B1 -E '\[string\]\$ProfileName' "$root/platform/windows/Install-Maintainer.ps1" | grep -q 'Mandatory' \
+    && ok "and requires it" || bad "Install-Maintainer.ps1 does not require ProfileName"
+
+# The prompt told the agent to work in the maintainer's own dev tree, while the
+# profile's REPO_PATH is a checkout this profile owns and run.sh cd's into.
+grep -rq 'Desktop/lacs' "$root"/profiles/*/prompts \
+    && bad "a prompt still names a path on the author's laptop" \
+    || ok "no prompt names a working directory on the author's laptop"
+grep -q 'MAINTAINER_REPO' "$root/profiles/sysknife/prompts/review.md" \
+    && ok "the review prompt names the profile's checkout by variable" \
+    || bad "the review prompt does not say where the checkout is"
+[ "$(head -3 "$root/bin/maintainer" | grep -ci 'sysknife')" = 0 ] \
+    && ok "bin/maintainer's own description names no project" \
+    || bad "bin/maintainer's docstring still describes one project"
+
+# The README's claim, held by a checker. Executable lines only: comments cite
+# the incidents that taught each rule, and those name the repositories.
+chk="$root/scripts/check_drift.py"
+python3 "$chk" --root "$root" --only repo-names >"$stub_dir/chk.out" 2>&1 \
+    && ok "no executable line in bin/ or lib/ names a deployed profile, repository or account" \
+    || bad "bin/ or lib/ carries a name: $(head -3 "$stub_dir/chk.out" | tr '\n' ' ' | cut -c1-200)"
+# The checker must bite: plant one name in code and one in a comment.
+cm="$stub_dir/driftroot"; rm -rf "$cm"; mkdir -p "$cm"; cp -r "$root/bin" "$root/lib" "$root/profiles" "$cm/"
+printf '# sysknife#1 is cited here, in a comment, which is allowed\n' >> "$cm/lib/run.sh"
+python3 "$chk" --root "$cm" --only repo-names >/dev/null 2>&1 \
+    && ok "a repository named in a comment is allowed" || bad "the checker rejects a comment"
+printf 'echo sysknife\n' >> "$cm/lib/run.sh"
+python3 "$chk" --root "$cm" --only repo-names >"$stub_dir/chk.out" 2>&1 \
+    && bad "the checker passed a bash line that echoes a project name" \
+    || ok "the checker fails on a project name in a bash line"
+cp "$root/lib/run.sh" "$cm/lib/run.sh"
+printf 'x = "lacs-project/sysknife"\n' >> "$cm/bin/maintainer"
+python3 "$chk" --root "$cm" --only repo-names >/dev/null 2>&1 \
+    && bad "the checker passed a python string that names a repository" \
+    || ok "and on a repository in a python string"
+cp "$root/bin/maintainer" "$cm/bin/maintainer"
+# An account no repository slug shares, so only the GH_ACCOUNT read can catch it.
+mkdir -p "$cm/profiles/zz"; printf 'REPO_SLUG="zzorg/zzrepo"\nGH_ACCOUNT="zzacct"\n' > "$cm/profiles/zz/profile.env"
+printf 'owner = "zzacct"\n' >> "$cm/bin/maintainer"
+python3 "$chk" --root "$cm" --only repo-names >/dev/null 2>&1 \
+    && bad "the checker passed an account name" || ok "and on a GitHub account"
+rm -rf "$cm"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
