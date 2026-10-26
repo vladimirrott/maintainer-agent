@@ -46,6 +46,14 @@ middle digit.
 
 ### Fixed
 
+- **A cancelled check no longer passes the merge gate.** `maintainer-merge merge`
+  counted failing and pending checks and ignored the other buckets `gh` reports,
+  and never compared what it accepted with the total, so a cancelled check, a
+  bucket it did not recognise and an empty check list (`[]`) all read as a green
+  board. It now refuses unless every check is `pass` or `skipping` and at least
+  one passed, and names the count (`2 of 3 checks are pass or skipping`). No
+  test had ever fed it a pending or cancelled bucket; there are nine cases now,
+  each proved by removing its refusal.
 - **The documentation matches the code again.** The README said three backends
   (four exist), "twenty-five" lessons beside 110, and described `magent` as
   running at `POST=off` while its profile posts; the book called lessons

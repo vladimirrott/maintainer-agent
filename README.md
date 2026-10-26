@@ -80,9 +80,9 @@ refuses unless **all** of these hold:
 | a **verification receipt** exists for the PR | somebody mutated the guard and watched it go red |
 | **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved anything the profile calls production, the receipt describes a tree that is gone. The paths come from `PROD_GLOBS` in the profile, and a profile that declares none gets no merge |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
-| zero failing **and zero pending** checks | pending is not green |
+| every check is **pass or skipping**, and at least one passed | pending, cancelled and any bucket the gate does not know are not green. `gh` cuts a check into pass, fail, pending, skipping and cancel; the gate used to count only fail and pending |
 | `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
-| the check list is **non-empty** | an empty board is a failure, not a pass |
+| the check list is **non-empty** | an empty board is a failure, not a pass; neither is a board where every check skipped |
 | `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
 
 ```sh
@@ -608,13 +608,13 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 1112 offline tests
+./tests/run-tests.sh        # 1121 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ./scripts/check_drift.py    # the docs agree with the code
 ```
 
-1112 offline tests: no network, no GitHub, no model call. Every case tests a
+1121 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

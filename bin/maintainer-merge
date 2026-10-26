@@ -1657,17 +1657,28 @@ cmd_merge() {
     # python:3.12 the three counts came back empty, and the refusal read
     # "#7 has  failing check(s)" with a blank where the number goes. It failed
     # closed, which is right, and it named the wrong thing, which is not.
-    local pass_n
-    read -r fails pend pass_n <<<"$(printf '%s' "$checks" | python3 -c '
+    #
+    # gh buckets a check as pass, fail, pending, skipping or cancel. Counting
+    # only fail and pending let a cancelled check, a bucket gh adds next year,
+    # and a list with nothing in it all read as a green board, so the rule is
+    # the positive one: every check is pass or skipping, and at least one passed.
+    # A skipped check made no claim either way, but a board where all of them
+    # skipped has shown nothing.
+    local pass_n skip_n cancel_n total
+    read -r fails pend pass_n skip_n cancel_n total <<<"$(printf '%s' "$checks" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
 c = lambda b: sum(1 for x in d if x.get("bucket") == b)
-print(c("fail"), c("pending"), c("pass"))
+print(c("fail"), c("pending"), c("pass"), c("skipping"), c("cancel"), len(d))
 ')" || die "could not read the check list for #$pr; gh returned:
 $(printf '%s' "$checks" | head -c 300)"
-    case "$fails$pend" in ''|*[!0-9]*) die "the check counts for #$pr came back as '$fails'/'$pend', which is not a number. Refusing." ;; esac
+    case "$fails$pend$pass_n$skip_n$cancel_n$total" in ''|*[!0-9]*) die "the check counts for #$pr came back as '$fails'/'$pend'/'$pass_n'/'$skip_n'/'$cancel_n'/'$total', which is not a number. Refusing." ;; esac
     [ "$fails" = 0 ] || die "#$pr has $fails failing check(s)"
     [ "$pend"  = 0 ] || die "#$pr has $pend pending check(s)"
+    [ "$cancel_n" = 0 ] || die "#$pr has $cancel_n cancelled check(s); a cancelled check never reported a verdict. Re-run it."
+    [ "$total" -gt 0 ] || die "#$pr has an empty check list; an empty board is a failure, not a pass"
+    [ $((pass_n + skip_n)) = "$total" ] || die "#$pr: $((pass_n + skip_n)) of $total checks are pass or skipping; the rest are in a bucket this gate does not accept"
+    [ "$pass_n" -gt 0 ] || die "#$pr: all $total checks were skipped, so nothing ran"
 
     # The condition that carries the weight. A rebase may move tests, docs and
     # the evidence artifact; if it moved production code, the receipt describes
@@ -1719,7 +1730,7 @@ $(printf '%s' "$diff" | sed 's/^/    /')
     fi
     git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
 
-    say "#$pr: approved, $pass_n checks pass, 0 fail, 0 pending, receipt valid"
+    say "#$pr: approved, $pass_n checks pass, $skip_n skipped, 0 fail, 0 pending, 0 cancelled, receipt valid"
     if [ "$POST" = off ]; then
         say "POST=off: every condition holds and the merge is NOT being made"
         say "         re-run with posting on to land it"

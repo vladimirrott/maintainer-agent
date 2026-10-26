@@ -7096,7 +7096,7 @@ make_stub gh "case \"\$*\" in
       *reviewDecision*) echo APPROVED;;
       *headRefOid*) echo $mnhead;;
       *mergeStateStatus*) echo CLEAN;;
-      *'pr checks'*) echo '[]';;
+      *'pr checks'*) echo '[{\"name\":\"x\",\"bucket\":\"pass\"}]';;
       *'pr view'*'files'*) echo 'thing.txt';;
       *'pr merge'*) exit 0;;
     esac"
@@ -7894,6 +7894,63 @@ grep -q 'check_drift.py' "$root/.githooks/pre-commit" \
     && ok "the pre-commit hook runs check_drift.py" || bad "the hook never runs the docs checker"
 grep -q 'check_drift.py' "$root/.github/workflows/ci.yml" \
     && ok "and CI runs it" || bad "CI never runs the docs checker"
+
+echo "== the check board must be entirely pass or skipping =="
+# gh buckets a check as pass, fail, pending, skipping or cancel. The gate counted
+# fail and pending and ignored the rest, and never compared what it accepted with
+# the total, so a cancelled check passed, an unrecognised bucket passed, and an
+# empty list (`[]`, which is a non-empty string) passed as a green board with
+# nothing on it. Nothing had ever fed it a pending or a cancel bucket.
+mgb="$root/bin/maintainer-merge"
+board_gate() {  # $1 = the JSON gh prints for `pr checks`
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *reviewDecision*) echo APPROVED;;
+      *headRefOid*) echo abcdef1234;;
+      *mergeStateStatus*) echo CLEAN;;
+      *'pr checks'*) printf '%s\\n' '$1';;
+    esac"
+    PATH="$stub_dir:$PATH" bash "$mgb" merge 31 2>&1
+}
+# The refusal has to be the board's. The receipt check runs before the board and
+# the pull-request fetch runs after it, so a recorded receipt plus a positive
+# control that reaches "cannot fetch" shows a refusal below is the board's own.
+mkdir -p "$MAINTAINER_STATE/receipts"
+make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'api user'*) echo testuser;; esac"
+PATH="$stub_dir:$PATH" bash "$mgb" receipt 31 abcdef1234 "guard mutated, went red" >/dev/null 2>&1
+[ -f "$MAINTAINER_STATE/receipts/31.json" ] && ok "a receipt for #31 exists, so the board is the next gate" \
+    || bad "no receipt for #31 could be recorded, so the cases below prove nothing"
+out="$(board_gate '[{"name":"a","bucket":"pass"},{"name":"b","bucket":"skipping"}]')"; rc=$?
+grep -q 'cannot fetch #31' <<<"$out" \
+    && ok "pass plus skipping is a green board, and the gate moves on to fetching the pull request" \
+    || bad "a board of pass and skipping did not get past the board: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(board_gate '[{"name":"a","bucket":"pass"},{"name":"b","bucket":"pending"}]')"; rc=$?
+[ "$rc" != 0 ] && grep -q '1 pending check' <<<"$out" \
+    && ok "a pending check is refused, and counted" || bad "a pending check was not refused (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(board_gate '[{"name":"a","bucket":"pass"},{"name":"b","bucket":"cancel"}]')"; rc=$?
+[ "$rc" != 0 ] && grep -qi 'cancel' <<<"$out" && ! grep -q 'cannot fetch' <<<"$out" \
+    && ok "a cancelled check is refused: it never reported a verdict" \
+    || bad "a cancelled check passed the board (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(board_gate '[{"name":"a","bucket":"pass"},{"name":"b","bucket":"timed_out"}]')"; rc=$?
+[ "$rc" != 0 ] && grep -q '1 of 2' <<<"$out" && ! grep -q 'cannot fetch' <<<"$out" \
+    && ok "a bucket the gate does not know is refused, with pass+skipping out of total in the message" \
+    || bad "an unrecognised bucket passed the board (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(board_gate '[{"name":"a","bucket":"pass"},{"name":"b"}]')"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'cannot fetch' <<<"$out" \
+    && ok "a check with no bucket at all is refused" || bad "a check with no bucket passed (rc=$rc)"
+out="$(board_gate '[]')"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'cannot fetch' <<<"$out" && grep -qi 'no checks\|empty' <<<"$out" \
+    && ok "an empty list is refused as an empty board, which the README promises" \
+    || bad "an empty check list passed the board (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-120)"
+out="$(board_gate '[{"name":"a","bucket":"skipping"},{"name":"b","bucket":"skipping"}]')"; rc=$?
+[ "$rc" != 0 ] && ! grep -q 'cannot fetch' <<<"$out" \
+    && ok "a board where every check was skipped is refused: nothing ran" \
+    || bad "a board of only skipped checks passed (rc=$rc)"
+out="$(board_gate '[{"name":"a","bucket":"fail"},{"name":"b","bucket":"pending"}]')"; rc=$?
+grep -q 'failing check' <<<"$out" && ok "failing is still reported ahead of pending" \
+    || bad "a failing and a pending check: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-100)"
+rm -f "$stub_dir/gh" "$MAINTAINER_STATE/receipts/31.json"
 
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
