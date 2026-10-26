@@ -50,6 +50,7 @@ The only path to a merge.
 | command | what it does |
 |---|---|
 | `maintainer-repo prune [--dry-run]` | delete branches merged into main, local and remote. Never a branch with an open PR |
+| `maintainer-repo fixup <pr> [--dry-run]` | finish a stalled pull request's mechanical items on the contributor's own branch. The first call posts one heads-up and pushes nothing; once `FIXUP_NOTICE_DAYS` have passed with the author still silent, the next call works in a scratch clone with no hook run, rebases (a conflict aborts everything) or applies the patch the run wrote, commits as the maintainer with a `Co-authored-by` trailer for the author, pushes (`--force-with-lease` against the checked head when it rewrites) and reads the head back from GitHub before it says it worked. `--dry-run` and `POST=off` print the plan and the diff. Never resolves a conflict, edits `.github/`, touches a claim label, approves or merges |
 | `maintainer-repo release-check` | whether a release is owed and which digit moves, read from the CHANGELOG. See [Releases](release.md) |
 
 ## `maintainer-doctor`

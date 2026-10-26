@@ -48,6 +48,13 @@ Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and r
 it through `$KEY` in bash (after `maintainer_load_defaults`) or `_tunable("KEY")`
 in `bin/maintainer`. Never write the number at the call site.
 
+One profile key has no default and is not in that file: `FIXUP_COUNT_CMD`, a
+command that prints the profile's test count, run in the scratch clone by
+`maintainer-repo fixup` so that a `test-count` item is derived and never typed.
+It must count statically (`grep -c`, `find | wc -l`), because it runs over a
+contributor's tree: a command that builds or runs their tests runs their code.
+With it unset, a `test-count` item is refused.
+
 ## Environment variables that are not defaults
 
 Every name below is read by the code. A test fails when the code reads a

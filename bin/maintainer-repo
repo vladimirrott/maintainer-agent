@@ -4,6 +4,7 @@
 #
 #   maintainer-repo prune [--dry-run]    delete merged branches, local and remote
 #   maintainer-repo release-check        is a release due, and what digit moves
+#   maintainer-repo fixup <pr> [--dry-run]  finish a stalled pull request's mechanical items
 #
 # Both exist because they are the chores a solo maintainer stops doing first,
 # and both are cheap to get wrong by hand: a branch deleted while a PR is still
@@ -196,8 +197,165 @@ cmd_release_check() {
     say "replaced."
 }
 
+# Finish a pull request the author has left on mechanical review items.
+#
+# Every decision is `maintainer fixup-check`'s, asked again here at the current
+# head; this function only does the git. It works in a scratch clone of the
+# contributor's branch, with no hook and no contributor code run, and it never
+# labels, closes, approves, merges or touches a claim.
+cmd_fixup() {
+    local pr="" dry=0 a
+    for a in "$@"; do
+        case "$a" in
+            --dry-run) dry=1 ;;
+            *[!0-9]*|"") pr="" ; break ;;
+            *) pr="$a" ;;
+        esac
+    done
+    [ -n "$pr" ] || { printf 'usage: maintainer-repo fixup <pr> [--dry-run]\n' >&2; exit 64; }
+    if [ "$POST" = off ]; then
+        dry=1
+        say "POST=off: rehearsing, nothing will be posted or pushed"
+    fi
+    local here; here="$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")"
+    local out; out="$(python3 "$here/maintainer" fixup-check "$pr")" || exit 1
+    local state head base branch fork author items patch marker notice_due notice_days
+    state="$(sed -n 's/^state=//p' <<<"$out")"
+    head="$(sed -n 's/^head=//p' <<<"$out")"
+    base="$(sed -n 's/^base=//p' <<<"$out")"
+    branch="$(sed -n 's/^branch=//p' <<<"$out")"
+    fork="$(sed -n 's/^fork=//p' <<<"$out")"
+    author="$(sed -n 's/^author=//p' <<<"$out")"
+    items="$(sed -n 's/^items=//p' <<<"$out")"
+    patch="$(sed -n 's/^patch=//p' <<<"$out")"
+    marker="$(sed -n 's/^notice_marker=//p' <<<"$out")"
+    notice_due="$(sed -n 's/^notice_due=//p' <<<"$out")"
+    notice_days="$(sed -n 's/^notice_days=//p' <<<"$out")"
+    [ -n "$state" ] && [ -n "$head" ] && [ -n "$branch" ] && [ -n "$fork" ] && [ -n "$items" ] \
+        || die "fixup-check answered without a state, head, branch, fork or items; refusing to act on that"
+
+    # Who is acting. The same rule as the merge gate: a write that succeeds
+    # under the wrong account is worse than one that fails.
+    gh auth switch --hostname github.com --user "$MAINTAINER_ACCOUNT" >/dev/null 2>&1
+    local me me_id me_login
+    me="$(gh api user --jq '[.id,.login]|@tsv' 2>/dev/null)" || die "gh could not confirm an account"
+    me_id="${me%%$'\t'*}"; me_login="${me#*$'\t'}"
+    case "$me_id" in ''|*[!0-9]*) die "gh did not return a numeric account id" ;; esac
+    [ "${me_login,,}" = "${MAINTAINER_ACCOUNT,,}" ] || die "gh is authenticated as '$me_login', not $MAINTAINER_ACCOUNT"
+
+    if [ "$state" = notice ]; then
+        local kinds; kinds="$(tr ' ' '\n' <<<"$items" | sed 's/:.*//' | paste -sd, - | sed 's/,/, /g')"
+        local body; body="$(printf 'This has had no reply for %s days since my review, and what is left is mechanical (%s).\n\nI will push a fixup for it to your branch after %s unless you push first. Your commits stay yours, and I will credit you on anything I add. If you would rather do it yourself, push or reply and I will leave it alone.\n\n%s\n' \
+            "$(sed -n 's/^review_age=//p' <<<"$out")" "$kinds" "$notice_due" "$marker")"
+        if [ "$dry" = 1 ]; then
+            say "would post this heads-up on #$pr (ripe after $notice_due, $notice_days days):"
+            printf '%s\n' "$body" | sed 's/^/    /'
+            return 0
+        fi
+        local nf; nf="$(mktemp "${MAINTAINER_STATE:?}/fixup-notice.XXXXXX")" || die "no scratch file"
+        printf '%s' "$body" > "$nf"
+        gh pr comment "$pr" --repo "$REPO_SLUG" --body-file "$nf" >/dev/null 2>&1; local rc=$?
+        rm -f "$nf"
+        [ "$rc" = 0 ] || die "could not post the heads-up on #$pr"
+        # Posting is not the same as it being there. Ask again: the heads-up
+        # must now be on the pull request and counted, or nothing was said.
+        local again; again="$(python3 "$here/maintainer" fixup-check "$pr" 2>&1)"
+        grep -qE 'heads-up is not ripe|^state=ready$' <<<"$again" \
+            || die "posted the heads-up but could not read it back on #$pr, so I cannot say the author was told"
+        say "posted the heads-up on #$pr; a fixup may follow after $notice_due"
+        return 0
+    fi
+
+    # Past this point a push is possible. A scratch clone, never REPO_PATH.
+    local work; work="$(mktemp -d "${MAINTAINER_STATE:?}/fixup-XXXXXX")" || die "no scratch directory"
+    # shellcheck disable=SC2064
+    trap "rm -rf '$work'" EXIT
+    local url="https://github.com/$fork.git" burl="https://github.com/$REPO_SLUG.git"
+    export GIT_TERMINAL_PROMPT=0 GIT_EDITOR=true
+    # -c core.hooksPath=/dev/null on every command: a hook is contributor-
+    # controlled text the moment it is in the tree, and this runs git only.
+    g() { git -C "$work/r" -c core.hooksPath=/dev/null -c commit.gpgsign=false -c core.fsmonitor=false "$@"; }
+    git -c core.hooksPath=/dev/null clone -q --no-tags --branch "$branch" --single-branch -- "$url" "$work/r" 2>/dev/null \
+        || die "could not clone $fork $branch"
+    [ "$(g rev-parse HEAD)" = "$head" ] \
+        || die "$branch has moved since the check (now $(g rev-parse --short HEAD), checked $head); nothing was pushed"
+    local committer="$me_login <$me_id+$me_login@users.noreply.github.com>"
+    export GIT_COMMITTER_NAME="$me_login" GIT_COMMITTER_EMAIL="$me_id+$me_login@users.noreply.github.com"
+    export GIT_AUTHOR_NAME="$me_login" GIT_AUTHOR_EMAIL="$me_id+$me_login@users.noreply.github.com"
+    local rewriting=0 it kind
+    for it in $items; do
+        kind="${it%%:*}"
+        if [ "$kind" = rebase ]; then
+            rewriting=1
+            g remote add base "$burl"
+            g fetch -q base "$base" 2>/dev/null || die "could not fetch $base from $REPO_SLUG"
+            if ! g rebase -q "refs/remotes/base/$base" >/dev/null 2>&1; then
+                g rebase --abort >/dev/null 2>&1
+                die "the rebase onto $base conflicts. Resolving conflicts is not automated; nothing was pushed"
+            fi
+        fi
+    done
+    local nonrebase; nonrebase="$(tr ' ' '\n' <<<"$items" | sed 's/:.*//' | grep -v '^rebase$' | sort -u | paste -sd, - | sed 's/,/, /g')"
+    if [ -n "$nonrebase" ]; then
+        [ -n "$patch" ] && [ -f "$patch" ] || die "no patch for: $nonrebase"
+        g apply --check "$patch" >/dev/null 2>&1 || die "the patch does not apply to $branch after any rebase; nothing was pushed"
+        g apply --index "$patch" >/dev/null 2>&1 || die "git apply failed on the patch; nothing was pushed"
+        if grep -q 'test-count' <<<"$items"; then
+            # A count is derived by the profile's own command, from the tree the
+            # fixup would leave, never typed by a person or a model.
+            [ -n "${FIXUP_COUNT_CMD:-}" ] \
+                || die "this profile declares no FIXUP_COUNT_CMD, so a test count would be typed rather than derived"
+            local n; n="$(cd "$work/r" && env -u GH_TOKEN -u GITHUB_TOKEN timeout 120 bash -c "$FIXUP_COUNT_CMD" 2>/dev/null | tr -d '[:space:]')"
+            case "$n" in ''|*[!0-9]*) die "FIXUP_COUNT_CMD did not print a whole number, so no count could be derived" ;; esac
+            g diff --cached -U0 | grep -E '^\+[^+]' | grep -Eq "(^|[^0-9])$n([^0-9]|\$)" \
+                || die "the patch does not state $n, the count FIXUP_COUNT_CMD derives; a typed count is refused"
+        fi
+        local au; au="$(gh api "users/$author" --jq '[.id,.login]|@tsv' 2>/dev/null)" || die "could not look up $author"
+        local au_id="${au%%$'\t'*}" au_login="${au#*$'\t'}"
+        case "$au_id" in ''|*[!0-9]*) die "gh did not return a numeric id for $author" ;; esac
+        [ "${au_login,,}" = "${author,,}" ] || die "the API answered for '$au_login', not $author"
+        local -a so=()
+        g log -n 50 --format=%B "$head" | grep -q '^Signed-off-by:' && so=(-s)
+        g commit -q "${so[@]}" -m "fixup: $nonrebase from the review" \
+            -m "Co-authored-by: $au_login <$au_id+$au_login@users.noreply.github.com>" >/dev/null 2>&1 \
+            || die "could not commit the patch"
+    fi
+    local new; new="$(g rev-parse HEAD)"
+    [ "$new" != "$head" ] || die "the fixup would change nothing on $branch"
+
+    say "plan: $items on $fork $branch, $(g rev-parse --short "$head") -> $(g rev-parse --short "$new"), as $committer"
+    if [ "$dry" = 1 ]; then
+        [ "$rewriting" = 1 ] && say "the branch would be rewritten (force-with-lease against $head)"
+        g show --stat --patch --format=%B HEAD | sed 's/^/    /'
+        say "rehearsal: nothing was pushed"
+        return 0
+    fi
+
+    # A rewrite is leased against the head that was checked, so a push made
+    # while this ran is never overwritten. Adding a commit is a plain push and
+    # refuses by itself when the branch moved.
+    if [ "$rewriting" = 1 ]; then
+        g push -q --force-with-lease="refs/heads/$branch:$head" "$url" "HEAD:refs/heads/$branch" 2>/dev/null \
+            || die "the push was refused (the branch moved, or the lease failed); nothing was overwritten"
+    else
+        g push -q "$url" "HEAD:refs/heads/$branch" 2>/dev/null \
+            || die "the push was refused (the branch moved); nothing was overwritten"
+    fi
+    # Success is what the pull request reports, not what the push returned.
+    local got="" tries="$GH_TRIES" i
+    for ((i = 1; i <= tries; i++)); do
+        got="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid 2>/dev/null)"
+        [ "$got" = "$new" ] && break
+        [ "$i" -lt "$tries" ] && sleep "$GH_BACKOFF"
+    done
+    [ "$got" = "$new" ] \
+        || die "pushed $new but #$pr reports ${got:-nothing} as its head: NOT confirmed, look at it before anything else"
+    say "fixup pushed to $fork $branch; #$pr is now at $new (read back from GitHub)"
+}
+
 case "${1:-}" in
     prune)         shift; cmd_prune "$@" ;;
     release-check) shift; cmd_release_check "$@" ;;
-    *) printf 'usage: maintainer-repo {prune [--dry-run]|release-check}\n' >&2; exit 64 ;;
+    fixup)         shift; cmd_fixup "$@" ;;
+    *) printf 'usage: maintainer-repo {prune [--dry-run]|release-check|fixup <pr> [--dry-run]}\n' >&2; exit 64 ;;
 esac
