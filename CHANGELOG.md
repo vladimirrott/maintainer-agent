@@ -52,6 +52,12 @@ middle digit.
   expires-in; expired ones marked and ignored). An interactive `lease take`
   while a run is live warns with the run id and `maintainer abort`, and still
   takes: runs yield to interactive work.
+- **`gc` prunes old leases and the doctor flags forgotten ones.** `maintainer
+  gc` removes a PR lease that expired longer ago than `RETENTION_DAYS`, never a
+  live one, the run lease, or a file it cannot read. `maintainer-doctor` warns
+  about a lease last renewed more than `DOCTOR_LEASE_HOURS` ago (new default,
+  12), naming the PRs and the `lease release` command; an unreadable lease is a
+  warning, never a pass.
 - **`lib/defaults.env`: one home for every tunable.** Defaults were literals
   scattered through `bin/` and `lib/`, some written twice (container memory in
   two `podman run` calls, the stale window in the code and in a prompt). Each

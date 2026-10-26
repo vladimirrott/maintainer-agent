@@ -43,6 +43,7 @@ same file, so a number is changed in one place.
 | `DOCTOR_RUN_LIMIT` | 40 | workflow runs `maintainer-doctor` reads to decide whether `main` is red |
 | `DENY_WALL_MIN_RULES` | 100 | fewest rules a rendered deny wall may hold before the doctor calls it stale |
 | `LEASE_TTL_SECONDS` | 3600 | seconds a `maintainer lease take` holds a pull request when `--ttl` is not given. An unrenewed lease frees itself after this long |
+| `DOCTOR_LEASE_HOURS` | 12 | hours since a lease was last renewed before `maintainer-doctor` warns that it was forgotten |
 | `OPENCODE_MODEL` | groq/openai/gpt-oss-120b | model the opencode backend uses when the profile names a Claude model |
 
 Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and read

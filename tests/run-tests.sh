@@ -8809,6 +8809,56 @@ grep -q '^run-lease review' "$lk/helper.log" && [ "$rc" = 1 ] \
     && ok "positive control: a run refused at the identity gate had already written its lease" \
     || bad "the early-exit case never got past the lock (rc=$rc): $(tail -3 "$lk/run2.out")"
 [ ! -e "$lk/state/leases/run.json" ] && ok "and an exit that early still removes it" || bad "a run refused at the identity gate left leases/run.json behind"
+echo "== leases are pruned by gc and flagged by the doctor when they are forgotten =="
+# gc: a lease expired longer ago than the retention window is clutter. A live one,
+# and one that expired recently, are not.
+lgc="$stub_dir/leasegc"; rm -rf "$lgc"; mkdir -p "$lgc/leases"
+now_s="$(date +%s)"
+mklease() {  # $1 = file, $2 = seconds since renewed, $3 = ttl
+    printf '{"holder":"interactive","kind":"interactive","note":"","acquired":1,"renewed":%s,"ttl_seconds":%s}\n' "$(( now_s - $2 ))" "$3" > "$1"; }
+mklease "$lgc/leases/pr-1.json" $(( 5*86400 )) 3600       # expired about 5 days ago
+mklease "$lgc/leases/pr-2.json" 7200 3600                 # expired two hours ago
+mklease "$lgc/leases/pr-3.json" 60 3600                   # live
+printf '{"task":"review","pid":1,"renewed":1,"ttl_seconds":1}\n' > "$lgc/leases/run.json"
+lgcrun() { MAINTAINER_RETENTION_DAYS=2 MAINTAINER_STATE="$lgc" MAINTAINER_SLUG=o/r MAINTAINER_REPO=/tmp \
+    MAINTAINER_ACCOUNT=t MAINTAINER_PROFILE=gc python3 "$root/bin/maintainer" gc "$@" 2>&1; }
+out="$(lgcrun --dry-run)"
+grep -q 'would remove.*pr-1.json' <<<"$out" && [ -f "$lgc/leases/pr-1.json" ] \
+    && ok "gc --dry-run names a lease expired past the window and removes nothing" || bad "gc --dry-run on leases: $out"
+lgcrun >/dev/null
+[ ! -e "$lgc/leases/pr-1.json" ] && ok "gc removes a lease that expired longer ago than RETENTION_DAYS" || bad "gc kept a long-expired lease"
+[ -f "$lgc/leases/pr-2.json" ] && ok "and keeps one that expired recently" || bad "gc removed a lease that expired two hours ago"
+[ -f "$lgc/leases/pr-3.json" ] && ok "and a live one" || bad "gc removed a LIVE lease"
+[ -f "$lgc/leases/run.json" ] && ok "and never touches the run lease" || bad "gc removed leases/run.json"
+printf '{junk' > "$lgc/leases/pr-4.json"; touch -d '30 days ago' "$lgc/leases/pr-4.json"
+lgcrun >/dev/null
+[ -f "$lgc/leases/pr-4.json" ] && ok "a lease gc cannot read is left for a person, not deleted" || bad "gc deleted a lease it could not read"
+
+# The doctor: a lease last renewed longer ago than DOCTOR_LEASE_HOURS is forgotten.
+grep -q '^DOCTOR_LEASE_HOURS=' "$root/lib/defaults.env" && ok "the doctor's lease threshold has a declared default" \
+    || bad "no DOCTOR_LEASE_HOURS in lib/defaults.env"
+dlh="$stub_dir/leasedoc"; rm -rf "$dlh"
+mkdir -p "$dlh/.local/share/maintainer/profiles/p" "$dlh/.local/bin" "$dlh/state/leases"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+make_stub gh 'exit 0'
+mklease "$dlh/state/leases/pr-31.json" $(( 30*3600 )) 3600
+mklease "$dlh/state/leases/pr-32.json" 3600 3600
+ldoc() { env PATH="$stub_dir:$PATH" HOME="$dlh" MAINTAINER_PROFILE=p "$@" bash "$root/bin/maintainer-doctor" --quick 2>&1; }
+dout="$(ldoc)"
+grep -q 'warn.*lease.*#31' <<<"$dout" && ok "doctor warns about a lease last renewed 30h ago" || bad "doctor missed a 30h-old lease: $(grep -i lease <<<"$dout")"
+grep -q '#32' <<<"$(grep -i 'lease' <<<"$dout")" && bad "doctor flagged a lease renewed an hour ago" || ok "and not one renewed an hour ago"
+grep -q 'lease release 31' <<<"$dout" && ok "and says how to clear it" || bad "the warning names no fix"
+grep -qi 'warn.*lease.*#31' <<<"$(ldoc MAINTAINER_DOCTOR_LEASE_HOURS=100)" \
+    && bad "MAINTAINER_DOCTOR_LEASE_HOURS=100 did not move the threshold" || ok "MAINTAINER_DOCTOR_LEASE_HOURS moves the threshold"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\nDOCTOR_LEASE_HOURS=100\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+grep -qi 'warn.*lease.*#31' <<<"$(ldoc)" && bad "the profile's DOCTOR_LEASE_HOURS was ignored" || ok "and so does the profile"
+printf 'REPO_SLUG="o/r"\nSTATE_DIR="%s/state"\n' "$dlh" > "$dlh/.local/share/maintainer/profiles/p/profile.env"
+printf '{junk' > "$dlh/state/leases/pr-33.json"
+grep -q 'warn.*lease.*#33' <<<"$(ldoc)" && ok "a lease file the doctor cannot read is a warning too, never a pass" \
+    || bad "an unreadable lease passed the doctor: $(ldoc | grep -i lease)"
+rm -f "$dlh/state/leases/"pr-*.json
+grep -q 'ok.*no lease' <<<"$(ldoc)" && ok "with nothing forgotten the doctor says so" || bad "no all-clear for leases: $(ldoc | grep -i lease)"
+rm -f "$stub_dir/gh"
 # --- branch Y: leases (end) -----------------------------------------------------
 
 if [ "$skip" -gt 0 ]; then

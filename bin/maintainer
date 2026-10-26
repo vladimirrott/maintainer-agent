@@ -851,6 +851,22 @@ def cmd_gc(dry: bool) -> None:
                 else:
                     entry.unlink(missing_ok=True)
                 print(f"  removed  {entry.relative_to(ROOT)}  ({size} bytes)")
+    # A lease that expired longer ago than the window is clutter. A live one, a
+    # recent expiry, the run lease and a file that cannot be read are all left.
+    for f in sorted(LEASES.glob("pr-*.json")) if LEASES.exists() else []:
+        try:
+            if _lease_expires(json.loads(f.read_text())) >= cutoff:
+                continue
+            size = f.stat().st_size
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        n += 1
+        freed += size
+        if dry:
+            print(f"  would remove  {f.relative_to(ROOT)}  ({size} bytes)")
+        else:
+            f.unlink(missing_ok=True)
+            print(f"  removed  {f.relative_to(ROOT)}  ({size} bytes)")
     verb = "would free" if dry else "freed"
     print(f"maintainer: {verb} {freed} bytes across {n} item(s) older than {days} days; "
           f"{kept} bytes kept")
