@@ -21,6 +21,6 @@
 
 # The record
 
-- [110 lessons, each a defect and what found it](lessons.md)
+- [113 lessons, each a defect and what found it](lessons.md)
 - [The hard parts, and what they turned out to be](plan.md)
 - [Where everything goes](roadmap.md)

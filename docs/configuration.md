@@ -29,6 +29,7 @@ same file, so a number is changed in one place.
 | `MCP_VERIFY_SLACK` | 300 | seconds added to the MCP verify deadline, which is `2 x VERIFY_TIMEOUT + PREFETCH_TIMEOUT + slack` |
 | `LOCK_WAIT` | 3600 | seconds a run waits for the shared lock. Keep it below the unit's `TimeoutStartSec` (10800): the wait spends that budget, and the test suite fails if it reaches it |
 | `RETENTION_DAYS` | 90 | days `maintainer gc` keeps logs and drafts. `runs/` and `index.md` are never pruned |
+| `REPORT_MIN_LINES` | 3 | non-empty lines a run report needs below its heading before `finish` indexes it; `lib/preamble-core.md` asks a quiet run for exactly this many |
 | `CLAIM_STALE_DAYS` | 7 | days of silence after which `maintainer claims` marks a claim stale |
 | `STALE_HOLD_DAYS` | 9 | days of silence after which `maintainer stale` names a hold |
 | `GH_LIST_LIMIT` | 1000 | rows requested from a gh list that must be complete. A listing exactly this long is refused, because gh cuts silently at the limit |

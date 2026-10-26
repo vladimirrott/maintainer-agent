@@ -982,6 +982,32 @@ grep -qi 'eai_again\|reach the api' "$abrt/reason.txt" 2>/dev/null \
     || bad "the recorded cause carries no evidence: '$(cat "$abrt/reason.txt" 2>/dev/null)'"
 rm -f "$stub_dir/claude"; make_stub claude 'exit 0'
 
+echo "== a report that finish refuses is recorded as refused, not as missing =="
+# 2026-10-25: three magent runs were indexed "ABORTED, no report" while each
+# report existed. finish had refused them for length (#133), and the index line
+# sent the reader looking for a report that was sitting in runs/.
+cat > "$abrt/.local/bin/maintainer" <<'AEOF'
+#!/usr/bin/env bash
+case "$1" in
+  start) echo "=== maintainer 2031-05-06T07-08-review ==="; echo "context";
+         echo "write the run report to $MAINTAINER_STATE/runs/2031-05-06T07-08-review.md";;
+  finish) echo "maintainer: x.md has 2 non-empty line(s) below its heading, which is a fixture rather than a report. It is NOT being indexed." >&2; exit 1 ;;
+  abort) printf '%s\n' "$3" > "$ABORT_REASON_FILE"; exit 0 ;;
+  *) exit 0 ;;
+esac
+AEOF
+rm -rf "$abrt_state/logs"; : > "$abrt/reason.txt"
+PATH="$stub_dir:$abrt/.local/bin:$PATH" ABORT_REASON_FILE="$abrt/reason.txt" HOME="$abrt" \
+    MAINTAINER_NOTIFY=off MAINTAINER_SETTINGS="$gate_settings" MAINTAINER_STATE_DIR="$abrt_state" \
+    MAINTAINER_REPO_PATH="$abrt_repo" MAINTAINER_GH_TRIES=1 MAINTAINER_GH_BACKOFF=0 \
+    bash "$root/lib/run.sh" sysknife review >/dev/null 2>&1
+grep -q '^report refused' "$abrt/reason.txt" 2>/dev/null \
+    && ok "a refused report is indexed as refused" \
+    || bad "a report finish refused is indexed as missing: '$(cat "$abrt/reason.txt" 2>/dev/null)'"
+grep -q 'fixture rather than a report' "$abrt/reason.txt" 2>/dev/null \
+    && ok "and the index carries finish's own reason" \
+    || bad "the refused-report line drops finish's reason: '$(cat "$abrt/reason.txt" 2>/dev/null)'"
+
 echo "== when the gate blames its own container it says which line said so =="
 # The verdict was unfalsifiable. On 2026-09-21 a verify of sysknife#461 refused
 # with "the unmutated test failed on my suite environment", tailed five
@@ -6588,6 +6614,34 @@ trrun finish 2026-01-02T00-00-review >/dev/null 2>&1
 grep -q '2026-01-02T00-00-review' "$tr1/index.md" 2>/dev/null \
     && ok "a real report is still indexed" || bad "the fixture check refuses real reports"
 
+# The preamble's quiet-run instruction and finish's floor are one number. They
+# disagreed from 2026-09-04 to 2026-10-25 (#133): the preamble asked for two
+# lines, finish refused anything under three, and 12 of 32 magent runs aborted.
+min_lines="$(sed -n 's/^REPORT_MIN_LINES=//p' "$root/lib/defaults.env")"
+case "$min_lines" in ''|*[!0-9]*) bad "REPORT_MIN_LINES missing from lib/defaults.env: '$min_lines'"; min_lines=3 ;; esac
+grep -q "at least $min_lines non-empty lines" "$root/lib/preamble-core.md" \
+    && ok "the preamble asks a quiet run for the line count finish enforces ($min_lines)" \
+    || bad "the preamble's quiet-run report length is not REPORT_MIN_LINES=$min_lines"
+grep -qiE 'two-line report|one-line report' "$root/lib/preamble-core.md" \
+    && bad "the preamble still asks for a report finish will refuse" \
+    || ok "and no shorter report is asked for anywhere in it"
+{ printf '# 2026-01-05T00-00-review\n\n'; for i in $(seq 1 "$min_lines"); do printf 'line %s\n' "$i"; done; } \
+    > "$tr1/runs/2026-01-05T00-00-review.md"
+trrun finish 2026-01-05T00-00-review >/dev/null 2>&1
+grep -q '2026-01-05T00-00-review' "$tr1/index.md" 2>/dev/null \
+    && ok "a quiet report of exactly the asked length is indexed" \
+    || bad "finish refuses a report of exactly the length the preamble asks for"
+{ printf '# 2026-01-06T00-00-review\n\n'; for i in $(seq 2 "$min_lines"); do printf 'line %s\n' "$i"; done; } \
+    > "$tr1/runs/2026-01-06T00-00-review.md"
+trrun finish 2026-01-06T00-00-review >/dev/null 2>&1
+grep -q '2026-01-06T00-00-review' "$tr1/index.md" 2>/dev/null \
+    && bad "a report one line short of REPORT_MIN_LINES was indexed" \
+    || ok "and one line fewer is still refused"
+out="$(MAINTAINER_REPORT_MIN_LINES=1 trrun finish 2026-01-06T00-00-review)"
+grep -q '2026-01-06T00-00-review' "$tr1/index.md" 2>/dev/null \
+    && ok "finish reads its floor from REPORT_MIN_LINES, not a literal" \
+    || bad "finish ignores MAINTAINER_REPORT_MIN_LINES: $out"
+
 # 2. A run that died leaves an ABORTED line, not a gap. A gap reads as a run
 # that never started; 2026-09-03T07-52-review is the real case, and fifteen
 # comments went out under the same account in the hour after it.
@@ -7825,9 +7879,15 @@ done
 dr="$stub_dir/driftdocs"
 drift_fresh() { rm -rf "$dr"; mkdir -p "$dr"
     cp -r "$root/bin" "$root/lib" "$root/docs" "$root/profiles" "$root/scripts" "$root/platform" "$dr/"
-    cp "$root/README.md" "$root/CONTRIBUTING.md" "$root/CHANGELOG.md" "$root/install.sh" "$root/new-profile.sh" "$dr/"; }
+    cp "$root/README.md" "$root/CONTRIBUTING.md" "$root/CHANGELOG.md" "$root/install.sh" "$root/new-profile.sh" "$dr/"
+    drift_pristine="$(drift_sum)"; }
+drift_sum() { (cd "$dr" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum); }
 # drift_bites <check> <regex the failure must contain> <label>
 drift_bites() {
+    # A mutation that matched nothing leaves the copy pristine, and a check
+    # that passes on a pristine tree reads exactly like one that missed the
+    # mutation. The lesson-count cases did that when lessons went 110 -> 113.
+    if [ "$(drift_sum)" = "$drift_pristine" ]; then bad "$3: the mutation did not apply, so nothing was tested"; return; fi
     local out; out="$(python3 "$chk" --root "$dr" --only "$1" 2>&1)"; local rc=$?
     [ "$rc" != 0 ] && grep -qE "FAIL \[$1\].*$2" <<<"$out" \
         && ok "$3" || bad "$3 (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-200)"
@@ -7870,15 +7930,16 @@ drift_fresh; sed -i 's/^Four, and they are \*\*not\*\*/Three, and they are **not
 drift_bites readme-counts 'backends' "a README backend count that disagrees with lib/backends is caught"
 drift_fresh; cp "$dr/lib/backends/codex.sh" "$dr/lib/backends/zz.sh"
 drift_bites readme-counts 'backends' "adding a backend without updating the README is caught"
-drift_fresh; sed -i 's/has the 110 entries/has the 25 entries/' "$dr/README.md"
+drift_fresh; sed -i 's/has the [0-9]* entries/has the 25 entries/' "$dr/README.md"
 drift_bites readme-counts 'lessons' "a README lesson count that disagrees with docs/lessons.md is caught"
-drift_fresh; sed -i 's/is 110 entries/is forty-one entries/' "$dr/CONTRIBUTING.md"
+drift_fresh; sed -i 's/is [0-9]* entries/is forty-one entries/' "$dr/CONTRIBUTING.md"
 drift_bites readme-counts 'lessons' "CONTRIBUTING's lesson count is held too, in words as well as digits"
-drift_fresh; sed -i 's/\[110 lessons,/[Thirty-six lessons,/' "$dr/docs/SUMMARY.md"
+drift_fresh; sed -i 's/\[[0-9]* lessons,/[Thirty-six lessons,/' "$dr/docs/SUMMARY.md"
 drift_bites readme-counts 'lessons' "and so is the book's table of contents"
 drift_fresh; sed -i 's/^## 50\. /## 51. /' "$dr/docs/lessons.md"
 drift_bites readme-counts 'out of order' "a gap in the lesson numbering is caught, since the count would be a guess"
-drift_fresh; printf '\n## 111. a lesson the counts do not know about\n' >> "$dr/docs/lessons.md"
+drift_fresh; printf '\n## %s. a lesson the counts do not know about\n' \
+    "$(( $(grep -c '^## [0-9]*\. ' "$dr/docs/lessons.md") + 1 ))" >> "$dr/docs/lessons.md"
 drift_bites readme-counts 'lessons' "a new lesson entry makes every stated count stale until they are updated"
 drift_fresh; sed -i 's/^POST="${MAINTAINER_POST:-on}"/POST="${MAINTAINER_POST:-off}"/' "$dr/profiles/magent/profile.env"
 drift_bites readme-profiles 'magent' "a profile whose POST default disagrees with the README table is caught"

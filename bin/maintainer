@@ -1968,12 +1968,13 @@ def cmd_finish(run_id: str) -> None:
     # The bar is deliberately low. A real report has a heading and some prose;
     # anything under it was not written by a run that did work.
     body = [ln for ln in report.read_text().splitlines()[1:] if ln.strip()]
-    if len(body) < 3:
+    min_lines = int(_tunable("REPORT_MIN_LINES"))
+    if len(body) < min_lines:
         raise SystemExit(
             f"maintainer: {report} has {len(body)} non-empty line(s) below its heading, "
             f"which is a fixture rather than a report. It is NOT being indexed.\n"
-            f"            If a run genuinely found nothing, say that in three lines: what "
-            f"you looked at, what you found, and what you decided not to do.")
+            f"            If a run genuinely found nothing, say that in at least {min_lines} "
+            f"lines: what you looked at, what you found, and what you decided not to do.")
     # Idempotent: both the agent and run.sh call this, and a run counted twice is
     # a wrong audit trail just as surely as a run counted zero times.
     if INDEX.exists() and f"`{run_id}`" in INDEX.read_text():
