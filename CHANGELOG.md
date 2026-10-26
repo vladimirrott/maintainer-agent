@@ -32,8 +32,30 @@ middle digit.
   stop, naming `MAINTAINER_GH_LIST_LIMIT`, when a listing comes back exactly
   that long. The merged-PR contributor scan stays a window.
 
+- **`scripts/check_drift.py` holds the documentation to the code.** Seven
+  checks, each proved by planting its defect in a copy of the tree: every verb
+  the code dispatches is in `--help` and in `docs/cli.md` (the command table
+  for what a person types, the `Called by run.sh` section for the rest), every
+  key in `lib/defaults.env` has a row in `docs/configuration.md` with the same
+  default, every `MAINTAINER_*` name the code reads is documented, every
+  `docs/*.md` path a message names exists, the README's backend count and the
+  lesson counts in the README, CONTRIBUTING and the book agree with the tree,
+  the README's Posts column matches each `profile.env`, and every CHANGELOG
+  version has a link at the foot. The pre-commit hook, CI and the test suite
+  run it.
+
 ### Fixed
 
+- **The documentation matches the code again.** The README said three backends
+  (four exist), "twenty-five" lessons beside 110, and described `magent` as
+  running at `POST=off` while its profile posts; the book called lessons
+  "thirty-six defects" and CONTRIBUTING "forty-one". `docs/verifying.md` and
+  `docs/release.md`, named in five places in the code, did not exist: both are written.
+  `docs/cli.md` described `maintainer log` as the run's log (it prints the run
+  index), omitted `run --show-prompt`, `verify-deps`, `verify-part` and the
+  `[suite]` argument, and the CHANGELOG's links stopped at 0.4.1. Twenty-odd
+  environment variables the code reads were documented nowhere; they are in
+  `docs/configuration.md`.
 - **`maintainer --help` lists every verb and works with no profile chosen.** The
   docstring listed seven of twenty-two verbs, and `--help` was not handled: it
   printed to stderr with exit 1, and with two profiles deployed it died in
@@ -1149,7 +1171,14 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.7.2...HEAD
+[0.7.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.2
+[0.7.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.1
+[0.7.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.0
+[0.6.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.2
+[0.6.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.1
+[0.6.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.6.0
+[0.5.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.5.0
 [0.4.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.1
 [0.4.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.4.0
 [0.3.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.3.0

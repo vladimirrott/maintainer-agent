@@ -4,7 +4,9 @@ Five commands. Everything a person types is here; the subcommands `run.sh` calls
 on your behalf are listed at the bottom and are not meant to be typed.
 
 Every command reads the profile named by `MAINTAINER_PROFILE`, and refuses
-rather than guessing when more than one profile is deployed.
+rather than guessing when more than one profile is deployed. `maintainer --help`
+needs no profile: it prints every verb, from the table the command dispatches
+on. Defaults and the environment variables are in [Configuration](configuration.md).
 
 ## `maintainer`
 
@@ -12,7 +14,7 @@ rather than guessing when more than one profile is deployed.
 |---|---|
 | `maintainer status` | the front door: which version is deployed, which profile, whether it posts, what ran, what is due, what failed, and what it has spent |
 | `maintainer version` | the deployed version and commit, and whether your checkout has moved ahead of it |
-| `maintainer run <task>` | run one task now, through the same orchestrator the timer uses |
+| `maintainer run [--show-prompt] <task>` | run one task now, through the same orchestrator the timer uses. `--show-prompt` prints the prompt the run would send and starts nothing |
 | `maintainer screen <pr>` | may this pull request be executed on this host? Fails closed on anything it cannot classify |
 | `maintainer digest <run-id> [--compact]` | what one run did and what it cost |
 | `maintainer audit [run-id\|--all]` | compare a run's report against the transcript of what actually ran |
@@ -26,7 +28,7 @@ rather than guessing when more than one profile is deployed.
 | `maintainer holders <issue>` | who the maintainer has pointed at one issue and not released, one handle per line. `maintainer-merge` calls this before merging a PR that closes an issue, so the gate and `offers` share one derivation instead of two |
 | `maintainer file-issue --title T --body-file F [--fingerprint FP] [--label L] [--dry-run]` | file one tracker issue for a finding, deduplicated by fingerprint. The only path issue creation takes; a bare `gh issue create` is denied. `--dry-run`, or `POST=off`, rehearses. An unreadable tracker stops it, since it cannot tell whether the finding is already filed |
 | `maintainer gc [--dry-run]` | prune logs and drafts past `RETENTION_DAYS`. Never touches `runs/` or `index.md` |
-| `maintainer log [n]` | the last n lines of the current run's log |
+| `maintainer log [n]` | the last n lines of the run index (`index.md`), default 10: one line per finished run. A run's own log is under the state directory's `logs/` |
 
 ## `maintainer-merge`
 
@@ -34,7 +36,9 @@ The only path to a merge.
 
 | command | what it does |
 |---|---|
-| `maintainer-merge verify <pr> <sha> <filter> <sed>` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit |
+| `maintainer-merge verify <pr> <sha> <filter> <sed> [suite]` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit. `suite` names a `verify.d` suite when the paths do not pick one; see [Verifying](verifying.md) |
+| `maintainer-merge verify-deps <pr> <sha>` | the receipt for a pull request that only bumps dependencies or pins: there is no guard to mutate, so the diff is classified and its pins and image digests are checked |
+| `maintainer-merge verify-part <pr> <sha> <filter> <sed> <suite>` | one suite's share of a diff no single suite covers. `merge` checks that the parts add up to every production path |
 | `maintainer-merge merge <pr>` | merge, if every condition holds. See the table in the README |
 | `maintainer-merge show [pr]` | print a recorded receipt |
 | `maintainer-merge receipt <pr> <sha> <proof>` | record a human's claim. Refused inside an unattended run, and a run may not merge on one |
@@ -44,7 +48,7 @@ The only path to a merge.
 | command | what it does |
 |---|---|
 | `maintainer-repo prune [--dry-run]` | delete branches merged into main, local and remote. Never a branch with an open PR |
-| `maintainer-repo release-check` | whether a release is owed and which digit moves, read from the CHANGELOG |
+| `maintainer-repo release-check` | whether a release is owed and which digit moves, read from the CHANGELOG. See [Releases](release.md) |
 
 ## `maintainer-doctor`
 

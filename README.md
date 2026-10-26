@@ -220,7 +220,7 @@ worse than none: it reads as a guarantee.
 
 ## Backends
 
-Three, and they are **not** interchangeable. The difference is containment, and
+Four, and they are **not** interchangeable. The difference is containment, and
 it is the reason there is a default.
 
 | | opencode | Claude Code | Codex | Cursor |
@@ -363,14 +363,18 @@ each one asks you to trust.
 One machine, six user timers, two profiles, both posting to GitHub as
 `vladimirrott`.
 
-| Profile | Repository | Tasks | Cadence |
-|---|---|---|---|
-| `sysknife` | [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife) | `review` | twice a day |
-| | | `issues` | every 2 days |
-| | | `ci` | every 3 days |
-| | | `audit` | every 5 days |
-| `magent` | this repository | `review` | daily |
-| | | `issues` | every 2 days |
+| Profile | Repository | Posts | Tasks | Cadence |
+|---|---|---|---|---|
+| `sysknife` | [`lacs-project/sysknife`](https://github.com/lacs-project/sysknife) | on | `review` | twice a day |
+| | | | `issues` | every 2 days |
+| | | | `ci` | every 3 days |
+| | | | `audit` | every 5 days |
+| `magent` | this repository | on | `review` | daily |
+| | | | `issues` | every 2 days |
+
+The Posts column is each profile's `POST` default, and a test holds it to
+`profile.env`. At `on` the deny wall still blocks `gh pr merge`, push, release
+and tag: a merge goes through `maintainer-merge` or not at all.
 
 Both `magent` timers are enabled, `maintainer@magent-review.timer` and
 `maintainer@magent-issues.timer`, so this repository's tracker has two
@@ -424,7 +428,8 @@ fixture.
 ```
 
 `profiles/magent/` is the worked second profile: this repository maintaining
-itself, at `POST=off`. Scaffolding it found three defects in the first five
+itself. It ran at `POST=off` for a rehearsal period and posts now, as the table
+above says. Scaffolding it found three defects in the first five
 minutes, which is the argument for doing it rather than describing it.
 `maintainer status` for a second profile printed that profile's name above the
 *first* profile's repository and run history; `new-profile.sh` wrote an absolute
@@ -575,7 +580,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the twenty-five entries that reached
+[`docs/lessons.md`](docs/lessons.md) has the 110 entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -603,12 +608,13 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 1078 offline tests
+./tests/run-tests.sh        # 1112 offline tests
 ./evals/run-evals.sh        # 9 eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
+./scripts/check_drift.py    # the docs agree with the code
 ```
 
-1078 offline tests: no network, no GitHub, no model call. Every case tests a
+1112 offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt
@@ -633,6 +639,12 @@ scorecard**. The last two are skipped while the repository is private, because
 code scanning needs Advanced Security there and the scorecard reads branch
 protection. Skipping is stated in the workflow; pretending to scan would be
 worse than not scanning.
+
+`scripts/check_drift.py` holds the prose to the code: every verb is in `--help` and
+`docs/cli.md`, every default and `MAINTAINER_*` variable is in
+`docs/configuration.md`, every `docs/*.md` a message names exists, and the
+backend and lesson counts match the tree. Each check was proved by planting its
+defect in a copy.
 
 `scripts/check_claims.sh` holds this README's numbers to the tree, the same way
 the target repository holds its published test count to an evidence artifact. If

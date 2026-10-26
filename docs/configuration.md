@@ -43,3 +43,48 @@ same file, so a number is changed in one place.
 Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and read
 it through `$KEY` in bash (after `maintainer_load_defaults`) or `_tunable("KEY")`
 in `bin/maintainer`. Never write the number at the call site.
+
+## Environment variables that are not defaults
+
+Every name below is read by the code. A test fails when the code reads a
+`MAINTAINER_*` name this page does not list.
+
+**You set these**, for one invocation or in your shell:
+
+| variable | what it does |
+|---|---|
+| `MAINTAINER_PROFILE` | which deployed profile a command acts on. Required when more than one is deployed |
+| `MAINTAINER_FORCE` | `1` skips the cadence gate in `run.sh` for one run. It is unset before the agent starts |
+| `MAINTAINER_POST` | `on` or `off`, overriding the profile's `POST` for one run |
+| `MAINTAINER_NOTIFY` | `off` silences desktop notifications |
+| `MAINTAINER_ALERT_CMD` | a shell command `run.sh` runs on every failure alert, after the failure marker and the desktop popup, for ntfy, mail or a webhook. The message arrives as `$1`; it also sees `MAINTAINER_ALERT_TASK` and `MAINTAINER_ALERT_LOG`. Its own failure is logged and never fatal |
+| `MAINTAINER_UNINSTALL_YES` | `1` lets `install.sh --uninstall` proceed while timers are enabled |
+| `MAINTAINER_CARGO_JOBS` | cargo's job count in the sysknife rust suite. Overrides the suite's `suite_jobs` |
+| `MAINTAINER_SHELL_IMAGE` | the image the sysknife shell suite runs in. The test suite points it at a registry image |
+| `MAINTAINER_RECEIPT_KEY` | path of the receipt signing key. Default: `~/.local/share/maintainer/receipt.key` |
+| `MAINTAINER_IMAGE_RESOLVER` | the script `verify-deps` asks what an image tag resolves to. Default: `scripts/resolve_image_digest.py` |
+| `MAINTAINER_FAILURE_SHAPES` | path of the failure-classification table. Default: `lib/failure-shapes.json` |
+| `MAINTAINER_SETTINGS` | the permission file the backend uses (the claude settings or the opencode config), replacing the profile's own. `run.sh` sets it itself to swap in the rehearsal wall |
+| `MAINTAINER_THINKING` | thinking-token budget for the claude backend when the profile sets no `THINKING_<task>` |
+| `MAINTAINER_CURSOR_DIR` | directory of the cursor backend's configuration |
+| `MAINTAINER_BACKEND` | overrides `BACKEND` in a profile that reads it (the shipped ones do) |
+| `MAINTAINER_PROSE_STYLE` | `raw` turns the prose discipline off, for debugging a prompt |
+| `MAINTAINER_REPO_PATH`, `MAINTAINER_REPO_ORIGIN`, `MAINTAINER_STATE_DIR` | where a profile's review checkout lives, where it is cloned from, and where runs are recorded |
+| `MAINTAINER_<KEY>` | any key in the table above |
+
+**`run.sh` sets these** for the tools it calls, so a tool called from inside a run
+acts on that run's repository and nothing else. Setting them by hand is how a
+tool is pointed at the wrong project:
+
+| variable | what it carries |
+|---|---|
+| `MAINTAINER_SLUG`, `MAINTAINER_REPO`, `MAINTAINER_STATE`, `MAINTAINER_ACCOUNT` | the profile's `REPO_SLUG`, `REPO_PATH`, `STATE_DIR` and `GH_ACCOUNT` |
+| `MAINTAINER_TASK`, `MAINTAINER_TASKS`, `MAINTAINER_SKILL` | the task being run, the profile's task list, the skill that task loads |
+| `MAINTAINER_IN_RUN` | `<profile>/<task>`. A tool that sees it refuses to start another run, and `maintainer-merge` refuses an `asserted` receipt |
+| `MAINTAINER_SCRIPTS` | the directory holding `scripts/` |
+| `MAINTAINER_VERSION`, `MAINTAINER_COMMIT` | the deployed build, stamped into the run report |
+| `MAINTAINER_ALERT_TASK`, `MAINTAINER_ALERT_LOG` | which run an alert is about, and its log |
+| `MAINTAINER_SCRUB_NEEDLE` | the secret the exit-time scrub removes from the run's files. It travels in the environment, never in argv |
+
+**A profile key spelled like one:** `MAINTAINER_NAME` in `profile.env` is the
+maintainer's name, written into the doctrine as `__MAINTAINER__`.

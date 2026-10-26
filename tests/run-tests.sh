@@ -7807,6 +7807,94 @@ mg_case="$(sed -n '/^_executed || return 0/,$p' "$root/bin/maintainer-merge" | g
     && ok "maintainer-merge's header lists the verbs its dispatcher takes ($mg_case)" \
     || bad "maintainer-merge's header says '$mg_head', its dispatcher takes '$mg_case'"
 
+echo "== the documentation is held to the code, by one checker =="
+# README said three backends while four existed, "twenty-five" lessons beside
+# 110, two docs the code names did not exist, and a dozen environment variables
+# nobody had written down. Each was found by hand. scripts/check_drift.py makes
+# the class a failure: the checks below run it on the real tree, then plant one
+# defect at a time in a copy and demand that the named check, and no other
+# reason, is what fails. A bare non-zero exit is not evidence: argparse exits
+# non-zero for a check it has never heard of.
+chk="$root/scripts/check_drift.py"
+for name in cli-verbs config-docs env-vars doc-paths readme-counts readme-profiles changelog-links; do
+    out="$(python3 "$chk" --root "$root" --only "$name" 2>&1)"; rc=$?
+    [ "$rc" = 0 ] && grep -q "ok: $name" <<<"$out" \
+        && ok "drift check '$name' passes on the tree" \
+        || bad "drift check '$name' fails or does not exist: $(printf '%s' "$out" | head -3 | tr '\n' ' ' | cut -c1-220)"
+done
+dr="$stub_dir/driftdocs"
+drift_fresh() { rm -rf "$dr"; mkdir -p "$dr"
+    cp -r "$root/bin" "$root/lib" "$root/docs" "$root/profiles" "$root/scripts" "$root/platform" "$dr/"
+    cp "$root/README.md" "$root/CONTRIBUTING.md" "$root/CHANGELOG.md" "$root/install.sh" "$root/new-profile.sh" "$dr/"; }
+# drift_bites <check> <regex the failure must contain> <label>
+drift_bites() {
+    local out; out="$(python3 "$chk" --root "$dr" --only "$1" 2>&1)"; local rc=$?
+    [ "$rc" != 0 ] && grep -qE "FAIL \[$1\].*$2" <<<"$out" \
+        && ok "$3" || bad "$3 (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-200)"
+}
+drift_fresh; sed -i '/^| `maintainer offer <issue>/d' "$dr/docs/cli.md"
+drift_bites cli-verbs 'offer' "a verb missing from the cli.md command table is caught"
+drift_fresh; sed -i 's/`start`, `finish`, `abort`, `failed`, `ok`/`start`, `finish`, `abort`, `failed`/' "$dr/docs/cli.md"
+drift_bites cli-verbs '\bok\b' "an internal verb missing from the run.sh section is caught"
+drift_fresh; sed -i '/^| `maintainer-merge verify-part/d' "$dr/docs/cli.md"
+drift_bites cli-verbs 'verify-part' "a maintainer-merge verb missing from cli.md is caught"
+drift_fresh; sed -i '/^| `maintainer-repo release-check`/d' "$dr/docs/cli.md"
+drift_bites cli-verbs 'release-check' "a maintainer-repo verb missing from cli.md is caught"
+drift_fresh; python3 - "$dr/bin/maintainer" <<'PYEOF'
+import sys
+p = sys.argv[1]; s = open(p).read()
+old = "for c in COMMANDS.values():\n            if c.internal != internal:"
+assert old in s
+open(p, "w").write(s.replace(old, "for c in list(COMMANDS.values())[1:]:\n            if c.internal != internal:"))
+PYEOF
+drift_bites cli-verbs 'status.*--help|--help.*status' "a verb --help does not print is caught"
+drift_fresh; sed -i 's/^| `maintainer gc \[--dry-run\]` |/| `maintainer frobnicate <x>` | invented |\n&/' "$dr/docs/cli.md"
+drift_bites cli-verbs 'frobnicate' "a command the docs describe and the code does not have is caught"
+drift_fresh; sed -i 's/^| `maintainer-merge show \[pr\]` |/| `maintainer-merge frob <pr>` | invented |\n&/' "$dr/docs/cli.md"
+drift_bites cli-verbs 'maintainer-merge frob' "a maintainer-merge row the dispatcher does not take is caught"
+drift_fresh; sed -i 's/        raise SystemExit(0)$/        raise SystemExit(1)/' "$dr/bin/maintainer"
+drift_bites cli-verbs 'exits 1' "a --help that exits non-zero is caught"
+drift_fresh; sed -i 's/^| `MAINTAINER_NOTIFY` |/| `MAINTAINER_NOTIFYX` |/' "$dr/docs/configuration.md"
+drift_bites env-vars 'MAINTAINER_NOTIFY' "an environment variable the code reads and no doc lists is caught"
+drift_fresh; printf '\n# reads ${MAINTAINER_ZZ_NEW:-}\nx="${MAINTAINER_ZZ_NEW:-}"\n' >> "$dr/lib/run.sh"
+drift_bites env-vars 'MAINTAINER_ZZ_NEW' "a new MAINTAINER_ variable in code is caught"
+drift_fresh; sed -i '/^| `GH_BACKOFF` |/d' "$dr/docs/configuration.md"
+drift_bites config-docs 'GH_BACKOFF' "a key in lib/defaults.env with no row in docs/configuration.md is caught"
+drift_fresh; sed -i 's/^VERIFY_PIDS=512$/VERIFY_PIDS=999/' "$dr/lib/defaults.env"
+drift_bites config-docs 'VERIFY_PIDS.*999|999.*VERIFY_PIDS' "a documented default that no longer matches lib/defaults.env is caught"
+drift_fresh; printf '\n# see docs/nonexistent-page.md\n' >> "$dr/bin/maintainer-repo"
+drift_bites doc-paths 'nonexistent-page' "a docs/*.md path named in code that does not exist is caught"
+drift_fresh; rm "$dr/docs/release.md"
+drift_bites doc-paths 'release.md' "deleting a doc the code points at is caught"
+drift_fresh; sed -i 's/^Four, and they are \*\*not\*\*/Three, and they are **not**/' "$dr/README.md"
+drift_bites readme-counts 'backends' "a README backend count that disagrees with lib/backends is caught"
+drift_fresh; cp "$dr/lib/backends/codex.sh" "$dr/lib/backends/zz.sh"
+drift_bites readme-counts 'backends' "adding a backend without updating the README is caught"
+drift_fresh; sed -i 's/has the 110 entries/has the 25 entries/' "$dr/README.md"
+drift_bites readme-counts 'lessons' "a README lesson count that disagrees with docs/lessons.md is caught"
+drift_fresh; sed -i 's/is 110 entries/is forty-one entries/' "$dr/CONTRIBUTING.md"
+drift_bites readme-counts 'lessons' "CONTRIBUTING's lesson count is held too, in words as well as digits"
+drift_fresh; sed -i 's/\[110 lessons,/[Thirty-six lessons,/' "$dr/docs/SUMMARY.md"
+drift_bites readme-counts 'lessons' "and so is the book's table of contents"
+drift_fresh; sed -i 's/^## 50\. /## 51. /' "$dr/docs/lessons.md"
+drift_bites readme-counts 'out of order' "a gap in the lesson numbering is caught, since the count would be a guess"
+drift_fresh; printf '\n## 111. a lesson the counts do not know about\n' >> "$dr/docs/lessons.md"
+drift_bites readme-counts 'lessons' "a new lesson entry makes every stated count stale until they are updated"
+drift_fresh; sed -i 's/^POST="${MAINTAINER_POST:-on}"/POST="${MAINTAINER_POST:-off}"/' "$dr/profiles/magent/profile.env"
+drift_bites readme-profiles 'magent' "a profile whose POST default disagrees with the README table is caught"
+drift_fresh; sed -i '/^\[0.6.1\]:/d' "$dr/CHANGELOG.md"
+drift_bites changelog-links '0.6.1' "a CHANGELOG version heading with no link reference is caught"
+drift_fresh; sed -i 's#compare/v0.7.2...HEAD#compare/v0.4.1...HEAD#' "$dr/CHANGELOG.md"
+drift_bites changelog-links 'Unreleased' "an [Unreleased] link that stops at an old version is caught"
+rm -rf "$dr"
+# A checker nothing runs is decoration (MISTAKES 7): the hook, CI and the suite
+# all have to reach it.
+[ -x "$chk" ] && ok "check_drift.py is executable, as the README says to run it" || bad "check_drift.py is not executable"
+grep -q 'check_drift.py' "$root/.githooks/pre-commit" \
+    && ok "the pre-commit hook runs check_drift.py" || bad "the hook never runs the docs checker"
+grep -q 'check_drift.py' "$root/.github/workflows/ci.yml" \
+    && ok "and CI runs it" || bad "CI never runs the docs checker"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'

@@ -14,11 +14,13 @@
 
 - [Command reference](cli.md)
 - [Configuration](configuration.md)
+- [Verifying a pull request](verifying.md)
+- [When a release is owed](release.md)
 - [Deploying it](deploy/README.md)
 - [Going public](going-public.md)
 
 # The record
 
-- [Thirty-six defects, and what found them](lessons.md)
+- [110 lessons, each a defect and what found it](lessons.md)
 - [The hard parts, and what they turned out to be](plan.md)
 - [Where everything goes](roadmap.md)

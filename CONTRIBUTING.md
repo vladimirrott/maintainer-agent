@@ -9,8 +9,8 @@ shapes what a useful contribution looks like here.
 - **Issues labelled `untested`** are guards that ship without a test that could
   fail. Each one is a self-contained job with a clear finish line, and writing
   the mutation teaches you the codebase faster than reading it.
-- **`docs/lessons.md`** is forty-one defects that reached a working system,
-  each with the measurement that found it. It is the fastest way to understand
+- **`docs/lessons.md`** is 110 entries, each a defect that reached a working system
+  and the measurement that found it. It is the fastest way to understand
   why anything here is shaped the way it is, and several entries end in work
   that is still open.
 - **Run it against your own repository.** `./new-profile.sh`, `POST=off`, read
@@ -60,13 +60,14 @@ touches no state and marks its context block as a preview.
 
 ## Before every commit
 
-The hook runs all four. Run them yourself first; they take seconds.
+The hook runs all five. Run them yourself first; they take seconds.
 
 ```sh
 bash -n <every script>        # the hook does this over `git ls-files`
 ./tests/run-tests.sh          # offline, no network, no model call
 ./evals/run-evals.sh          # the governing rules still exist
 ./scripts/check_claims.sh     # README numbers recounted from the tree
+./scripts/check_drift.py      # docs agree with the code: verbs, defaults, env vars, paths, counts
 ```
 
 If `check_claims.sh` fails because you added a test, the fix is to update the
