@@ -21,6 +21,12 @@ import sys
 import tokenize
 from pathlib import Path
 
+# No .pyc: a bytecode file beside the script records the absolute path of whoever
+# ran it, and the suite greps the tree for exactly that.
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import render_figures  # noqa: E402  one counting module for this checker and check_claims.sh
+
 
 def _read(root: Path, rel: str) -> str:
     return (root / rel).read_text()
@@ -104,29 +110,6 @@ def check_repo_names(root: Path) -> list[str]:
             if m:
                 problems.append(f"{f.relative_to(root)}:{n}: executable code names '{m.group(1)}': {ln.strip()[:90]}")
     return problems
-
-
-# --- numbers in words ------------------------------------------------------
-_ONES = {w: i for i, w in enumerate(
-    "zero one two three four five six seven eight nine ten eleven twelve thirteen fourteen "
-    "fifteen sixteen seventeen eighteen nineteen".split())}
-_TENS = {w: 10 * i for i, w in enumerate(
-    "_ _ twenty thirty forty fifty sixty seventy eighty ninety".split()) if w != "_"}
-
-
-def _num(text: str) -> int | None:
-    """A count written as digits or as an English word up to ninety-nine."""
-    t = text.strip().lower().strip(".,")
-    if t.isdigit():
-        return int(t)
-    if t in _ONES:
-        return _ONES[t]
-    if t in _TENS:
-        return _TENS[t]
-    a, _, b = t.partition("-")
-    if a in _TENS and b in _ONES and 0 < _ONES[b] < 10:
-        return _TENS[a] + _ONES[b]
-    return None
 
 
 def _code_files(root: Path) -> list[Path]:
@@ -266,39 +249,20 @@ def check_doc_paths(root: Path) -> list[str]:
 
 
 # --- readme-counts ----------------------------------------------------------
-def _lesson_count(root: Path) -> tuple[int, list[str]]:
-    nums = [int(n) for n in re.findall(r"^## (\d+)\.", _read(root, "docs/lessons.md"), re.M)]
-    if not nums:
-        return 0, ["docs/lessons.md has no numbered entries, so no count can be checked"]
-    if nums != list(range(1, len(nums) + 1)):
-        return len(nums), ["docs/lessons.md numbers its entries out of order or with a gap"]
-    return len(nums), []
-
-
 def check_readme_counts(root: Path) -> list[str]:
+    """The backend and lesson figures: each stated through a marker that
+    scripts/render_figures.py renders, and never typed. The counting lives in
+    that module so this checker and check_claims.sh cannot count differently."""
     problems: list[str] = []
-    # Backends: the sentence and the table must both agree with the tree.
-    actual = len([p for p in (root / "lib/backends").glob("*.sh")])
-    readme = _read(root, "README.md")
-    m = re.search(r"^## Backends\n\n(\S+), and they are \*\*not\*\* interchangeable", readme, re.M)
-    if not m:
-        problems.append("README no longer states a backend count in the form the check reads (backends)")
-    elif _num(m.group(1)) != actual:
-        problems.append(f"README says {m.group(1)} backends, lib/backends has {actual}")
-    hdr = re.search(r"^## Backends\n.*?^\| \| (.+?) \|\n", readme, re.S | re.M)
+    try:
+        actual = render_figures.backends(root, None)
+    except render_figures.SourceError as e:
+        return [f"backends: {e}"]
+    # The table has one column per backend as well as the sentence stating how many.
+    hdr = re.search(r"^## Backends\n.*?^\| \| (.+?) \|\n", _read(root, "README.md"), re.S | re.M)
     if hdr and len([c for c in hdr.group(1).split("|") if c.strip()]) != actual:
         problems.append(f"README's backends table has {len(hdr.group(1).split('|'))} columns, lib/backends has {actual}")
-    # Lessons, stated three ways in three files.
-    n, errs = _lesson_count(root)
-    problems += errs
-    for rel, pat in (("README.md", r"has the (\S+) entries"),
-                     ("CONTRIBUTING.md", r"is (\S+) entries,"),
-                     ("docs/SUMMARY.md", r"\[(\S+) lessons,")):
-        mm = re.search(pat, _read(root, rel))
-        if not mm:
-            problems.append(f"{rel} no longer states the lessons count in the form the check reads (lessons)")
-        elif _num(mm.group(1)) != n:
-            problems.append(f"{rel} says {mm.group(1)} lessons, docs/lessons.md has {n}")
+    problems += render_figures.check(root, None, names={"backends", "lessons"})
     return problems
 
 

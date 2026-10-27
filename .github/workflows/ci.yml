@@ -89,6 +89,11 @@ jobs:
       - name: Documentation agrees with the code
         run: python3 scripts/check_drift.py
 
+      # Structure, names, floors and every exact figure. The test count needs the
+      # suite's own measurement, which the README-numbers step above passes in.
+      - name: Every figure in the docs is rendered, never typed
+        run: python3 scripts/render_figures.py --check --no-tests
+
       - name: Every action pin is the tag it claims
         env:
           GH_TOKEN: ${{ github.token }}

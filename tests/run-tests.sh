@@ -7928,21 +7928,31 @@ drift_fresh; printf '\n# see docs/nonexistent-page.md\n' >> "$dr/bin/maintainer-
 drift_bites doc-paths 'nonexistent-page' "a docs/*.md path named in code that does not exist is caught"
 drift_fresh; rm "$dr/docs/release.md"
 drift_bites doc-paths 'release.md' "deleting a doc the code points at is caught"
-drift_fresh; sed -i 's/^Four, and they are \*\*not\*\*/Three, and they are **not**/' "$dr/README.md"
+drift_fresh; sed -i 's/\(<!-- fig:backends -->\)[^<]*/\13/' "$dr/README.md"
 drift_bites readme-counts 'backends' "a README backend count that disagrees with lib/backends is caught"
 drift_fresh; cp "$dr/lib/backends/codex.sh" "$dr/lib/backends/zz.sh"
 drift_bites readme-counts 'backends' "adding a backend without updating the README is caught"
-drift_fresh; sed -i 's/has the [0-9]* entries/has the 25 entries/' "$dr/README.md"
+drift_fresh; sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\125+/' "$dr/README.md"
 drift_bites readme-counts 'lessons' "a README lesson count that disagrees with docs/lessons.md is caught"
-drift_fresh; sed -i 's/is [0-9]* entries/is forty-one entries/' "$dr/CONTRIBUTING.md"
+drift_fresh; sed -i 's/<!-- fig:lessons[^>]*-->[^<]*<!-- \/fig -->/forty-one/' "$dr/CONTRIBUTING.md"
 drift_bites readme-counts 'lessons' "CONTRIBUTING's lesson count is held too, in words as well as digits"
-drift_fresh; sed -i 's/\[[0-9]* lessons,/[Thirty-six lessons,/' "$dr/docs/SUMMARY.md"
+drift_fresh; sed -i 's/\[<!-- fig:lessons[^>]*-->[^<]*<!-- \/fig --> lessons,/[Thirty-six lessons,/' "$dr/docs/SUMMARY.md"
 drift_bites readme-counts 'lessons' "and so is the book's table of contents"
 drift_fresh; sed -i 's/^## 50\. /## 51. /' "$dr/docs/lessons.md"
 drift_bites readme-counts 'out of order' "a gap in the lesson numbering is caught, since the count would be a guess"
-drift_fresh; printf '\n## %s. a lesson the counts do not know about\n' \
+# The lesson count is a floor of ten, so ONE new entry must leave every document
+# current (that is the point: no per-pull-request edit), and entries that carry
+# the count over a multiple of ten must make every stated figure stale.
+drift_fresh; printf '\n## %s. a lesson the floor absorbs\n' \
     "$(( $(grep -c '^## [0-9]*\. ' "$dr/docs/lessons.md") + 1 ))" >> "$dr/docs/lessons.md"
-drift_bites readme-counts 'lessons' "a new lesson entry makes every stated count stale until they are updated"
+out="$(python3 "$chk" --root "$dr" --only readme-counts 2>&1)"; rc=$?
+[ "$(drift_sum)" != "$drift_pristine" ] && [ "$rc" = 0 ] \
+    && ok "one new lesson entry changes no stated figure, because lessons are shown as a floor" \
+    || bad "one new lesson entry moved a figure or the mutation did not apply (rc=$rc)"
+drift_fresh; for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    printf '\n## %s. a lesson the counts do not know about\n' \
+        "$(( $(grep -c '^## [0-9]*\. ' "$dr/docs/lessons.md") + 1 ))" >> "$dr/docs/lessons.md"; done
+drift_bites readme-counts 'lessons' "enough new entries to cross a multiple of ten make every stated lesson count stale"
 drift_fresh; sed -i 's/^POST="${MAINTAINER_POST:-on}"/POST="${MAINTAINER_POST:-off}"/' "$dr/profiles/magent/profile.env"
 drift_bites readme-profiles 'magent' "a profile whose POST default disagrees with the README table is caught"
 drift_fresh; sed -i '/^\[0.6.1\]:/d' "$dr/CHANGELOG.md"
@@ -7957,6 +7967,165 @@ grep -q 'check_drift.py' "$root/.githooks/pre-commit" \
     && ok "the pre-commit hook runs check_drift.py" || bad "the hook never runs the docs checker"
 grep -q 'check_drift.py' "$root/.github/workflows/ci.yml" \
     && ok "and CI runs it" || bad "CI never runs the docs checker"
+
+echo "== every figure in the docs is rendered from its source, never typed =="
+# README said 1324 tests, "the 114 entries", "37 denied verbs" in prose a person
+# had to remember to edit, and two drift tests went vacuous because they matched
+# the literal 110. scripts/render_figures.py owns every such number: a marker in
+# the prose, a registry that counts the tree, and a check that refuses a stale
+# marker, an unknown name, a figure typed outside a marker and a source it could
+# not read. The cases run it on the real tree, then plant one defect at a time in
+# a copy and demand the named reason (not merely a non-zero exit) is what fails.
+rf="$root/scripts/render_figures.py"
+fg="$stub_dir/figs"
+fig_sum() { (cd "$fg" && find . -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum); }
+fig_fresh() { rm -rf "$fg"; mkdir -p "$fg"
+    cp -r "$root/bin" "$root/lib" "$root/docs" "$root/profiles" "$root/scripts" "$root/evals" "$fg/"
+    cp "$root/README.md" "$root/CONTRIBUTING.md" "$root/CHANGELOG.md" "$fg/"
+    fig_pristine="$(fig_sum)"; }
+# 1350 sits inside the README's "1,300+" floor, so the pristine copy passes.
+fig_bites() {  # $1 = regex a FAIL line must match, $2 = label, rest = extra args
+    local re="$1" label="$2"; shift 2
+    # A mutation that applied to nothing leaves the copy pristine, and a checker
+    # that passes a pristine tree reads exactly like one that missed the mutation.
+    if [ "$(fig_sum)" = "$fig_pristine" ]; then bad "$label: the mutation did not apply, so nothing was tested"; return; fi
+    [ "$#" -gt 0 ] || set -- --check --tests 1350
+    # Capped by time and address space: a mutant that loops would otherwise grow
+    # without bound and take the machine with it, and read as a hang, not a failure.
+    local out rc; out="$( (ulimit -v 4000000; timeout 60 python3 "$rf" --root "$fg" "$@") 2>&1)"; rc=$?
+    [ "$rc" != 0 ] && grep -qE "^FAIL.*($re)" <<<"$out" \
+        && ok "$label" || bad "$label (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-220)"
+}
+[ -x "$rf" ] && ok "render_figures.py is executable" || bad "render_figures.py is missing or not executable"
+out="$(python3 "$rf" --check --no-tests 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ok "every figure on the real tree is current" \
+    || bad "the real tree has a stale or malformed figure (rc=$rc): $(printf '%s' "$out" | head -3 | tr '\n' ' ' | cut -c1-220)"
+fig_fresh
+out="$(python3 "$rf" --root "$fg" --check --tests 1350 2>&1)"; rc=$?
+[ "$rc" = 0 ] && ok "control: the copy passes with a measured count inside the floor" \
+    || bad "control: the pristine copy fails, so no refusal below is evidence (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-200)"
+out="$(python3 "$rf" --root "$fg" --check 2>&1)"; rc=$?
+[ "$rc" = 2 ] && grep -q -- '--tests' <<<"$out" \
+    && ok "a check with no test count and no --no-tests is refused, not skipped" \
+    || bad "a check that was given no test count passed or died for another reason (rc=$rc)"
+# Floor arithmetic at a boundary: v = K*n and v = K*n - 1.
+fl="$(python3 -B -c "
+import sys; sys.path.insert(0, '$root/scripts')
+import render_figures as r
+print(r.render(1300, 100), r.render(1299, 100), r.render(1400, 100), r.render(1399, 100), r.render(114, 10), r.render(1324, None), r.render(9, None))")"
+check "floor renders floor(v/K)*K with a trailing + and thousands separators, exact otherwise" \
+    "$fl" "1,300+ 1,200+ 1,400+ 1,300+ 110+ 1,324 9"
+fig_fresh; out="$(python3 "$rf" --root "$fg" --check --tests 1300 2>&1)"; rc1=$?
+out="$(python3 "$rf" --root "$fg" --check --tests 1399 2>&1)"; rc2=$?
+[ "$rc1" = 0 ] && [ "$rc2" = 0 ] && ok "the README's 1,300+ holds at 1300 and at 1399" \
+    || bad "the test floor is wrong at the edges of its band (rc=$rc1,$rc2)"
+for n in 1299 1400; do
+    out="$(python3 "$rf" --root "$fg" --check --tests "$n" 2>&1)"; rc=$?
+    [ "$rc" != 0 ] && grep -qE "^FAIL README.md:[0-9]+: stale marker 'tests'" <<<"$out" \
+        && ok "a test count of $n makes the 1,300+ marker stale" \
+        || bad "a test count of $n left the 1,300+ marker current (rc=$rc)"
+done
+# Each refusal below plants one defect in a fresh copy.
+fig_fresh; sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\1999+/' "$fg/CONTRIBUTING.md"
+fig_bites 'CONTRIBUTING.md:[0-9]+.*stale' "a stale marker is refused, naming file and line"
+fig_fresh; sed -i 's/<!-- fig:tests floor=100 -->/<!-- fig:tests -->/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*tests.*takes floor=100' "a test count marker with no floor is refused, so it cannot go stale every pull request"
+fig_fresh; sed -i 's/<!-- fig:backends/<!-- fig:backendz/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*unknown figure .backendz' "an unknown figure name is refused"
+fig_fresh; sed -i 's/<!-- fig:tests[^>]*-->[^<]*<!-- \/fig -->/1,324/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*tests.*not in a marker' "a test count typed outside a marker is refused"
+fig_fresh; sed -i 's/<!-- fig:denied_verbs -->[^<]*<!-- \/fig -->/37/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*denied.*not in a marker' "a typed denied-verb count is refused"
+fig_fresh; sed -i 's/<!-- fig:evals -->[^<]*<!-- \/fig -->/9/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*evals.*not in a marker' "a typed eval count is refused"
+fig_fresh; sed -i 's/<!-- fig:lessons[^>]*-->[^<]*<!-- \/fig -->/forty-one/' "$fg/docs/SUMMARY.md"
+fig_bites 'SUMMARY.md:[0-9]+.*lessons.*not in a marker' "a lesson count typed in words outside a marker is refused"
+fig_fresh; sed -i 's/<!-- fig:backends -->[^<]*<!-- \/fig -->/Four/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*backends.*not in a marker' "a backend count typed in words outside a marker is refused"
+fig_fresh; sed -i 's/<!-- fig:profiles -->[^<]*<!-- \/fig -->/2/' "$fg/README.md"
+fig_bites 'README.md:[0-9]+.*profiles.*not in a marker' "a typed profile count is refused"
+fig_fresh; sed -i 's/<!-- fig:lessons[^>]*-->[^<]*<!-- \/fig -->//' "$fg/README.md"
+fig_bites 'README.md.*lessons.*(must|required)' "a site that stops stating its figure is refused, not left inspecting nothing"
+fig_fresh; sed -i 's/<!-- fig:lessons\( floor=10\)\? -->[^<]*<!-- \/fig -->/<!-- fig:lessons floor=10 -->110+/' "$fg/CONTRIBUTING.md"
+fig_bites 'CONTRIBUTING.md:[0-9]+.*malformed' "a marker with no closing tag is refused as malformed"
+fig_fresh; sed -i 's/<!-- fig:lessons\( floor=10\)\? -->/<!-- fig:lessons floor=10 --><!-- fig:evals -->/' "$fg/CONTRIBUTING.md"
+fig_bites 'CONTRIBUTING.md:[0-9]+.*(nested|malformed)' "a nested marker is refused"
+fig_fresh; sed -i 's/<!-- fig:lessons floor=10 -->/<!-- fig:lessons floor=abc -->/' "$fg/CONTRIBUTING.md"
+fig_bites 'CONTRIBUTING.md:[0-9]+.*malformed' "a floor that is not a number is refused as malformed"
+fig_fresh; printf '\n```\n<!-- fig:evals -->9<!-- /fig -->\n```\n' >> "$fg/CONTRIBUTING.md"
+fig_bites 'CONTRIBUTING.md:[0-9]+.*code fence' "a marker inside a code fence is refused"
+fig_fresh; printf '\n~~~\n<!-- fig:evals -->9<!-- /fig -->\n~~~\n' >> "$fg/docs/roadmap.md"
+fig_bites 'roadmap.md:[0-9]+.*code fence' "a marker inside a tilde fence is refused too"
+# The glob is expanded inside the copy: relative to the caller's directory it
+# matched nothing when the suite was run from elsewhere, and the case then
+# stripped only two files.
+fig_fresh; (cd "$fg" && sed -i 's/<!-- fig:[^>]*-->\([^<]*\)<!-- \/fig -->/\1/g' README.md CONTRIBUTING.md docs/*.md)
+fig_bites 'no figure markers' "a tree with no markers at all is refused, not passed"
+fig_fresh; rm -rf "$fg/lib/backends"
+fig_bites 'backends.*(cannot read|unreadable)' "an unreadable backends source fails closed"
+fig_fresh; rm -rf "$fg/evals/scenarios"
+fig_bites 'evals.*(cannot read|unreadable)' "an unreadable eval source fails closed"
+fig_fresh; : > "$fg/docs/lessons.md"
+fig_bites 'lessons.*(cannot read|unreadable|no numbered)' "an empty lessons file fails closed"
+fig_fresh; printf '{ not json' > "$fg/profiles/sysknife/deny.json"
+fig_bites 'denied_verbs.*(cannot read|unreadable)' "a deny spec that does not parse fails closed"
+fig_fresh; : > "$fg/docs/user-stories.md"
+fig_bites 'stories.*(cannot read|unreadable|no stories)' "an unreadable user-stories file fails closed"
+fig_fresh; sed -i 's/^\*\*[A-Za-z0-9 <>!\/:=_,-]* have no governing rule\*\*: [0-9]*,/**have no governing rule**: 3,/' "$fg/docs/user-stories.md"
+fig_bites 'gap' "a finding that no longer states its form is refused"
+fig_fresh; sed -i 's/^23, 24, 26, 31, 32\./23, 24, 26, 31./' "$fg/docs/user-stories.md"
+fig_bites 'listed numbers' "a gap list that disagrees with the marked stories is refused"
+# --write: fixes values, is idempotent, and never edits around a structural error.
+fig_fresh; sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\1999+/; s/\(<!-- fig:evals -->\)[^<]*/\177/' "$fg/README.md"
+out="$(python3 "$rf" --root "$fg" --write --tests 1350 2>&1)"; rc=$?
+out2="$(python3 "$rf" --root "$fg" --check --tests 1350 2>&1)"; rc2=$?
+[ "$rc" = 0 ] && [ "$rc2" = 0 ] && ok "--write repairs stale markers and --check then passes" \
+    || bad "--write then --check did not converge (rc=$rc,$rc2): $(printf '%s%s' "$out" "$out2" | head -2 | tr '\n' ' ' | cut -c1-200)"
+h1="$(fig_sum)"; python3 "$rf" --root "$fg" --write --tests 1350 >/dev/null 2>&1; rcw=$?
+[ "$rcw" = 0 ] && [ "$(fig_sum)" = "$h1" ] && ok "a second --write changes no byte" \
+    || bad "a second --write changed the tree or failed (rc=$rcw)"
+# --write restores the original BYTES, not merely a passing tree: it may touch
+# the marker's value and nothing else (no added newline, no reflow).
+fig_fresh; hr="$(sha256sum < "$fg/README.md")"; hc="$(sha256sum < "$fg/CONTRIBUTING.md")"
+sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\1999+/; s/\(<!-- fig:tests[^>]*-->\)[^<]*/\10+/' "$fg/README.md"
+sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\1999+/' "$fg/CONTRIBUTING.md"
+if [ "$(sha256sum < "$fg/README.md")" = "$hr" ] || [ "$(sha256sum < "$fg/CONTRIBUTING.md")" = "$hc" ]; then
+    bad "--write byte-exactness: the mutation did not apply, so nothing was tested"
+else
+    python3 "$rf" --root "$fg" --write --tests 1350 >/dev/null 2>&1
+    [ "$(sha256sum < "$fg/README.md")" = "$hr" ] && [ "$(sha256sum < "$fg/CONTRIBUTING.md")" = "$hc" ] \
+        && ok "--write restores the original bytes: only marker values change" \
+        || bad "--write changed bytes outside the marker values"
+fi
+fig_fresh; sed -i 's/\(<!-- fig:lessons[^>]*-->\)[^<]*/\1999+/' "$fg/CONTRIBUTING.md"; sed -i 's/<!-- fig:backends/<!-- fig:backendz/' "$fg/README.md"
+h1="$(fig_sum)"; out="$(python3 "$rf" --root "$fg" --write --tests 1350 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [ "$(fig_sum)" = "$h1" ] && grep -q 'unknown figure' <<<"$out" \
+    && ok "--write refuses and writes nothing while a structural error stands" \
+    || bad "--write edited files around a structural error, or passed (rc=$rc)"
+# --write without --tests runs the suite itself, through the tree's own runner.
+fig_fresh; mkdir -p "$fg/tests"
+printf '#!/usr/bin/env bash\necho "  1397 passed, 0 failed, 3 skipped"\n' > "$fg/tests/run-tests.sh"
+out="$(python3 "$rf" --root "$fg" --write 2>&1)"; rc=$?
+grep -q 'fig:tests floor=100 -->1,400+<!-- /fig' "$fg/README.md" && [ "$rc" = 0 ] \
+    && ok "--write with no --tests measures passed plus skipped through the suite" \
+    || bad "--write did not measure the suite (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-160)"
+fig_fresh; mkdir -p "$fg/tests"
+printf '#!/usr/bin/env bash\necho "  1450 passed, 0 failed, 3 skipped"\nexit 1\n' > "$fg/tests/run-tests.sh"
+h1="$(fig_sum)"; out="$(python3 "$rf" --root "$fg" --write 2>&1)"; rc=$?
+[ "$rc" != 0 ] && [ "$(fig_sum)" = "$h1" ] \
+    && ok "--write on a red suite refuses instead of trusting its printed count" \
+    || bad "--write believed a red suite's count (rc=$rc)"
+rm -rf "$fg"
+# The consumers reach it, and the old regexes are gone from the claim checker.
+grep -q 'render_figures.py' "$root/.githooks/pre-commit" \
+    && ok "the pre-commit hook runs render_figures.py" || bad "the hook never runs the figure check"
+grep -q 'render_figures.py' "$root/.github/workflows/ci.yml" \
+    && ok "CI runs render_figures.py" || bad "CI never runs the figure check"
+grep -qE 'render_figures.py.*--check.*--tests' "$root/scripts/check_claims.sh" \
+    && ok "check_claims.sh hands render_figures.py the count it measured" || bad "check_claims.sh does not pass --tests"
+grep -q 'render_figures' "$root/scripts/check_drift.py" \
+    && ok "check_drift.py counts through the same module" || bad "check_drift.py keeps its own counting code"
+if grep -q 'claim ' "$root/scripts/check_claims.sh"; then bad "check_claims.sh still compares typed README numbers"; else ok "check_claims.sh no longer compares typed README numbers"; fi
 
 echo "== the check board must be entirely pass or skipping =="
 # gh buckets a check as pass, fail, pending, skipping or cancel. The gate counted
