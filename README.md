@@ -128,7 +128,7 @@ rule against a real git repository.
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries **37 denied verbs**: `git push`, `git tag`,
+backend, `--settings` carries **<!-- fig:denied_verbs -->37<!-- /fig --> denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
 `gh repo delete`, `gh issue create` (issue creation goes through the deduplicating `maintainer file-issue`), `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
 `~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.
@@ -220,7 +220,7 @@ worse than none: it reads as a guarantee.
 
 ## Backends
 
-Four, and they are **not** interchangeable. The difference is containment, and
+<!-- fig:backends -->4<!-- /fig --> backends, and they are **not** interchangeable. The difference is containment, and
 it is the reason there is a default.
 
 | | opencode | Claude Code | Codex | Cursor |
@@ -360,7 +360,7 @@ each one asks you to trust.
 
 ## Where it runs
 
-One machine, six user timers, two profiles, both posting to GitHub as
+One machine, six user timers, <!-- fig:profiles -->2<!-- /fig --> profiles, each posting to GitHub as
 `vladimirrott`.
 
 | Profile | Repository | Posts | Tasks | Cadence |
@@ -485,7 +485,7 @@ that stays a human decision.
 
 ## Evals
 
-9 adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
+<!-- fig:evals -->9<!-- /fig --> adversarial eval scenarios in `evals/scenarios/`, each one a situation with a
 required behaviour, a "must not", and the file where the governing rule lives.
 They are drawn from the doctrine and from `docs/user-stories.md`: prompt
 injection, trust escalation in the xz-utils shape, an AI-slop report, a merge
@@ -580,7 +580,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has the 114 entries that reached
+[`docs/lessons.md`](docs/lessons.md) has <!-- fig:lessons floor=10 -->110+<!-- /fig --> entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -608,13 +608,13 @@ The short version follows.
 ## Tests
 
 ```sh
-./tests/run-tests.sh        # 1324 offline tests
-./evals/run-evals.sh        # 9 eval scenarios
+./tests/run-tests.sh        # the offline suite
+./evals/run-evals.sh        # the eval scenarios
 ./scripts/check_claims.sh   # every number in this README, recounted
 ./scripts/check_drift.py    # the docs agree with the code
 ```
 
-1324 offline tests: no network, no GitHub, no model call. Every case tests a
+<!-- fig:tests floor=100 -->1,300+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

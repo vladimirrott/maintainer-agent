@@ -199,7 +199,7 @@ another run. **[code]** `flock`, `MAINTAINER_IN_RUN`.
 
 ## The finding
 
-**Thirteen of forty have no governing rule**: 3, 4, 5, 7, 10, 13, 16, 21,
+**<!-- fig:gaps -->13<!-- /fig --> of <!-- fig:stories -->40<!-- /fig --> have no governing rule**: 3, 4, 5, 7, 10, 13, 16, 21,
 23, 24, 26, 31, 32.
 
 They cluster. Almost every gap is about **saying no to a person**, or about

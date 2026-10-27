@@ -132,8 +132,8 @@ What is missing:
 
 ## 5. What this is not a plan for
 
-**More harnesses for their own sake.** Four backends already exist and two have
-never driven a run; a fifth would make that three. The next integration work
+**More harnesses for their own sake.** <!-- fig:backends -->4<!-- /fig --> backends already exist and two have
+never driven a run; each new one adds to the unproven pile. The next integration work
 that matters is proving opencode and Cursor, not adding Hermes.
 
 **Autonomy beyond what evidence supports.** The agent may merge only against a

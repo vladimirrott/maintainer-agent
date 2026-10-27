@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# Hold the README's numbers to what the tree actually contains.
+# Hold the documents' numbers to what the tree actually contains.
 #
 # Same idea as the target repository's evidence artifact: a published figure
 # must be derived, never typed. A README that claims 42 tests while the suite
 # has 30 is the shape of defect this whole project exists to catch, and it
-# would be embarrassing to ship it here.
+# would be embarrassing to ship it here. Every figure in the prose is a marker
+# that scripts/render_figures.py renders from its source; this script runs the
+# suite once, measures the test count, and hands that count to the renderer's
+# check. It compares nothing itself, so there is one counting code path.
 set -uo pipefail
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fail=0
@@ -30,8 +33,6 @@ tests_skip=$(sed -n 's/.*, \([0-9]\+\) skipped.*/\1/p' "$suite_out" | tail -1)
 [ -n "$tests_pass" ] || { bad "could not measure the test count; refusing to pass over nothing"; exit 1; }
 tests_actual=$(( tests_pass + ${tests_skip:-0} ))
 [ -n "${tests_skip:-}" ] && note "counting $tests_pass passed + $tests_skip skipped as the suite size"
-evals_actual=$(find "$root/evals/scenarios" -name '*.md' 2>/dev/null | wc -l | tr -d ' ')
-backends_actual=$(find "$root/lib/backends" -name '*.sh' 2>/dev/null | wc -l | tr -d ' ')
 # Generated, then counted. Counting the spec would let a generator bug that
 # drops every absolute spelling pass unnoticed.
 #
@@ -49,84 +50,27 @@ import json;print(len(json.load(open('$gen_dir/$pn/settings.json'))['permissions
 done
 cp "$root/profiles/sysknife/deny.json" "$gen_dir/" 2>/dev/null
 python3 "$root/scripts/render-settings.py" "$gen_dir" /home/claimcheck >/dev/null 2>&1
-# The VERB count, not the rule count. The generator resolves each verb with
-# `which` and spells it from wherever the binary actually lives, so the number
-# of rules depends on what is installed on the machine generating them: this
-# check read 998 and then 1030 on the same tree, because installing the
-# maintainer commands added a directory to spell from. A published number has to
-# be derivable the same way twice, so the README pins the input a human writes
-# and the rule count is printed as an observation.
-deny_actual=$(python3 -c "
-import json
-d=json.load(open('$root/profiles/sysknife/deny.json'))
-print(len(d.get('spelled_everywhere',[])) + len(d.get('bare_exact',[])))" 2>/dev/null)
-[ -n "$deny_actual" ] || { bad "could not read the deny spec; refusing to pass over nothing"; exit 1; }
+# The README states the VERB count, not the rule count: the generator resolves
+# each verb with `which` and spells it from wherever the binary actually lives,
+# so the number of rules depends on what is installed on the machine generating
+# them (this check read 998 and then 1030 on the same tree). The verb count is
+# derived by render_figures.py; the rule count is printed as an observation.
 rules_here=$(python3 -c "
 import json
 print(len(json.load(open('$gen_dir/settings.json'))['permissions']['deny']))" 2>/dev/null)
 note "those verbs generate $rules_here rules on this machine"
 
-note "measured: $tests_actual tests, $evals_actual eval scenarios, $backends_actual backends, $deny_actual denied verbs"
-
-# Every occurrence, not the first one, and the number may not be the tail of a
-# longer token. The first-match version read "388 tests" out of the commit SHA
-# in `maintainer-merge verify 365 7c6ed388 tests/e2e/...` and failed a commit
-# over a number nobody had written. Taking only the first match also means a
-# second, stale copy of a figure lower down is never checked at all.
-claim() {  # $1 = regex capturing a number in README, $2 = actual, $3 = label
-    local found seen uniq
-    found=$(grep -oE "(^|[^0-9A-Za-z])$1" "$root/README.md" | grep -oE '[0-9]+' | sort -u)
-    seen=$(printf '%s' "$found" | grep -c . || true)
-    if [ "$seen" = 0 ]; then
-        bad "README no longer states $3; the claim check now inspects nothing"
-        return
-    fi
-    if [ "$seen" -gt 1 ]; then
-        bad "README states $3 more than one way ($(printf '%s' "$found" | tr '\n' ' ')); they cannot all be right"
-        return
-    fi
-    uniq="$found"
-    if [ "$uniq" != "$2" ]; then
-        bad "README says $uniq $3, the tree has $2"
-    else
-        note "ok: $3 = $2 (every mention agrees)"
-    fi
-}
-claim '[0-9]+ (offline )?tests'     "$tests_actual"    "tests"
-claim '[0-9]+ (adversarial )?eval'  "$evals_actual"    "eval scenarios"
-claim '[0-9]+ denied verbs'         "$deny_actual"     "denied verbs"
-
-# docs/user-stories.md states a gap count AND the list of story numbers behind
-# it. Nothing checked either, so an edit that resolved a story would have left
-# the finding claiming a number the file no longer supported. Both sides are
-# read from the same file, which is the point: the prose has to agree with the
-# markers under it.
-python3 - "$root/docs/user-stories.md" <<'PYEOF'
-import re, sys
-t = open(sys.argv[1]).read()
-parts = re.split(r'^\*\*(\d+)\.', t, flags=re.M)
-gaps = [int(parts[i]) for i in range(1, len(parts), 2) if '[GAP]' in parts[i + 1]]
-total = len(parts) // 2
-words = {14: 'Fourteen', 13: 'Thirteen', 12: 'Twelve', 11: 'Eleven', 10: 'Ten',
-         15: 'Fifteen', 16: 'Sixteen', 9: 'Nine', 8: 'Eight'}
-# The list wraps across lines in the file, so the class has to admit a
-# newline. Without it the check read only the first line's numbers and
-# reported "the listed numbers are not the marked ones" against itself.
-m = re.search(r'\*\*(\w+) of (\w+) have no governing rule\*\*:([0-9,\s]+)\.', t)
-if not m:
-    sys.exit('FAIL: user-stories.md no longer states its finding in the form the check reads')
-claimed = [int(x) for x in re.split(r'[,\s]+', m.group(3).strip()) if x]
-errs = []
-if m.group(1) != words.get(len(gaps), '?'):
-    errs.append(f"the finding says {m.group(1)}, the file marks {len(gaps)} gaps")
-if claimed != sorted(gaps):
-    errs.append(f"the listed numbers {claimed} are not the marked ones {sorted(gaps)}")
-if m.group(2) != 'forty' or total != 40:
-    errs.append(f"the finding says {m.group(2)} stories, the file has {total}")
-if errs:
-    sys.exit('FAIL: ' + '; '.join(errs))
-print(f"  ok: user stories = {total}, gaps = {len(gaps)}, and the listed numbers are the marked ones")
-PYEOF
-[ $? = 0 ] || fail=1
+# Every figure, in every document, through the one renderer. It is handed the
+# count measured above instead of running the suite a second time.
+figs_out="$(python3 "$root/scripts/render_figures.py" --root "$root" --check --tests "$tests_actual" 2>&1)"; figs_rc=$?
+if [ "$figs_rc" != 0 ]; then
+    printf '%s\n' "$figs_out" >&2
+    bad "a figure in the documents is stale, typed outside a marker, or unreadable; run scripts/render_figures.py --write"
+else
+    note "$figs_out"
+    vals="$(python3 "$root/scripts/render_figures.py" --root "$root" --values --tests "$tests_actual" 2>&1)" \
+        && note "measured: $(paste -sd, <<<"$vals" | sed 's/,/, /g')" \
+        || { printf '%s\n' "$vals" >&2; bad "could not print the measured figures"; }
+fi
 
 exit "$fail"

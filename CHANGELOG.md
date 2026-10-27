@@ -10,6 +10,23 @@ middle digit.
 
 ## [Unreleased]
 
+### Changed
+
+- **Every figure in the README and the docs is rendered from its source, never
+  typed.** A number that describes the project is a marker,
+  `<!-- fig:NAME -->VALUE<!-- /fig -->`, that `scripts/render_figures.py` counts
+  from the tree. The suite size and the lesson count are a rounded floor ("1,300+",
+  "110+"), so a pull request that adds a test or a lesson no longer hand-edits three
+  to five lines; backends, evals, denied verbs, profiles, user stories and gaps stay
+  exact and are rendered too. `--check` refuses a stale marker, an unknown name, a
+  malformed or nested marker, a marker in a code fence, a figure typed outside a
+  marker, a site that stopped stating its figure, a tree with no markers and a
+  source it could not read; `--write` repairs stale values and is idempotent.
+  `check_claims.sh` and `check_drift.py readme-counts` count through the same module
+  and no longer match typed numbers, the hook and CI run the figure check, and the
+  drift cases that mutated literal counts mutate marker contents. Two drift tests
+  had gone vacuous because they matched the literal 110.
+
 ## [0.8.0] — 2026-10-26
 
 A timer run and an interactive session can see each other through leases, a pull
