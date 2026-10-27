@@ -7429,6 +7429,47 @@ tun_verify
 runs="$(grep -c '^--memory$' "$TUN_ARGS")"
 [ "$runs" = 3 ] && ok "the harness reaches all three container runs (fetch, clean, mutated)" \
     || bad "the podman stub saw $runs container run(s), not 3, so the cases below are vacuous: $(tr '\n' ' ' < "$TUN_ARGS.out" | cut -c1-200)"
+# Where a verify unpacks the pull request, and that it never leaves it there.
+# On 2026-10-27 two refused verifies of sysknife#627 left 12 GB of extracted
+# tree and cargo target in /tmp. That /tmp was a tmpfs: the leftovers sat in
+# RAM, the next verify's rustc was SIGKILLed inside its 6g container, and the
+# disk-quota error that followed cost a third run (#111). A RETURN trap never
+# fires on `die`, and nearly every refusal is a `die`.
+vw_tmp="$stub_dir/vw-tmpdir"; rm -rf "$vw_tmp"; mkdir -p "$vw_tmp"
+mounted="$(awk 'p{print; p=0} $0=="-v"{p=1}' "$TUN_ARGS" | grep -m1 ':/repo' || true)"
+case "$mounted" in
+    "$tvh/state/verify-work/"*) ok "the pull request is unpacked under the state directory, not in TMPDIR" ;;
+    *) bad "the verify tree is mounted from '${mounted%%:*}', not from \$STATE/verify-work" ;;
+esac
+tun_verify TMPDIR="$vw_tmp"
+left="$(find "$vw_tmp" "$tvh/state/verify-work" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+[ "$left" = 0 ] && ok "a verify that ran to its verdict leaves no scratch directory behind" \
+    || bad "a finished verify left $left scratch director(ies): $(find "$vw_tmp" "$tvh/state/verify-work" -mindepth 1 -maxdepth 1 2>/dev/null | head -2 | tr '\n' ' ')"
+: > "$TUN_ARGS"; rm -rf "$tvh/state" "$vw_tmp"; mkdir -p "$vw_tmp"
+env -u MAINTAINER_SLUG -u MAINTAINER_REPO -u MAINTAINER_ACCOUNT -u MAINTAINER_STATE \
+    PATH="$stub_dir:$PATH" HOME="$tvh" MAINTAINER_PROFILE=tv PROD_GLOBS="thing.txt" TMPDIR="$vw_tmp" \
+    bash "$root/bin/maintainer-merge" verify 9 0000000000000000000000000000000000000000 f 's/x/y/' >"$TUN_ARGS.out" 2>&1
+vrc=$?
+grep -q 'not the 0000' "$TUN_ARGS.out" && [ "$vrc" != 0 ] \
+    && ok "the refusal case reaches the head check, so the case below is not vacuous" \
+    || bad "the wrong-head verify did not refuse where expected (rc=$vrc): $(tr '\n' ' ' < "$TUN_ARGS.out" | cut -c1-160)"
+left="$(find "$vw_tmp" "$tvh/state/verify-work" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)"
+[ "$left" = 0 ] && ok "a refused verify (die) leaves no scratch directory behind" \
+    || bad "a refused verify left $left scratch director(ies) behind (#111)"
+tun_verify   # restore the recorded argv the resource cases below read
+
+# No shipped script may pipe into `grep -q` (MISTAKES rule 2). grep exits on its
+# first match, the writer takes SIGPIPE, and under `pipefail` the MATCH reads as
+# a failure. v0.8.0 shipped three: fixup's sign-off check (seen flaking in the
+# suite on 2026-10-27), prune's open-PR keep test, and the doctor's timer check.
+pq_files=( "$root"/bin/* "$root"/lib/*.sh "$root"/lib/backends/* "$root"/install.sh "$root"/new-profile.sh \
+           "$root"/platform/*/*.sh "$root"/profiles/*/verify.d/*.sh )
+pq_n=0; for f in "${pq_files[@]}"; do [ -f "$f" ] && pq_n=$((pq_n + 1)); done
+pq="$(grep -nE '\|[[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' "${pq_files[@]}" 2>/dev/null \
+    | grep -vE '^[^:]*:[0-9]+:[[:space:]]*#' || true)"
+[ "$pq_n" -ge 10 ] || bad "the pipe-into-grep -q scan found only $pq_n shipped scripts; the glob is wrong"
+[ -z "$pq" ] && ok "no shipped script pipes into grep -q ($pq_n scanned)" \
+    || bad "a shipped script pipes into grep -q, which turns a match into a failure under pipefail: $(printf '%s' "$pq" | head -3 | tr '\n' ' ' | cut -c1-220)"
 for pair in "memory:VERIFY_MEMORY" "cpus:VERIFY_CPUS" "pids-limit:VERIFY_PIDS" "timeout:VERIFY_TIMEOUT"; do
     flag="${pair%%:*}"; key="${pair##*:}"; want="$(dget "$key")"
     [ -n "$want" ] || { bad "lib/defaults.env has no $key"; continue; }

@@ -3323,3 +3323,51 @@ run lands on the exact second. And a fixture for `gc` whose run lease had no
 `renewed` field passed a mutation that made `gc` delete `run.json`, since the
 parse error spared it; the fixture now carries an ancient expiry so only the
 glob protects the file.
+
+## 115. A refused verify kept 12 GB of a stranger's tree in RAM
+
+On 2026-10-27 two verifies of sysknife#627 ended in refusals, one of them an OOM
+kill inside the 6g container. Each left its extracted pull request and its cargo
+target in `/tmp`: 5.1 GB and 7.2 GB. That `/tmp` was a tmpfs, so the leftovers
+sat in RAM, and the cargo output the container wrote there counted against the
+container's own memory limit. The next verify's rustc was SIGKILLed again, and
+the one after that died on a disk-quota error in Claude Code's temporary
+directory, which shared the same tmpfs. Issue #111 had described the leak a
+month earlier as 44 MB of clutter; on a tmpfs it is a memory leak that takes the
+next verify down with it.
+
+The cleanup was a `RETURN` trap, which never fires on `exit`, and nearly every
+refusal in `cmd_verify` is a `die`.
+
+**Guard:** every verify scratch directory is made by `scratch_dir`, under
+`$STATE/verify-work` (mode 700, on disk), and recorded; one `EXIT` trap, set
+only when the file is executed and never when the suite sources it, removes them
+all. `scratch_dir` sets the caller's variable with `printf -v` instead of
+printing, because `$(scratch_dir)` would record the directory in a subshell the
+trap never sees. Three tests, written first and red before the fix: the tree is
+mounted from `$STATE/verify-work`, a verify that ran to its verdict leaves
+nothing behind, and a refused one (a wrong head, a `die`) leaves nothing behind
+either.
+
+## 116. Four `| grep -q` sites shipped in v0.8.0, and the suite caught one by flaking
+
+`check_claims.sh` runs the whole suite a second time, and on 2026-10-27 that
+second run failed "the sign-off convention was not followed" while the first had
+passed. `maintainer-repo fixup` read the branch's sign-off convention as
+`git log ... | grep -q '^Signed-off-by:'` under `pipefail`: grep matched, exited,
+git took SIGPIPE, and the match came back as a failure (MISTAKES rule 2). A fixup
+would have dropped a contributor's DCO sign-off at random.
+
+The other sites were worse or quieter. `prune` decided "this branch has an open
+pull request, keep it" with `printf | grep -qx`, so a SIGPIPE there could
+delete the remote branch of an open pull request whose commits main already
+holds. The doctor's timer check and fixup's test-count
+check had the same shape, and the count check was missed by the first, manual
+search; the guard found it.
+
+**Guard:** the suite greps every shipped script (`bin/`, `lib/`, the backends,
+the installers, `platform/`, every `verify.d`) for a pipe into `grep -q`,
+ignoring comments, and fails naming the line. It counts the files it scanned
+and refuses a scan of fewer than ten, so a broken glob cannot pass by scanning
+nothing. All four sites now capture first and read a herestring, or use one
+`awk` over the captured text where two greps were chained.

@@ -31,6 +31,26 @@ REPO_PATH="${MAINTAINER_REPO:-}"
 STATE="${MAINTAINER_STATE:-}"
 ACCOUNT="${MAINTAINER_ACCOUNT:-}"
 RECEIPTS="$STATE/receipts"
+# Where a verify unpacks a pull request: on disk under the state directory,
+# private to this user, never in /tmp. On a tmpfs /tmp the tree and its cargo
+# target sit in RAM, count against the verify container's memory limit, and
+# on 2026-10-27 two refused verifies left 12 GB there (#111).
+VERIFY_WORK="$STATE/verify-work"
+# Every scratch directory this invocation made, removed by one EXIT trap: a
+# RETURN trap never fires on `die`, and nearly every refusal is a `die`.
+_scratch_dirs=()
+_remove_scratch() { [ ${#_scratch_dirs[@]} -eq 0 ] || rm -rf -- "${_scratch_dirs[@]}"; }
+# Sets the variable named $1 to a new private directory under VERIFY_WORK.
+# It sets rather than prints, because `$(scratch_dir)` would record the
+# directory in a subshell and the trap would never learn of it.
+scratch_dir() {
+    mkdir -p "$VERIFY_WORK" && chmod 700 "$VERIFY_WORK" || die "cannot create $VERIFY_WORK"
+    local d; d="$(mktemp -d "$VERIFY_WORK/XXXXXXXX")" \
+        || die "cannot create a scratch directory in $VERIFY_WORK"
+    _scratch_dirs+=("$d")
+    printf -v "$1" '%s' "$d"
+}
+_executed && trap _remove_scratch EXIT
 # Same reasoning as maintainer-repo: `gh pr merge` runs inside this script, so
 # no Bash deny rule sees it. Without this, a POST=off rehearsal could merge a
 # pull request while reporting that it reached nobody.
@@ -921,7 +941,7 @@ cmd_verify() {
     fi
     say "suite: $suite ($(suite_image) under $rt)"
 
-    local work; work="$(mktemp -d)"
+    local work; scratch_dir work
     # Scratch for a suite that needs somewhere to put things, and it must NOT
     # sit inside the extracted tree. The rust suite's overlay upperdir fills
     # with downloaded crates, every one of them full of .rs files, and the
@@ -930,7 +950,7 @@ cmd_verify() {
     # workdir is worse. podman creates it mode 000, so the mutation step's
     # `find` over the tree died with "Permission denied" and the verify
     # reported "mutation failed to apply". Measured on #438 on 2026-09-21.
-    local scratch; scratch="$(mktemp -d)"
+    local scratch; scratch_dir scratch
     case "$scratch" in "$work"/*) die "the suite scratch is inside the extracted tree" ;; esac
     trap 'rm -rf "$work" "$scratch"' RETURN
     git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:v-$pr" --force || die "cannot fetch #$pr"
