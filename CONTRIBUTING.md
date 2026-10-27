@@ -66,12 +66,25 @@ The hook runs all five. Run them yourself first; they take seconds.
 bash -n <every script>        # the hook does this over `git ls-files`
 ./tests/run-tests.sh          # offline, no network, no model call
 ./evals/run-evals.sh          # the governing rules still exist
-./scripts/check_claims.sh     # README numbers recounted from the tree
+./scripts/check_claims.sh     # every figure in the docs recounted from the tree
 ./scripts/check_drift.py      # docs agree with the code: verbs, defaults, env vars, paths, counts
 ```
 
-If `check_claims.sh` fails because you added a test, the fix is to update the
-number in `README.md`, not to relax the check.
+Never type a figure. Every number in the README, this file and `docs/` that
+describes the project (the size of the suite, the lessons, the backends, the evals,
+the denied verbs, the profiles, the user stories and their gaps) sits inside a
+marker, `<!-- fig:NAME -->VALUE<!-- /fig -->`, with an optional `floor=K` after the
+name, and `scripts/render_figures.py` counts it from the tree. A floor shows
+`floor(v/K)*K` with a trailing `+` (the suite and the lessons use floors of 100 and
+10, so a pull request that adds one test or one lesson edits nothing); every other
+figure is exact and moves only when you add a backend, an eval, a verb or a
+profile. When a figure goes stale, run `scripts/render_figures.py --write` (it runs
+the suite for the test count unless you pass `--tests N`) and commit the result;
+`--check` is what the hook, CI and `check_claims.sh` run. The check refuses a stale
+marker, an unknown name, a malformed or nested marker, a marker inside a code
+fence, a figure typed outside a marker, and a figure whose source it cannot read.
+To add a figure, give it one counting function in `FIGURES` in that script, and a
+site in `REQUIRED` if a document must state it.
 
 **The suite must pass with nothing installed.** This is the property CI tests
 and the one that is easy to lose:
