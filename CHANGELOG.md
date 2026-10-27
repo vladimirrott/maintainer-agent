@@ -27,6 +27,19 @@ middle digit.
   drift cases that mutated literal counts mutate marker contents. Two drift tests
   had gone vacuous because they matched the literal 110.
 
+### Fixed
+
+- **A verify no longer leaves the pull request behind** (#111). The extracted
+  tree and its cargo target now live under `$STATE/verify-work` on disk, and one
+  `EXIT` trap removes them on every exit, a refusal included. On a tmpfs `/tmp`
+  two refused verifies had kept 12 GB in RAM and pushed the next verify's rustc
+  past its container's memory limit (lesson 115).
+- **No shipped script pipes into `grep -q`** (lesson 116). Four sites read a
+  match as a failure whenever `pipefail` saw the writer take SIGPIPE: fixup's
+  sign-off check (seen flaking), prune's open-PR keep test, the doctor's timer
+  check and fixup's test-count check. The suite now refuses the shape anywhere
+  in `bin/`, `lib/`, the installers and the verify suites.
+
 ## [0.8.0] — 2026-10-26
 
 A timer run and an interactive session can see each other through leases, a pull

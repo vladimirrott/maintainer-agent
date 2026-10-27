@@ -255,7 +255,8 @@ case "$(uname -s)" in
             && green "lingering on: timers run without a login session" \
             || yellow "lingering off: timers stop when you log out" "sudo loginctl enable-linger $who"
         # Lesson 8: a timer about to fire immediately is usually a catch-up.
-        systemctl --user list-timers "maintainer@$profile-*" --all --no-pager 2>/dev/null | grep -qE '^\S+ +[0-9]+s ' \
+        timers="$(systemctl --user list-timers "maintainer@$profile-*" --all --no-pager 2>/dev/null)"
+        grep -qE '^\S+ +[0-9]+s ' <<<"$timers" \
             && yellow "a timer fires within seconds; Persistent=true may be catching up" "expected after enabling; otherwise check the stamp files"
     else yellow "no systemd user session" "use platform/posix/install-cron.sh"; fi ;;
   Darwin)

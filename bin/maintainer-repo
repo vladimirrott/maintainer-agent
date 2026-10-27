@@ -42,7 +42,7 @@ cmd_prune() {
     while read -r br; do
         [ -z "$br" ] && continue
         case "$br" in main|master|HEAD) continue ;; esac
-        [ -n "$open_heads" ] && printf '%s' "$open_heads" | grep -qx -F -- "$br" 2>/dev/null && { say "  keep   $br (open PR)"; continue; }
+        [ -n "$open_heads" ] && grep -qx -F -- "$br" <<<"$open_heads" && { say "  keep   $br (open PR)"; continue; }
         # Merged means: its tip is an ancestor of origin/main.
         if git merge-base --is-ancestor "origin/$br" origin/main 2>/dev/null; then
             n=$((n+1))
@@ -307,7 +307,8 @@ cmd_fixup() {
                 || die "this profile declares no FIXUP_COUNT_CMD, so a test count would be typed rather than derived"
             local n; n="$(cd "$work/r" && env -u GH_TOKEN -u GITHUB_TOKEN timeout 120 bash -c "$FIXUP_COUNT_CMD" 2>/dev/null | tr -d '[:space:]')"
             case "$n" in ''|*[!0-9]*) die "FIXUP_COUNT_CMD did not print a whole number, so no count could be derived" ;; esac
-            g diff --cached -U0 | grep -E '^\+[^+]' | grep -Eq "(^|[^0-9])$n([^0-9]|\$)" \
+            local added; added="$(g diff --cached -U0)" || die "could not read the staged patch"
+            awk -v n="$n" '/^\+[^+]/ && $0 ~ ("(^|[^0-9])" n "([^0-9]|$)") { hit = 1 } END { exit !hit }' <<<"$added" \
                 || die "the patch does not state $n, the count FIXUP_COUNT_CMD derives; a typed count is refused"
         fi
         local au; au="$(gh api "users/$author" --jq '[.id,.login]|@tsv' 2>/dev/null)" || die "could not look up $author"
@@ -315,7 +316,10 @@ cmd_fixup() {
         case "$au_id" in ''|*[!0-9]*) die "gh did not return a numeric id for $author" ;; esac
         [ "${au_login,,}" = "${author,,}" ] || die "the API answered for '$au_login', not $author"
         local -a so=()
-        g log -n 50 --format=%B "$head" | grep -q '^Signed-off-by:' && so=(-s)
+        # Captured first: piped straight into `grep -q`, the match SIGPIPEs git
+        # and pipefail reports it as no match, so the sign-off came and went.
+        local msgs; msgs="$(g log -n 50 --format=%B "$head")" || die "could not read $branch's commit messages"
+        grep -q '^Signed-off-by:' <<<"$msgs" && so=(-s)
         g commit -q "${so[@]}" -m "fixup: $nonrebase from the review" \
             -m "Co-authored-by: $au_login <$au_id+$au_login@users.noreply.github.com>" >/dev/null 2>&1 \
             || die "could not commit the patch"
