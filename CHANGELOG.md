@@ -10,6 +10,12 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.8.1] — 2026-10-27
+
+A verify cleans up after itself on every exit and keeps its scratch on disk, no
+shipped script pipes into `grep -q`, and every figure in the docs is rendered
+from its source.
+
 ### Changed
 
 - **Every figure in the README and the docs is rendered from its source, never
@@ -1282,7 +1288,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.8.1...HEAD
+[0.8.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.1
 [0.8.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.0
 [0.7.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.2
 [0.7.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.1
