@@ -10,6 +10,16 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An install refused for a run in flight writes nothing.** The check sat just
+  above the step that replaces `profiles/`, so a refused install had already
+  replaced `run.sh`, `defaults.env` and every script and stamped `VERSION` with
+  the new release. On 2026-10-29 that left the v0.10.0 deploy reporting
+  `v0.10.0` after the installer had refused. The check now runs before the
+  first write, and a test drives `install.sh` against a held lock and requires
+  zero files written.
+
 ## [0.10.0] — 2026-10-29
 
 ### Security
