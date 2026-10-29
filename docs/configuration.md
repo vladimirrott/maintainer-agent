@@ -48,6 +48,7 @@ same file, so a number is changed in one place.
 | `DEPS_AUTOMERGE` | minor | which green Dependabot bumps `maintainer deps` sends to `verify`: `none`, `patch` (every member semver-patch) or `minor` (patch or minor). A Docker digest bump that keeps its image and tag has no semver class and passes at `patch` and `minor`. A semver-major member always goes to a person |
 | `DEPS_UNKNOWN_READS` | 3 | reads `maintainer deps` makes of a merge state GitHub answers `UNKNOWN`, before it reports it |
 | `DEPS_UNKNOWN_WAIT` | 5 | seconds between those reads |
+| `CLASSIFY_TIMEOUT` | 60 | seconds `verify-deps` gives the dependency classifier before refusing |
 
 Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and read
 it through `$KEY` in bash (after `maintainer_load_defaults`) or `_tunable("KEY")`
@@ -81,6 +82,7 @@ Every name below is read by the code. A test fails when the code reads a
 | `MAINTAINER_IMAGE_RESOLVER` | the script `verify-deps` asks what an image tag resolves to. Default: `scripts/resolve_image_digest.py` |
 | `MAINTAINER_PYPI_VERIFIER` | the script `verify-deps` asks whether every pinned pip hash is a file the release publishes. Default: `scripts/verify_pypi_release.py` |
 | `MAINTAINER_PYPI_URL` | the JSON API that script asks. Default: `https://pypi.org/pypi`. The test suite points it at a `file://` tree |
+| `MAINTAINER_CLASSIFY_TIMEOUT` | seconds `verify-deps` gives the dependency classifier before refusing. Default: `CLASSIFY_TIMEOUT` in `lib/defaults.env` |
 | `MAINTAINER_FAILURE_SHAPES` | path of the failure-classification table. Default: `lib/failure-shapes.json` |
 | `MAINTAINER_SETTINGS` | the permission file the backend uses (the claude settings or the opencode config), replacing the profile's own. `run.sh` sets it itself to swap in the rehearsal wall |
 | `MAINTAINER_THINKING` | thinking-token budget for the claude backend when the profile sets no `THINKING_<task>` |

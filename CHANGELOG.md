@@ -10,6 +10,24 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **The dependency classifier reads a diff the way git wrote it.** It split the
+  diff with Python's `splitlines()`, which also breaks at form feed, vertical
+  tab, `\x1c`-`\x1e`, NEL, U+2028, U+2029 and a lone CR, and it skipped any
+  line starting `--- ` or `+++ ` as a file header, inside a hunk too. Both hid
+  content from every arm: a pip line `+...\x0c -e git+https://...` classified as
+  a clean bump, and so would a workflow pin line carrying a step after U+2028,
+  which YAML reads as a line break. The diff is now split on newline alone, any
+  changed line holding one of those characters is refused, hunk lines are
+  counted from the `@@` header instead of guessed from their prefix, the input
+  must be UTF-8, and a diff that renames, copies or deletes a file, or names a
+  file without changing a line of it, is refused. 25 recent sysknife Dependabot
+  pull requests classify exactly as before ([lesson 119](docs/lessons.md)).
+- **`verify-deps` gives the classifier 60 seconds** (`MAINTAINER_CLASSIFY_TIMEOUT`)
+  and refuses by name when it runs out, so an input that makes a pattern
+  backtrack cannot stall an unattended run.
+
 ### Added
 
 - **`verify-deps` gates a hash-pinned pip bump.** sysknife added a pip ecosystem
@@ -21,14 +39,17 @@ middle digit.
   `--hash=sha256:` line, a comment. `--index-url`, `--extra-index-url`, `-e`,
   `name @ url` and ranges match none of it and are refused on either side of
   the diff, since dropping a private index is a new place to download from as
-  much as adding one. pip reads every space-separated token from the first one
+  much as adding one. A bump must move the version of a package the file
+  already pins, upward, with the same marker and new hashes: a swap, a removal,
+  a marker flip, a downgrade, a pin moved without its hashes and a package
+  added twice are each refused. pip reads every space-separated token from the first one
   starting with `-` as an option, quotes or not, so a requirement line with such
   a token is refused too: the marker slot cannot carry `--config-settings`. A hash with no added requirement above it, and a
   requirement that arrives without hashes in a hash-pinned file, are refused.
   `scripts/verify_pypi_release.py` then asks PyPI's JSON API for that release
   and refuses a yanked release, one with no files, and any hash that is not one
-  of its files; `verify-deps` counts declared against verified packages. 24
-  tests, each refusal pinned to its own reason, and 16 mutants
+  of its files; `verify-deps` counts declared against verified packages. 48
+  tests, each refusal asserting its reason text, and 30 mutants
   ([lesson 118](docs/lessons.md)).
 
 ## [0.9.0] — 2026-10-28

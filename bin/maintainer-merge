@@ -314,8 +314,12 @@ cmd_verify_deps() {
 $(printf '%s' "$diff" | sed 's/^/    /')"
     [ -n "$diff" ] || die "the diff for #$pr is empty, so nothing was classified"
 
-    local verdict vrc=0
-    verdict="$(printf '%s\n' "$diff" | python3 "$classifier")" || vrc=$?
+    # Bounded: the classifier reads text a pull request author wrote, and a
+    # pattern that backtracks on it would stall an unattended run (its pip
+    # marker regex once took over 30 s on 1.6 KB). Out of time is a refusal.
+    local verdict vrc=0 limit="${MAINTAINER_CLASSIFY_TIMEOUT:-${CLASSIFY_TIMEOUT:?lib/defaults.env was not loaded}}"
+    verdict="$(printf '%s\n' "$diff" | timeout "$limit" python3 "$classifier")" || vrc=$?
+    [ "$vrc" != 124 ] || die "the dependency classifier ran past ${limit}s on #$pr, so nothing was classified"
     if [ "$vrc" != 0 ]; then
         die "#$pr is not a pure dependency bump, so it needs a real receipt:
 

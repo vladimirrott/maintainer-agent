@@ -107,12 +107,48 @@ FROM_PIN = re.compile(
 # Extras are left out as well, because `name[x]` installs packages the line
 # does not name. An environment marker may follow the pin, in a character set
 # with no `@`, `/` or `:`, so it cannot carry a URL.
-PIP_REQ = re.compile(
-    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9.+!_-]*)"
-    r"(?:\s*;\s*[A-Za-z0-9_.<>=!'\" ()~-]+?)?\s*(?P<cont>\\)?\s*$"
-)
-PIP_HASH = re.compile(r"^\s+--hash=sha256:(?P<digest>[0-9a-f]{64})\s*(?P<cont>\\)?\s*$")
-PIP_INERT = re.compile(r"^\s*(?:#.*)?$")
+PIP_PIN = re.compile(r"(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9.+!_-]*)")
+PIP_MARKER = re.compile(r"[A-Za-z0-9_.<>=!'\" ()~-]+")
+PIP_HASH = re.compile(r"[ \t]+--hash=sha256:(?P<digest>[0-9a-f]{64})")
+PIP_INERT = re.compile(r"[ \t]*(?:#.*)?")
+# Longer than any real requirement line. A bound, so no line costs much to read.
+PIP_LINE_MAX = 1000
+
+
+def pip_line(text):
+    """What one requirements line is, or None when it is outside the allowlist.
+
+    ("req", name, version, marker, continues) | ("hash", digest, continues) |
+    ("inert",). Every match is a fullmatch over one character class at a time,
+    so the cost is linear in the line: the regex this replaced backtracked on a
+    marker of spaces, and 1500 of them ran past 30 seconds.
+
+    pip joins a line onto the next only when the backslash is its last
+    character, so a backslash followed by a space continues nothing.
+    """
+    if len(text) > PIP_LINE_MAX:
+        return None
+    if PIP_INERT.fullmatch(text):
+        return ("inert",)
+    continues = text.endswith("\\")
+    body = text[:-1].rstrip(" ") if continues else text
+    digest = PIP_HASH.fullmatch(body)
+    if digest:
+        return ("hash", digest["digest"], continues)
+    pin, sep, marker = body.partition(";")
+    match = PIP_PIN.fullmatch(pin.rstrip(" "))
+    if not match:
+        return None
+    marker = marker.strip(" ")
+    if sep and not PIP_MARKER.fullmatch(marker):
+        return None
+    return ("req", match["name"], match["version"], marker, continues)
+
+
+def pip_version_key(version):
+    """A sortable key for a plain dotted release, or None."""
+    parts = version.split(".")
+    return tuple(int(p) for p in parts) if all(p.isdigit() for p in parts) else None
 
 
 def classify_path(path):
@@ -136,6 +172,17 @@ def classify_path(path):
     return None
 
 
+# Characters Python's str.splitlines() and pip break a line at and git does not.
+# A changed line holding one carries a second line the diff never shows as one:
+# pip reads it, YAML reads U+0085 and U+2028 as breaks too, and this parser,
+# splitting on newline alone, would have classified only the first half.
+LINE_BREAKS = "\r\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029"
+HUNK = re.compile(r"^@@ -\d+(?:,(?P<old>\d+))? \+\d+(?:,(?P<new>\d+))? @@")
+# A sentinel between hunks. Context lines are dropped, so without it two added
+# lines from different hunks look adjacent.
+HUNK_START = ("@", "")
+
+
 def parse(diff):
     """{path: [(sign, text), ...]} for every changed line, in order.
 
@@ -148,34 +195,53 @@ def parse(diff):
     manifest line reading `--`. It failed closed, which is the right direction
     for the wrong reason: every rebased Dependabot pull request would be refused
     the same way.
+
+    Inside a hunk the header's line counts decide what a line is, never its
+    prefix. A removed file line `-- x` prints as `--- x`, and skipping it as a
+    file header hid a removed `--index-url` from the pip arm. The diff is split
+    on newline alone, because that is what git wrote it with.
     """
-    files, path, in_hunk = {}, None, False
-    for line in diff.splitlines():
+    files, path, old, new = {}, None, 0, 0
+    for line in diff.split("\n"):
+        if old > 0 or new > 0:
+            if line.startswith("\\"):
+                continue  # `\ No newline at end of file`
+            if line[:1] in (" ", "+", "-"):
+                if any(ch in line for ch in LINE_BREAKS):
+                    refuse("a changed line holds a line break git does not split on, so it "
+                           "carries a line the diff does not show", path, line[1:].strip()[:200])
+                if line[:1] != "+":
+                    old -= 1
+                if line[:1] != "-":
+                    new -= 1
+                if line[:1] != " ":
+                    files[path].append((line[:1], line[1:]))
+                continue
+            # A truncated hunk, or the next patch: whatever this is, the hunk ended.
+            old = new = 0
         if line.startswith("diff --git "):
-            # `diff --git a/x b/x`; take the b-side, which is the path after a
-            # rename and identical otherwise.
-            path = line.split(" b/", 1)[1] if " b/" in line else None
+            # `diff --git a/x b/x`; a rename or copy names two paths, and moving
+            # a file into a lockfile's place is not a version bump.
+            sides = line[len("diff --git "):].split(" b/", 1)
+            path = sides[1] if len(sides) == 2 else None
+            if path is None or sides[0] != "a/" + path:
+                refuse("the diff renames or copies a file, which is not a version bump", path)
             files.setdefault(path, [])
-            in_hunk = False
             continue
+        # A header line of the current file. Guarded on a path because a commit
+        # message sits outside any file and may say "deleted file" in prose.
+        if path is not None and line.startswith("deleted file"):
+            refuse("the diff deletes a file, which is not a version bump", path)
         if line.startswith("From ") and len(line.split()) > 2:
             # The next commit's mbox header: nothing after it belongs to the
             # file the previous patch was describing.
-            path, in_hunk = None, False
+            path = None
             continue
-        if line.startswith("@@"):
-            in_hunk = path is not None
-            continue
-        if line.startswith(("--- ", "+++ ", "index ", "new file", "deleted file",
-                            "old mode", "new mode", "similarity index", "rename ",
-                            "Binary files")):
-            continue
-        if not in_hunk or path is None:
-            continue
-        if line.startswith("+"):
-            files[path].append(("+", line[1:]))
-        elif line.startswith("-"):
-            files[path].append(("-", line[1:]))
+        match = HUNK.match(line)
+        if match and path is not None:
+            old = int(match["old"] if match["old"] is not None else 1)
+            new = int(match["new"] if match["new"] is not None else 1)
+            files[path].append(HUNK_START)
     return files
 
 
@@ -201,7 +267,13 @@ def refuse(reason, path=None, line=None) -> typing.NoReturn:
 
 
 def main():
-    diff = sys.stdin.read()
+    # Bytes, decoded strictly: text-mode stdin decodes with the locale, and
+    # under the C locale that is surrogateescape, which lets bytes through that
+    # no requirements file or lockfile holds.
+    try:
+        diff = sys.stdin.buffer.read().decode("utf-8")
+    except UnicodeDecodeError as err:
+        refuse(f"the diff is not UTF-8 ({err.reason} at byte {err.start}), so it was not read")
     files = parse(diff)
     if not files:
         # An empty diff and a diff this parser failed to read look the same from
@@ -209,11 +281,16 @@ def main():
         refuse("the diff named no changed file, so nothing was classified")
 
     pins, images, packages, kinds, changed_lines = [], [], [], {}, 0
-    for path, lines in sorted(files.items()):
+    for path, marked in sorted(files.items()):
         kind = classify_path(path)
         if kind is None:
             refuse(f"{path} is not dependency metadata, so this is not a pure bump", path)
         kinds[path] = kind
+        # Only the pip arm reads hunk boundaries; every other arm gets lines.
+        lines = [entry for entry in marked if entry != HUNK_START]
+        if not lines:
+            # A mode change, or a header with no hunk: nothing moved a version.
+            refuse(f"the diff names {path} but changes no line of it", path)
         changed_lines += len(lines)
 
         if kind == "cargo-lock":
@@ -281,49 +358,91 @@ def main():
                                                for m in removed)})
 
         elif kind == "pip-requirements":
-            # Each added hash belongs to the requirement above it. A hash with no
-            # requirement in the diff changed under a pin the diff does not show,
-            # so the version it belongs to is unknown here and nothing could
-            # check it against the release it claims to be.
-            current, hashed, added = None, False, []
-            for sign, text in lines:
-                req, digest = PIP_REQ.match(text), PIP_HASH.match(text)
-                if not (req or digest or PIP_INERT.match(text)):
+            # Each added hash belongs to the requirement above it in the same
+            # hunk. A hash with no requirement above it changed under a pin the
+            # diff does not show, so the version it belongs to is unknown here
+            # and nothing could check it against the release it claims to be.
+            current, hashed, added, removed = None, False, [], []
+            for sign, text in marked:
+                if (sign, text) == HUNK_START:
+                    current = None
+                    continue
+                line = pip_line(text)
+                if line is None:
                     refuse("a requirements line is not a pinned requirement, a hash or a comment",
-                           path, text.strip())
+                           path, text.strip()[:200])
                 # pip splits a requirement line on single spaces and reads
                 # everything from the first token starting with `-` as options
                 # (req_file.break_args_options), inside quotes or not. The
                 # marker's character set holds `-`, `=` and quotes, so
                 # `--config-settings=...` would otherwise ride in as a marker.
-                if req and any(tok.startswith("-") for tok in text.split(" ")):
+                if line[0] == "req" and any(tok.startswith("-") for tok in text.split(" ")):
                     refuse("a requirement line carries a pip option after its pin",
-                           path, text.strip())
-                hashed = hashed or bool(digest)
-                if sign != "+":
+                           path, text.strip()[:200])
+                hashed = hashed or line[0] == "hash"
+                if sign == "-":
+                    if line[0] == "req":
+                        removed.append(line)
                     continue
-                if req:
-                    package = {"name": req["name"], "version": req["version"], "hashes": []}
+                if line[0] == "req":
+                    package = {"name": line[1], "version": line[2], "marker": line[3],
+                               "continues": line[4], "hashes": []}
                     added.append(package)
-                    current = package if req["cont"] else None
-                elif digest:
+                    current = package if line[4] else None
+                elif line[0] == "hash":
                     if current is None:
                         refuse("a hash changed without the requirement it belongs to",
                                path, text.strip())
-                    current["hashes"].append(digest["digest"])
-                    if not digest["cont"]:
+                    current["hashes"].append(line[1])
+                    if not line[2]:
                         current = None
                 else:
                     current = None
-            # Once either side of the diff shows a hash, the file is hash-pinned,
-            # and a requirement that arrives without one has given up the check
-            # --require-hashes makes. pip would refuse to install it; this says
-            # why before CI does.
+
+            # A bump moves the version of a package the file already pins, and
+            # nothing else: the same names on both sides, the same markers, a
+            # higher version. A swap, a removal, a marker flip or a downgrade
+            # all keep the grammar and none of them is a bump.
+            def norm(name):
+                return re.sub(r"[-_.]+", "-", name).lower()
+            was, now = {}, {}
+            for _, name, version, marker, _ in removed:
+                was[norm(name)] = (version, marker)
+            # Twice on the added side would let the second pin replace the
+            # first here, and the first one's hashes would go unchecked.
             for package in added:
+                if norm(package["name"]) in now:
+                    refuse(f"the diff adds {package['name']} twice", path, package["name"])
+                now[norm(package["name"])] = package
+            if set(was) != set(now):
+                refuse("the bump adds or removes a package, which is not a version bump",
+                       path, ", ".join(sorted(set(was) ^ set(now))))
+            if not now:
+                refuse(f"no requirement in {path} moved a version", path)
+            for key, package in now.items():
+                old_version, old_marker = was[key]
+                name, version = package["name"], package["version"]
+                if package["marker"] != old_marker:
+                    refuse(f"the bump changes {name}'s marker, which is not a version bump",
+                           path, f"{old_marker!r} -> {package['marker']!r}")
+                old_key, new_key = pip_version_key(old_version), pip_version_key(version)
+                if old_key is None or new_key is None:
+                    refuse(f"cannot order {name} {old_version} and {version}, so this is not "
+                           "shown to be an upgrade", path, f"{old_version} -> {version}")
+                if new_key <= old_key:
+                    refuse(f"{name} moves to a lower version or stays put, which is not an upgrade",
+                           path, f"{old_version} -> {version}")
+                # Once either side of the diff shows a hash, the file is
+                # hash-pinned, and a requirement that arrives without one has
+                # given up the check --require-hashes makes.
                 if hashed and not package["hashes"]:
-                    refuse(f"the bump drops hash pinning for {package['name']}", path,
-                           f"{package['name']}=={package['version']}")
-            packages.extend(added)
+                    refuse(f"the bump drops hash pinning for {name}", path, f"{name}=={version}")
+                # A pin that continues onto hash lines the diff leaves alone
+                # keeps the old release's hashes under the new version.
+                if package["continues"] and not package["hashes"]:
+                    refuse(f"{name}'s pin moved and no hash moved with it", path,
+                           f"{name}=={version}")
+                packages.append({"name": name, "version": version, "hashes": package["hashes"]})
 
         elif kind == "workflow":
             for sign, text in lines:

