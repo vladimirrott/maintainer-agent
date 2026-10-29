@@ -888,6 +888,27 @@ wait "$ilk_pid" 2>/dev/null || true
 flock -n "$ilk/state/run.lock" true 2>/dev/null \
     && ok "and the lock frees when the holder exits" \
     || bad "the fixture lock never released"
+# And the refusal has to come before the first write, not just before the
+# profiles. On 2026-10-29 an install refused with a magent run in flight, after
+# it had already replaced run.sh, defaults.env and every script and stamped
+# VERSION with the new release: a refused install left a half-deployed tool
+# whose stamp claimed the version it had not finished installing.
+ihome="$stub_dir/ihome"; rm -rf "$ihome"; mkdir -p "$ihome"
+: > "$MAINTAINER_STATE_DIR/run.lock"
+( flock 9; sleep 8 ) 9<>"$MAINTAINER_STATE_DIR/run.lock" &
+ih_pid=$!
+ih_wait=0
+while flock -n "$MAINTAINER_STATE_DIR/run.lock" true 2>/dev/null; do
+    ih_wait=$((ih_wait + 1)); [ "$ih_wait" -gt 200 ] && break; sleep 0.05
+done
+ih_out="$(HOME="$ihome" "$root/install.sh" 2>&1)"; ih_rc=$?
+ih_files="$(find "$ihome" -type f 2>/dev/null | wc -l)"
+wait "$ih_pid" 2>/dev/null || true
+if [ "$ih_rc" = 69 ] && grep -q 'in flight' <<<"$ih_out" && [ "$ih_files" = 0 ]; then
+    ok "an install refused for a run in flight writes nothing at all"
+else
+    bad "a refused install still wrote $ih_files file(s) (rc=$ih_rc): $(find "$ihome" -type f | head -3 | tr '\n' ' ')"
+fi
 
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
 # sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
