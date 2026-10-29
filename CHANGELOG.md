@@ -10,6 +10,20 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **A pin comment is a tag GitHub has, not a path GitHub normalises.**
+  `verify-deps` resolved a pin's comment through `commits/<comment>`, which follows
+  any ref, and GitHub normalises `..` in the path first: a pin to a pull request's
+  head, commented `pull/1/head` or `v4.2.2/../pull/1/head`, read `(GitHub agrees)`
+  and earned a dependency receipt (lesson 117, same class as sysknife GHSA-j754).
+  The classifier now refuses a comment or action path with an empty segment, a
+  segment starting with `.` or `-`, or a character outside a short ref alphabet,
+  naming the file and line. `verify-deps` asks `git/ref/tags/<tag>`, requires
+  `.ref` to be exactly `refs/tags/<tag>`, follows an annotated tag through at
+  most four tag objects to its commit, and asks `git/ref/heads/<branch>` for
+  `refs/heads/<branch>` before it compares a branch pin.
+
 ## [0.8.1] — 2026-10-27
 
 A verify cleans up after itself on every exit and keeps its scratch on disk, no

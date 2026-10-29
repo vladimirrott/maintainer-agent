@@ -47,6 +47,24 @@ PIN = re.compile(
     r"(?P<branch>\s+\(branch\))?\s*$"
 )
 
+# What a tag or branch in a pin comment may look like, and what an action path
+# may look like. Both are interpolated into a GitHub API path by the caller, and
+# GitHub normalises that path before it resolves anything: `v4.2.2/../pull/1/head`
+# reaches a pull request's head, which anyone can push, and passed as the tag.
+# Same class as sysknife GHSA-j754. A segment is plain characters and never
+# empty (so no leading, trailing or doubled `/`). Its first character may not be
+# `.` or `-`, which is what keeps `.` and `..` out: there is no second check for
+# them, because a second copy of a rule is the copy that drifts. Narrower than
+# git's own rules on purpose: a real tag this refuses goes to a person, and a
+# path this accepts goes to the network.
+REF_SEGMENT = re.compile(r"[A-Za-z0-9_+][A-Za-z0-9._+-]*")
+ACTION_SEGMENT = re.compile(r"[A-Za-z0-9_][A-Za-z0-9._-]*")
+
+
+def _plain_path(text, segment):
+    """True when every `/`-separated part of `text` is a plain segment."""
+    return all(segment.fullmatch(p) for p in text.split("/"))
+
 # Lines a Cargo.lock bump is made of. Anything else in that file is somebody
 # editing the lockfile by hand, which is not this class.
 CARGO_LOCK_OK = (
@@ -244,6 +262,14 @@ def main():
                     refuse("a workflow line changed that is not an action pin", path,
                            text.strip())
                 if sign == "+":
+                    action = match["action"]
+                    if len(action.split("/")) < 2 or not _plain_path(action, ACTION_SEGMENT):
+                        refuse("an action path is not plain owner/repo[/dir] segments, and the gate "
+                               "would put it in a GitHub API path", path, text.strip())
+                    if not _plain_path(match["tag"], REF_SEGMENT):
+                        refuse("a pin comment is not a plain tag or branch name: GitHub normalises "
+                               "`..`, `/` and escapes in the API path the gate would ask, so it could "
+                               "resolve to a ref that is not a tag", path, text.strip())
                     pins.append({"action": match["action"], "sha": match["sha"],
                                  "tag": match["tag"], "branch": bool(match["branch"])})
 

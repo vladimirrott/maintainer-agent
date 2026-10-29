@@ -3772,13 +3772,17 @@ grep -q '"changed_lines": 4' <<<"$vout" \
 # End to end, because a subcommand that exists and a subcommand that works are
 # different claims and grep cannot tell them apart.
 dep_state="$stub_dir/depstate"; mkdir -p "$dep_state"
-dep_gate() {  # $1 = patch file, $2 = what `gh api .../commits/<tag>` answers
+dep_gate() {  # $1 = patch file, $2 = the commit GitHub says the tag is, or the compare status of a branch pin
     rm -f "$dep_state/receipts/9.json"
+    # The tag and branch arms answer `.ref` only when the jq asks for it, the way
+    # GitHub's git/ref endpoint does, and name exactly the ref that was asked for.
     make_stub gh "case \"\$*\" in
       *'auth switch'*) exit 0 ;;
       *'api user'*) echo testuser ;;
       *headRefOid*) echo cafe1234cafe1234 ;;
       *'pr diff'*) cat '$1' ;;
+      *'/git/ref/tags/'*'.ref'*) printf 'refs/tags/%s\tcommit\t%s\n' \"\${2#*/git/ref/tags/}\" '$2' ;;
+      *'/git/ref/heads/'*'.ref'*) printf 'refs/heads/%s\n' \"\${2#*/git/ref/heads/}\" ;;
       *'api repos/'*) echo '$2' ;;
     esac"
     PATH="$stub_dir:$PATH" MAINTAINER_STATE="$dep_state" MAINTAINER_ACCOUNT=testuser \
@@ -3902,6 +3906,165 @@ rm -f "$stub_dir/gh"
 grep -qE 'observed\|dependency|dependency\|observed' "$root/bin/maintainer-merge" \
     && ok "an unattended run may merge on a dependency receipt" \
     || bad "a dependency receipt is still 'not observed' to cmd_merge"
+
+echo "== a pin comment names a tag GitHub has, not a path GitHub normalises =="
+# The same class as sysknife's GHSA-j754. The classifier took a pin's comment as
+# `\S+` and verify-deps asked `repos/<action>/commits/<comment>`. GitHub resolves
+# `commits/pull/1/head` to a pull request's head, which anyone can push, and
+# normalises `..` in the path before it resolves anything, so a pin to a
+# stranger's commit commented `pull/1/head`, or `v4.2.2/../pull/1/head`, passed
+# as the tag it never was. Measured 2026-10-28 against actions/checkout:
+# `commits/pull/1/head` answers bf8f6208, and `git/ref/tags/../pull/1/head`
+# answers `refs/pull/1/head`. So the comment is checked for shape, and the tag
+# is asked for as a tag and must come back as exactly that tag.
+pin_patch() {  # $1 = file to write, $2 = the comment after `#` on the added pin, $3 = the action
+    cat > "$1" <<PATCH
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -10,7 +10,7 @@ jobs:
+-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
++        uses: ${3:-actions/checkout}@bf8f62083c41b3cb36f52c4100ad20ba98400ea6  # $2
+PATCH
+}
+for c in 'v4.2.2/../../pull/1/head' '../pull/1/head' 'v4.2.2/..' '/v4.2.2' 'v4.2//2' \
+         'v4.2.2/' './v4' 'v4.2.2;id' 'v4.2.2%2F..' '-v4' '../pull/1/head (branch)'; do
+    pin_patch "$dp/tag-shape.patch" "$c"
+    vout="$(dep_case "$dp/tag-shape.patch")"
+    if grep -q '"verdict": "refused"' <<<"$vout" && grep -q '"path": ".github/workflows/ci.yml"' <<<"$vout" \
+       && grep -qF -- "${c% (branch)}" <<<"$(grep '"line"' <<<"$vout")"; then
+        ok "the classifier refuses the pin comment '$c' and names the file and the line"
+    else
+        bad "the pin comment '$c' was not refused with its file and line: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+    fi
+done
+# The shapes a real tag or branch takes, so the refusal above is about the path
+# and not about slashes or dots in general.
+for c in 'v4.2.2' 'v2.87.14' '3.99.4' 'codeql-bundle/v2.20.0' 'v1.0.0+build.7' 'stable (branch)' 'release/2026 (branch)'; do
+    pin_patch "$dp/tag-shape.patch" "$c"
+    vout="$(dep_case "$dp/tag-shape.patch")"
+    grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+        && ok "the classifier accepts the ordinary pin comment '$c'" \
+        || bad "an ordinary pin comment '$c' was refused: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+done
+# The action half of the same line is interpolated into the same API path.
+for a in 'actions/checkout/../../evil/x' '../evil' 'actions/./checkout' 'actions//checkout' 'actions/check%2Fout'; do
+    pin_patch "$dp/tag-shape.patch" 'v4.2.2' "$a"
+    vout="$(dep_case "$dp/tag-shape.patch")"
+    grep -q '"verdict": "refused"' <<<"$vout" && grep -qF -- "$a" <<<"$(grep '"line"' <<<"$vout")" \
+        && ok "the classifier refuses the action path '$a'" \
+        || bad "the action path '$a' passed the classifier: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+done
+
+# End to end through verify-deps, with a gh stub that answers each endpoint the
+# way GitHub does, logs every call, and answers `.ref` only when the jq asks for
+# it: the old code asked `commits/<tag> --jq .sha` and must fail by passing the
+# pin, not by choking on an answer meant for another question.
+pin_calls="$stub_dir/pin-calls"
+pin_sha=bf8f62083c41b3cb36f52c4100ad20ba98400ea6
+pin_scripts="$stub_dir/pinscripts"; mkdir -p "$pin_scripts"
+# A classifier that lets one pin through as declared, for the cases that prove
+# verify-deps does not depend on the classifier having caught the shape.
+cat > "$pin_scripts/classify_dependency_bump.py" <<'STUB'
+import json, os, sys
+sys.stdin.read()
+json.dump({"verdict": "dependency-bump", "files": {".github/workflows/ci.yml": "workflow"},
+           "changed_lines": 2, "pins": json.loads(os.environ["FAKE_PINS"]), "images": []}, sys.stdout)
+STUB
+pin_gate() {  # $1 = patch; PG_REF, PG_TAGOBJ, PG_HEAD, PG_SHA, PG_CMP = what each endpoint answers (404 = not found)
+    rm -f "$dep_state/receipts/9.json"; : > "$pin_calls"
+    cat > "$stub_dir/gh" <<GHEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$pin_calls'
+nf() { echo 'gh: Not Found (HTTP 404)' >&2; exit 1; }
+case "\$*" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*) echo testuser ;;
+  *headRefOid*) echo cafe1234cafe1234 ;;
+  *'pr diff'*) cat '$1' ;;
+  *'/git/ref/tags/'*'.ref'*) [ '${PG_REF:-404}' = 404 ] && nf; printf '%b\n' '${PG_REF:-}' ;;
+  *'/git/tags/'*) [ '${PG_TAGOBJ:-404}' = 404 ] && nf; printf '%b\n' '${PG_TAGOBJ:-}' ;;
+  *'/git/ref/heads/'*'.ref'*) [ '${PG_HEAD:-404}' = 404 ] && nf; printf '%s\n' '${PG_HEAD:-}' ;;
+  *'/commits/'*'.sha'*) printf '%s\n' '${PG_SHA:-}' ;;
+  *'/compare/'*) printf '%s\n' '${PG_CMP:-}' ;;
+  *) exit 1 ;;
+esac
+GHEOF
+    chmod +x "$stub_dir/gh"
+    # Bounded, because a mutant of the annotated-tag loop never ends on its own.
+    PATH="$stub_dir:$PATH" MAINTAINER_STATE="$dep_state" MAINTAINER_ACCOUNT=testuser \
+        MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
+        MAINTAINER_SCRIPTS="${PG_SCRIPTS:-$root/scripts}" FAKE_PINS="${FAKE_PINS:-[]}" \
+        timeout 60 bash "$root/bin/maintainer-merge" verify-deps 9 cafe1234cafe1234 2>&1
+}
+
+# The shape the real classifier still lets through: `pull/1/head` is a legal ref
+# name. GitHub has no TAG by that name, which is the question that settles it.
+pin_patch "$dp/pr-head.patch" 'pull/1/head'
+pout="$(PG_REF=404 PG_SHA="$pin_sha" pin_gate "$dp/pr-head.patch")"; prc=$?
+if [ "$prc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -q 'pull/1/head' <<<"$pout" \
+   && grep -q '/git/ref/tags/pull/1/head' "$pin_calls"; then
+    ok "verify-deps asks for the comment as a tag, and a pull request head is not one"
+else
+    bad "a pin to a pull request head, commented pull/1/head, earned a receipt (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-160)"
+fi
+grep -q '/commits/' "$pin_calls" \
+    && bad "verify-deps still resolves a tag through commits/<tag>, which follows any ref" \
+    || ok "and it never asks commits/<tag>, which resolves branches and pull heads alike"
+
+# A ref that comes back as something other than the tag asked for. This is what
+# GitHub answers live for `git/ref/tags/../pull/1/head`, reached here through a
+# classifier that let the shape through.
+pout="$(PG_SCRIPTS="$pin_scripts" FAKE_PINS="[{\"action\":\"actions/checkout\",\"sha\":\"$pin_sha\",\"tag\":\"../pull/1/head\",\"branch\":false}]" \
+        PG_REF="refs/pull/1/head\\tcommit\\t$pin_sha" PG_SHA="$pin_sha" pin_gate "$dp/pr-head.patch")"; prc=$?
+if [ "$prc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -q 'refs/pull/1/head' <<<"$pout"; then
+    ok "verify-deps refuses a tag GitHub answers with a ref that is not refs/tags/<tag>"
+else
+    bad "a ref GitHub resolved to refs/pull/1/head passed as the tag (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-160)"
+fi
+
+# An annotated tag names a tag object, and the tag object names the commit.
+pin_patch "$dp/annotated.patch" 'v9.9.9'
+pout="$(PG_REF="refs/tags/v9.9.9\\ttag\\t$(printf 'a%.0s' {1..40})" PG_TAGOBJ="commit\\t$pin_sha" PG_SHA="$pin_sha" \
+        pin_gate "$dp/annotated.patch")"; prc=$?
+if [ "$prc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] && grep -q '/git/tags/a\{40\}' "$pin_calls"; then
+    ok "an annotated tag is dereferenced to its commit, and the pin on that commit earns a receipt"
+else
+    bad "an annotated tag on the pinned commit earned no receipt (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-160)"
+fi
+pout="$(PG_REF="refs/tags/v9.9.9\\ttag\\t$(printf 'a%.0s' {1..40})" PG_TAGOBJ="commit\\t$(printf '0%.0s' {1..40})" PG_SHA="$pin_sha" \
+        pin_gate "$dp/annotated.patch")"; prc=$?
+[ "$prc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -q 'pin comment is not true' <<<"$pout" \
+    && ok "an annotated tag on another commit is refused" \
+    || bad "an annotated tag on another commit earned a receipt (rc=$prc)"
+pout="$(PG_REF="refs/tags/v9.9.9\\ttag\\t$(printf 'a%.0s' {1..40})" PG_TAGOBJ="tag\\t$(printf 'a%.0s' {1..40})" PG_SHA="$pin_sha" \
+        pin_gate "$dp/annotated.patch")"; prc=$?
+[ "$prc" != 0 ] && [ "$prc" != 124 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -qi 'nested' <<<"$pout" \
+    && ok "a tag that keeps naming tags is refused after a bounded number of reads" \
+    || bad "a cycle of tag objects was not refused in bounds (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-120)"
+pout="$(PG_REF="refs/tags/v9.9.9\\ttree\\t$pin_sha" PG_SHA="$pin_sha" pin_gate "$dp/annotated.patch")"; prc=$?
+[ "$prc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -q 'tree' <<<"$pout" \
+    && ok "a tag that names a tree rather than a commit is refused" \
+    || bad "a tag naming a tree earned a receipt (rc=$prc)"
+
+# A branch pin: the branch has to exist under exactly that name before the
+# compare is asked, or the compare answers about whatever the name resolved to.
+pout="$(PG_SCRIPTS="$pin_scripts" FAKE_PINS="[{\"action\":\"actions/checkout\",\"sha\":\"$pin_sha\",\"tag\":\"../pull/1/head\",\"branch\":true}]" \
+        PG_HEAD=refs/pull/1/head PG_CMP=identical pin_gate "$dp/pr-head.patch")"; prc=$?
+if [ "$prc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ] && grep -q 'refs/pull/1/head' <<<"$pout"; then
+    ok "a branch pin whose name GitHub resolves to another ref is refused"
+else
+    bad "a branch pin resolved to refs/pull/1/head earned a receipt (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-160)"
+fi
+grep -q '/compare/' "$pin_calls" \
+    && bad "verify-deps asked compare before it knew the branch was a branch" \
+    || ok "and the compare is never asked about a name that is not a branch"
+pin_patch "$dp/branch-ok.patch" 'stable (branch)'
+pout="$(PG_HEAD=refs/heads/stable PG_CMP=behind pin_gate "$dp/branch-ok.patch")"; prc=$?
+[ "$prc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] && grep -q '/git/ref/heads/stable' "$pin_calls" \
+    && ok "a branch pin on a real branch is checked by name, then by compare, and earns a receipt" \
+    || bad "a branch pin on a real branch earned no receipt (rc=$prc): $(tr '\n' ' ' <<<"$pout" | cut -c1-160)"
+rm -f "$stub_dir/gh"
 
 echo "== the built suite image on this host is the one the tree describes =="
 # sysknife#471 could not earn a receipt because the shell suite's image had no
@@ -8023,8 +8186,12 @@ fig_sum() { (cd "$fg" && find . -type f -print0 | sort -z | xargs -0 sha256sum |
 fig_fresh() { rm -rf "$fg"; mkdir -p "$fg"
     cp -r "$root/bin" "$root/lib" "$root/docs" "$root/profiles" "$root/scripts" "$root/evals" "$fg/"
     cp "$root/README.md" "$root/CONTRIBUTING.md" "$root/CHANGELOG.md" "$fg/"
+    # The copy's test count is pinned to the 1,300 band, so these cases measure
+    # the renderer and not how big the real suite is today. Copied as it stood,
+    # every case below went red the commit the suite crossed 1,400.
+    sed -i 's/\(<!-- fig:tests floor=100 -->\)[^<]*/\11,300+/' "$fg/README.md"
     fig_pristine="$(fig_sum)"; }
-# 1350 sits inside the README's "1,300+" floor, so the pristine copy passes.
+# 1350 sits inside the copy's "1,300+" floor, so the pristine copy passes.
 fig_bites() {  # $1 = regex a FAIL line must match, $2 = label, rest = extra args
     local re="$1" label="$2"; shift 2
     # A mutation that applied to nothing leaves the copy pristine, and a checker
