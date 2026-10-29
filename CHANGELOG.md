@@ -32,13 +32,16 @@ middle digit.
   day untouched. `deps [pr...]` lists every open pull request by
   `app/dependabot`, or the ones named, and prints one block each: the identity
   it checked (the branch in this repository, every commit authored by
-  `dependabot[bot]` and committed by it or by GitHub with a verified signature),
+  `dependabot[bot]`, committed by it or by GitHub, and signed: GitHub derives a
+  commit's login from its email, so only the signature is out of a pusher's reach),
   the members of the `updated-dependencies` block with their semver class, the
   classifier's verdict, the CI counts (a check whose conclusion is the empty
   string is pending) and the merge state, then one `next:`: `rebase`, `wait`,
   `investigate <check>`, `verify` or `human`, with the changelog link of every
   semver-major member. Any other commit makes it `review as a contributor PR`.
-  It exits non-zero naming every pull request it could not read.
+  It exits non-zero naming every pull request it could not read, and every
+  name it prints that GitHub returned, check names included, is flattened to
+  one line and capped, since the `next:` line is what an unattended run acts on.
 - **`maintainer deps rebase <pr>`** posts `@dependabot rebase` once per head, only
   on a verified Dependabot pull request that is `BEHIND` or `DIRTY`, reads the
   comment back, and rehearses at `POST=off`.

@@ -2997,10 +2997,13 @@ def cmd_reviewed(pr: str) -> None:
 DEPENDABOT_APP = "app/dependabot"          # the author gh reports for the app
 DEPENDABOT_BOT = "dependabot[bot]"         # the login on its commits
 # Dependabot's commits are committed by GitHub itself and signed with its key:
-# on #688-#692 every one reads committer `web-flow`, verified. So web-flow counts
-# only with a verified signature. A maintainer's "Update branch" is also
-# committed by web-flow, and its AUTHOR is the maintainer, which is what the
-# author check catches.
+# on #688-#692 every one reads committer `web-flow`, verified. GitHub derives a
+# commit's login from its email, so `dependabot[bot]` as author and committer
+# is something anybody who can push to the branch can write; the signature is
+# what they cannot. So every commit must be verified, and its committer must be
+# Dependabot or web-flow. A maintainer's "Update branch" is also committed by
+# web-flow, and its AUTHOR is the maintainer, which is what the author check
+# catches.
 GITHUB_COMMITTER = "web-flow"
 REBASE_ASK = "@dependabot rebase"
 DEPS_LEVELS = {"none": (), "patch": ("patch",), "minor": ("patch", "minor")}
@@ -3077,13 +3080,15 @@ def _deps_ci(rollup) -> dict:
     `(.conclusion // "") == ""`: a running check reports conclusion "", an empty
     STRING, and a poll that only looked for IN_PROGRESS settled with eight checks
     still running (MISTAKES 6c). A commit status has a `state` instead, and is
-    read from that, so a green status context does not wait forever.
+    read from that, so a green status context does not wait forever. A check's
+    name is whatever the workflow's author wrote, and it lands on the `next:`
+    line, so it is flattened and capped here, where it is collected.
     """
     ci = {"pass": 0, "skipped": 0, "failing": [], "pending": [], "total": 0}
     for c in rollup or []:
         ci["total"] += 1
         if c.get("__typename") == "StatusContext":
-            name, v = c.get("context") or "?", (c.get("state") or "").upper()
+            name, v = safe_for_prompt(c.get("context") or "?", 60), (c.get("state") or "").upper()
             if v == "SUCCESS":
                 ci["pass"] += 1
             elif v in ("", "PENDING", "EXPECTED"):
@@ -3091,7 +3096,7 @@ def _deps_ci(rollup) -> dict:
             else:
                 ci["failing"].append(name)
             continue
-        name, v = c.get("name") or "?", (c.get("conclusion") or "").upper()
+        name, v = safe_for_prompt(c.get("name") or "?", 60), (c.get("conclusion") or "").upper()
         if v == "":
             ci["pending"].append(name)
         elif v in ("SUCCESS", "NEUTRAL"):
@@ -3193,9 +3198,9 @@ def _deps_identity(info: dict):
         if c.get("author") != DEPENDABOT_BOT:
             return "contributor", f"commit {sha} by {safe_for_prompt(who, 40)}"
         committer = c.get("committer") or ""
-        if committer == DEPENDABOT_BOT or (committer == GITHUB_COMMITTER and c.get("verified") is True):
+        if committer in (DEPENDABOT_BOT, GITHUB_COMMITTER) and c.get("verified") is True:
             continue
-        how = "" if committer != GITHUB_COMMITTER else " without a verified signature"
+        how = " without a verified signature" if committer in (DEPENDABOT_BOT, GITHUB_COMMITTER) else ""
         return "contributor", (f"commit {sha} by {safe_for_prompt(who, 40)}, committed by "
                                f"{safe_for_prompt(committer or 'an unknown committer', 40)}{how}")
     return None
@@ -3308,7 +3313,7 @@ def _deps_block(pr: str, level: str, me: str) -> list[str]:
     if ident is None:
         n = len(info["commits"])
         out.append(f"  identity: {DEPENDABOT_APP}, branch in {SLUG}, {n} commit(s), each authored by "
-                   f"{DEPENDABOT_BOT} and committed by it or by GitHub with a verified signature")
+                   f"{DEPENDABOT_BOT}, committed by it or by GitHub, and signed")
     else:
         out.append(f"  identity: NOT a Dependabot pull request: {ident[1]}")
     branch = meta.get("headRefName") or ""
