@@ -3430,7 +3430,13 @@ does not name), an indented `--hash=sha256:<64 hex>` line, a comment, or blank.
 Everything pip can read as a source (`--index-url`, `--extra-index-url`, `-f`,
 `-e`, `-r`, `name @ url`) matches nothing and is refused on either side of the
 diff: removing a private index is a new place to download from as much as
-adding a public one. Each added hash must hang off an added requirement through
+adding a public one. pip splits a requirement line on spaces and reads
+everything from the first token starting with `-` as options, inside quotes or
+not (`req_file.break_args_options`), and the marker's character set holds `-`,
+`=` and quotes. The first version let
+`PyYAML==6.0.3 ; python_version >= "3" --config-settings=x=y` through as a pin;
+a security review of the pushed branch caught it, and a requirement line with
+such a token is now refused. Each added hash must hang off an added requirement through
 pip's trailing-backslash continuation, so a hash swapped under an unchanged pin,
 or one after a line that does not continue, belongs to no release and is
 refused. A requirement that arrives without hashes in a file that had them is
@@ -3443,7 +3449,7 @@ files. Name and version must be plain before they reach the URL, for the reason
 lesson 117 gives. `verify-deps` counts the packages the classifier declared
 against the ones it verified, as it does for pins and images.
 
-22 tests, each refusal asserting its own reason; the checker runs offline
-against a `file://` tree through `MAINTAINER_PYPI_URL`. 15 mutants, one per
-guard, run against a slice of the suite with each file restored from a
+24 tests, each refusal asserting its own reason; the checker runs offline
+against a `file://` tree through `MAINTAINER_PYPI_URL`. 16 mutants, one per
+guard, all killed, run against a slice of the suite with each file restored from a
 pristine copy and its hash checked.

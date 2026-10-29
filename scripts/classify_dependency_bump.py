@@ -291,6 +291,14 @@ def main():
                 if not (req or digest or PIP_INERT.match(text)):
                     refuse("a requirements line is not a pinned requirement, a hash or a comment",
                            path, text.strip())
+                # pip splits a requirement line on single spaces and reads
+                # everything from the first token starting with `-` as options
+                # (req_file.break_args_options), inside quotes or not. The
+                # marker's character set holds `-`, `=` and quotes, so
+                # `--config-settings=...` would otherwise ride in as a marker.
+                if req and any(tok.startswith("-") for tok in text.split(" ")):
+                    refuse("a requirement line carries a pip option after its pin",
+                           path, text.strip())
                 hashed = hashed or bool(digest)
                 if sign != "+":
                     continue

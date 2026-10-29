@@ -21,12 +21,14 @@ middle digit.
   `--hash=sha256:` line, a comment. `--index-url`, `--extra-index-url`, `-e`,
   `name @ url` and ranges match none of it and are refused on either side of
   the diff, since dropping a private index is a new place to download from as
-  much as adding one. A hash with no added requirement above it, and a
+  much as adding one. pip reads every space-separated token from the first one
+  starting with `-` as an option, quotes or not, so a requirement line with such
+  a token is refused too: the marker slot cannot carry `--config-settings`. A hash with no added requirement above it, and a
   requirement that arrives without hashes in a hash-pinned file, are refused.
   `scripts/verify_pypi_release.py` then asks PyPI's JSON API for that release
   and refuses a yanked release, one with no files, and any hash that is not one
-  of its files; `verify-deps` counts declared against verified packages. 22
-  tests, each refusal pinned to its own reason, and 15 mutants
+  of its files; `verify-deps` counts declared against verified packages. 24
+  tests, each refusal pinned to its own reason, and 16 mutants
   ([lesson 118](docs/lessons.md)).
 
 ## [0.9.0] — 2026-10-28

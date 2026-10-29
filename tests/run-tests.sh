@@ -3795,6 +3795,29 @@ pip_refused "adds a hash after the last one of its requirement" 'without the req
 +PyYAML==6.0.3 \\
 +    --hash=sha256:$h1
 +    --hash=sha256:$h0"
+# pip splits a requirement line on spaces and reads everything from the first
+# token that starts with `-` as per-requirement options, quotes or not
+# (req_file.break_args_options). The marker's character set allows `-`, `=` and
+# quotes, so an option could ride in the marker slot and pass as a pin.
+pip_refused "hides a build option behind a marker" 'carries a pip option' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML==6.0.3 ; python_version >= \"3\" --config-settings=x=y \\
++    --hash=sha256:$h1"
+cat > "$dp/pip-marker.patch" <<PATCH
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,3 +1,3 @@
+-PyYAML==6.0.2 ; platform_release >= "5.15.0-1" \\
+-    --hash=sha256:$h0
++PyYAML==6.0.3 ; platform_release >= "5.15.0-1" \\
++    --hash=sha256:$h1
+PATCH
+vout="$(dep_case "$dp/pip-marker.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && ok "a marker with a dash inside a quoted value is still a pin" \
+    || bad "a marker with a dash inside a value was refused: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
 
 # And the gate has to spend that classification: a dependency receipt is one an
 # unattended run may merge on, because the gate observed the checks itself.
