@@ -45,6 +45,9 @@ same file, so a number is changed in one place.
 | `LEASE_TTL_SECONDS` | 3600 | seconds a `maintainer lease take` holds a pull request when `--ttl` is not given. An unrenewed lease frees itself after this long |
 | `DOCTOR_LEASE_HOURS` | 12 | hours since a lease was last renewed before `maintainer-doctor` warns that it was forgotten |
 | `OPENCODE_MODEL` | groq/openai/gpt-oss-120b | model the opencode backend uses when the profile names a Claude model |
+| `DEPS_AUTOMERGE` | minor | which green Dependabot bumps `maintainer deps` sends to `verify`: `none`, `patch` (every member semver-patch) or `minor` (patch or minor). A Docker digest bump that keeps its image and tag has no semver class and passes at `patch` and `minor`. A semver-major member always goes to a person |
+| `DEPS_UNKNOWN_READS` | 3 | reads `maintainer deps` makes of a merge state GitHub answers `UNKNOWN`, before it reports it |
+| `DEPS_UNKNOWN_WAIT` | 5 | seconds between those reads |
 
 Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and read
 it through `$KEY` in bash (after `maintainer_load_defaults`) or `_tunable("KEY")`

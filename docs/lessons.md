@@ -3371,3 +3371,37 @@ ignoring comments, and fails naming the line. It counts the files it scanned
 and refuses a scan of fewer than ten, so a broken glob cannot pass by scanning
 nothing. All four sites now capture first and read a herestring, or use one
 `awk` over the captured text where two greps were chained.
+
+## 117. `commits/<tag>` answered for a pull request's head
+
+`verify-deps` checked an action pin by asking GitHub
+`repos/<action>/commits/<comment>` and comparing the answer with the pinned SHA.
+The classifier took the comment as `\S+`. `commits/` resolves any ref the string
+reaches, and GitHub normalises `..` in the path before it resolves anything.
+Measured on 2026-10-28 against actions/checkout: `commits/pull/1/head` answers
+`bf8f6208`, the head of a pull request anyone can push, and
+`git/ref/tags/../pull/1/head` answers `refs/pull/1/head`. A pin to a stranger's
+commit, commented `pull/1/head` or `v4.2.2/../pull/1/head`, came back
+`(GitHub agrees)` and earned a dependency receipt, which an unattended run may
+merge on. The first new test printed exactly that line against the shipped code.
+Same class as sysknife's GHSA-j754: a string from the diff placed in a path the
+server rewrites.
+
+The fix is two layers, and the second does not trust the first. The classifier
+refuses a comment or an action path with an empty segment, a segment starting
+with `.` or `-`, or a character outside a short ref alphabet, naming the file
+and the line. `verify-deps` asks `git/ref/tags/<tag>`, requires the answer's
+`.ref` to be exactly `refs/tags/<tag>`, and follows an annotated tag through at
+most four tag objects to the commit it names. A branch pin must answer
+`refs/heads/<branch>` before the compare is asked.
+
+`pull/1/head` is a legal ref name, so the classifier lets it through and only the
+second layer stops it: GitHub has no tag by that name.
+
+**Guard:** 33 new cases in the dependency section (32 before, 65 after), written
+first: 26 failed on the shipped code, every one by passing the pin. Twelve
+mutations; eleven killed. The twelfth deleted a `not in (".", "..")` clause and
+survived, because the segment regex already refuses a leading `.`. The clause
+was removed rather than given a test of its own, and the regex was mutated
+instead, which the suite caught. The tag-object loop's mutant runs under a
+60-second cap that the test asserts it did not hit.

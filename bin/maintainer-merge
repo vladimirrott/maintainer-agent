@@ -355,8 +355,20 @@ for i in json.load(sys.stdin).get("images", []):
         repo="${action%%/*}/$(cut -d/ -f2 <<<"$action")"
         if [ "$pinkind" = branch ]; then
             # `# stable (branch)`: the comment names a branch, so the claim is
-            # that the SHA is on it. Compare puts the pin at the head side:
-            # identical or behind means the branch contains it.
+            # that the SHA is on it. First that the name IS a branch, asked of
+            # the ref endpoint and read back exactly: compare resolves any ref
+            # the name reaches after GitHub normalises the path, a pull
+            # request's head included (the tag case below has the history).
+            local headref
+            headref="$(gh api "repos/$repo/git/ref/heads/$tag" --jq .ref 2>&1)" || \
+                die "could not ask GitHub whether $repo has a branch named $tag, so the pin is unverified:
+
+$(printf '%s' "$headref" | sed 's/^/    /')"
+            [ "$headref" = "refs/heads/$tag" ] || die "the pin comment is not a branch: $action names '$tag', and GitHub
+  answers $headref for refs/heads/$tag. A name that resolves to another ref
+  is how a pin to a pull request's head passes as a branch."
+            # Compare puts the pin at the head side: identical or behind means
+            # the branch contains it.
             status="$(gh api "repos/$repo/compare/$tag...$pinsha" --jq .status 2>&1)" || \
                 die "could not ask GitHub whether $repo $pinsha is on $tag, so the pin is unverified:
 
@@ -371,10 +383,36 @@ $(printf '%s' "$status" | sed 's/^/    /')"
             checked=$((checked+1))
             continue
         fi
-        upstream="$(gh api "repos/$repo/commits/$tag" --jq .sha 2>&1)" || \
-            die "could not ask GitHub what $repo $tag is, so the pin is unverified:
+        # The tag, asked for as a tag. This was `commits/$tag --jq .sha`, and
+        # `commits/` resolves whatever the string names once GitHub has
+        # normalised the path: `commits/pull/1/head` is a pull request's head,
+        # which anyone can push, and a comment `v4.2.2/../pull/1/head` reaches
+        # it too. The ref endpoint answers with the ref it found, and only
+        # `refs/tags/<tag>` exactly is the tag the comment claims.
+        local refline refname objtype objsha depth=0
+        refline="$(gh api "repos/$repo/git/ref/tags/$tag" --jq '[.ref, .object.type, .object.sha] | @tsv' 2>&1)" || \
+            die "could not ask GitHub for the tag $tag in $repo, so the pin is unverified:
 
-$(printf '%s' "$upstream" | sed 's/^/    /')"
+$(printf '%s' "$refline" | sed 's/^/    /')"
+        IFS=$'\t' read -r refname objtype objsha <<<"$refline"
+        [ "$refname" = "refs/tags/$tag" ] || die "the pin comment is not a tag: $action names '$tag', and GitHub
+  answers ${refname:-nothing} for refs/tags/$tag. A name that resolves to another
+  ref is how a pin to a pull request's head passes as a release."
+        # An annotated tag names a tag object, which names the commit. Real ones
+        # are one level deep; the bound is for a chain that never reaches one.
+        while [ "$objtype" = tag ]; do
+            depth=$((depth+1))
+            [ "$depth" -le 4 ] || die "the tag $tag in $repo is nested more than 4 tag objects deep
+  without reaching a commit, so the pin is unverified."
+            refline="$(gh api "repos/$repo/git/tags/$objsha" --jq '[.object.type, .object.sha] | @tsv' 2>&1)" || \
+                die "could not read the tag object ${objsha:0:12} behind $repo $tag, so the pin is unverified:
+
+$(printf '%s' "$refline" | sed 's/^/    /')"
+            IFS=$'\t' read -r objtype objsha <<<"$refline"
+        done
+        [ "$objtype" = commit ] || die "the tag $tag in $repo points at a ${objtype:-nothing}, not a commit,
+  so no pin can be on it."
+        upstream="$objsha"
         [ "$upstream" = "$pinsha" ] || die "the pin comment is not true: $action is pinned to
   ${pinsha:0:12} and $repo $tag is ${upstream:0:12}. A pin whose comment names a
   version it is not on is the shape a supply-chain swap hides in."

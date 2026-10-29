@@ -71,6 +71,49 @@ maintainer-merge merge  <pr>
 
 If it refuses, report the refusal. Do not work around it.
 
+## Dependabot pull requests
+
+A Dependabot pull request is not a contributor's, and the review above does not
+fit it: there is nobody to reply to, no next issue to offer and no user to
+classify. Leave them out of the contributor review and drive them with one
+command:
+
+```sh
+maintainer deps
+```
+
+It prints one block per open Dependabot pull request and ends each with one
+`next:`. Do what it says and nothing else:
+
+- `rebase`: run `maintainer deps rebase <pr>`. It posts `@dependabot rebase` once
+  per head and reads it back. Never `gh pr update-branch`: a commit of ours on
+  Dependabot's branch stops it rebasing that pull request for good, and the wall
+  denies the verb.
+- `wait`: CI is still running, or a rebase is asked for and Dependabot has not
+  pushed. One line in the report.
+- `investigate <check>`: read that check's log (`gh run view <run> --log-failed`)
+  and say whether the bump broke it or the check is flaky. Never re-run it blind.
+- `verify`: one pull request at a time:
+
+  ```sh
+  maintainer-merge verify-deps <pr> <head-sha>
+  gh pr review <pr> --approve --body "Dependency receipt: maintainer-merge verify-deps at <head8>."
+  maintainer-merge merge <pr>
+  ```
+
+  After a merge the others go BEHIND; the next `maintainer deps` says `rebase` for
+  them, so ask and move on rather than waiting in this run.
+- `human`: list it at the top of the report under
+  `## Ready to merge, awaiting the maintainer` with the reasons `deps` printed.
+  For a semver-major member, read the upstream changelog it links to, say which
+  breaking changes touch how this repository uses the dependency, and name the
+  files that use it (`git grep -n <name>`).
+- `review as a contributor PR (...)`: somebody else committed to the branch, so
+  it is a person's change now. Review it like any other.
+
+If `maintainer deps` exits non-zero it could not read a pull request: name it in
+the report rather than reading the silence as nothing to do.
+
 ## Mechanical items: mark them, and finish the quiet ones
 
 When every blocking item of a `--request-changes` review is mechanical (a rebase,

@@ -10,6 +10,61 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **A pin comment is a tag GitHub has, not a path GitHub normalises.**
+  `verify-deps` resolved a pin's comment through `commits/<comment>`, which follows
+  any ref, and GitHub normalises `..` in the path first: a pin to a pull request's
+  head, commented `pull/1/head` or `v4.2.2/../pull/1/head`, read `(GitHub agrees)`
+  and earned a dependency receipt (lesson 117, same class as sysknife GHSA-j754).
+  The classifier now refuses a comment or action path with an empty segment, a
+  segment starting with `.` or `-`, or a character outside a short ref alphabet,
+  naming the file and line. `verify-deps` asks `git/ref/tags/<tag>`, requires
+  `.ref` to be exactly `refs/tags/<tag>`, follows an annotated tag through at
+  most four tag objects to its commit, and asks `git/ref/heads/<branch>` for
+  `refs/heads/<branch>` before it compares a branch pin.
+
+### Added
+
+- **`maintainer deps`: drive Dependabot pull requests.** `verify-deps` could
+  receipt a pure dependency bump and nothing drove it: the review treated a
+  Dependabot pull request like a contributor's, and sysknife #688-#692 sat a
+  day untouched. `deps [pr...]` lists every open pull request by
+  `app/dependabot`, or the ones named, and prints one block each: the identity
+  it checked (the branch in this repository, every commit authored by
+  `dependabot[bot]`, committed by it or by GitHub, and signed: GitHub derives a
+  commit's login from its email, so only the signature is out of a pusher's reach),
+  the members of the `updated-dependencies` block with their semver class, the
+  classifier's verdict, the CI counts (a check whose conclusion is the empty
+  string is pending) and the merge state, then one `next:`: `rebase`, `wait`,
+  `investigate <check>`, `verify` or `human`, with the changelog link of every
+  semver-major member. Any other commit makes it `review as a contributor PR`.
+  It exits non-zero naming every pull request it could not read, and every
+  name it prints that GitHub returned, check names included, is flattened to
+  one line and capped, since the `next:` line is what an unattended run acts on.
+- **`maintainer deps rebase <pr>`** posts `@dependabot rebase` once per head, only
+  on a verified Dependabot pull request that is `BEHIND` or `DIRTY` and that no
+  other actor has leased, reads the comment back, and rehearses at `POST=off`.
+- **A Docker digest bump can be verified.** Dependabot writes no `update-type`
+  when a base image keeps its tag and only the digest moves. When every changed
+  file is a Dockerfile and every image keeps its image and tag (the classifier
+  now reports `same_tag` per image), `deps` routes it to `verify` at `patch` or
+  `minor`, and `verify-deps` checks the digest against the registry. A tag change
+  or any other change without a semver class still goes to a person.
+- **New defaults** `DEPS_AUTOMERGE` (`minor`; `none`, `patch` or `minor`),
+  `DEPS_UNKNOWN_READS` (3) and `DEPS_UNKNOWN_WAIT` (5). The sysknife and magent
+  profiles set `DEPS_AUTOMERGE="minor"`.
+- **The sysknife, magent and template review prompts drive Dependabot pull requests with
+  `maintainer deps`**: no reply to the bot, no next-issue invite, one merge at a
+  time, and every `human` under `## Ready to merge, awaiting Vladimir` with the
+  upstream changelog read for each major member.
+
+### Changed
+
+- **The deny wall denies `gh pr update-branch`** in every profile. A commit of
+  ours on a Dependabot branch stops Dependabot rebasing it for good, and on a
+  contributor's branch it is a push the doctrine already forbids.
+
 ## [0.8.1] — 2026-10-27
 
 A verify cleans up after itself on every exit and keeps its scratch on disk, no
