@@ -10,6 +10,8 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-28
+
 ### Security
 
 - **A pin comment is a tag GitHub has, not a path GitHub normalises.**
@@ -1343,7 +1345,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.8.1...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.9.0
 [0.8.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.1
 [0.8.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.0
 [0.7.2]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.7.2
