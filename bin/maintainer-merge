@@ -274,10 +274,11 @@ PYEOF
 # What this checks instead, all of it mechanical and none of it asserted:
 #
 #   * every changed path is dependency metadata (lockfile, manifest, action pin)
-#   * no changed line adds a source outside crates.io or registry.npmjs.org, and
-#     no npm package newly runs an install script
+#   * no changed line adds a source outside crates.io, registry.npmjs.org or
+#     PyPI, and no npm package newly runs an install script
 #   * every added action pin is a 40-hex SHA whose tag comment is the tag GitHub
-#     says that SHA is on
+#     says that SHA is on, every base image digest is what its tag resolves to,
+#     and every pip hash is a file PyPI publishes for that version
 #
 # scripts/classify_dependency_bump.py does the first two from the diff and is
 # tested on its own; the third needs the network and happens here.
@@ -307,14 +308,20 @@ cmd_verify_deps() {
     esac
 
     local diff rc=0
-    diff="$(gh pr diff "$pr" --repo "$REPO_SLUG" --patch 2>&1)" || rc=$?
+    # The net diff, never `--patch`: an mbox carries each commit message, which
+    # the author writes, and a message can hold a forged `diff --git` and hunk.
+    diff="$(gh pr diff "$pr" --repo "$REPO_SLUG" 2>&1)" || rc=$?
     [ "$rc" = 0 ] || die "could not read the diff for #$pr:
 
 $(printf '%s' "$diff" | sed 's/^/    /')"
     [ -n "$diff" ] || die "the diff for #$pr is empty, so nothing was classified"
 
-    local verdict vrc=0
-    verdict="$(printf '%s\n' "$diff" | python3 "$classifier")" || vrc=$?
+    # Bounded: the classifier reads text a pull request author wrote, and a
+    # pattern that backtracks on it would stall an unattended run (its pip
+    # marker regex once took over 30 s on 1.6 KB). Out of time is a refusal.
+    local verdict vrc=0 limit="${MAINTAINER_CLASSIFY_TIMEOUT:-${CLASSIFY_TIMEOUT:?lib/defaults.env was not loaded}}"
+    verdict="$(printf '%s\n' "$diff" | timeout "$limit" python3 "$classifier")" || vrc=$?
+    [ "$vrc" != 124 ] || die "the dependency classifier ran past ${limit}s on #$pr, so nothing was classified"
     if [ "$vrc" != 0 ]; then
         die "#$pr is not a pure dependency bump, so it needs a real receipt:
 
@@ -346,6 +353,14 @@ for i in json.load(sys.stdin).get("images", []):
         || die "could not count the action pins the classifier declared"
     declared_images="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("images",[])))' <<<"$verdict")" \
         || die "could not count the base images the classifier declared"
+    local piplines declared_pip
+    piplines="$(python3 -c '
+import json, sys
+for p in json.load(sys.stdin).get("pip", []):
+    print("\t".join((p["name"], p["version"], ",".join(p["hashes"]))))
+' <<<"$verdict")" || die "could not read the pip packages out of the classifier verdict"
+    declared_pip="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("pip",[])))' <<<"$verdict")" \
+        || die "could not count the pip packages the classifier declared"
 
     local checked=0 action tag pinsha upstream repo pinkind status
     while IFS=$'\t' read -r action pinsha tag pinkind; do
@@ -446,28 +461,101 @@ $(printf '%s' "$live" | sed 's/^/    /')"
     [ "$images_checked" = "$declared_images" ] || die "the classifier declared $declared_images base image(s) and
   $images_checked were verified. No receipt written: the check did not run."
 
+    # And every pip requirement, against the release on PyPI. pip enforces that
+    # it installs the hashed files; nothing else says those files are the
+    # version the pin names.
+    local verifier pip_checked=0 pkg version hashes answer
+    verifier="${MAINTAINER_PYPI_VERIFIER:-${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/verify_pypi_release.py}"
+    while IFS=$'\t' read -r pkg version hashes; do
+        [ -n "$pkg" ] || continue
+        [ -f "$verifier" ] || die "no PyPI verifier at $verifier; run ./install.sh"
+        answer="$(python3 "$verifier" "$pkg" "$version" "$hashes" 2>&1)" || die "could not confirm $pkg==$version against PyPI,
+  so the pin is unverified:
+
+$(printf '%s' "$answer" | sed 's/^/    /')"
+        say "pip: $pkg==$version, $answer (PyPI agrees)"
+        pip_checked=$((pip_checked+1))
+    done <<<"$piplines"
+    [ "$pip_checked" = "$declared_pip" ] || die "the classifier declared $declared_pip pip package(s) and
+  $pip_checked were verified. No receipt written: the check did not run."
+
+    # And every requirements file read whole, the way pip reads it. A diff shows
+    # three lines of context; pip joins a trailing backslash onto the next line
+    # whether or not it changed, honours an encoding cookie on line 1 or 2, and
+    # attaches hashes that sit far outside a hunk. So the file at the merge base
+    # and at the head go through scripts/verify_pip_files.py, and its list of
+    # moved pins has to be exactly the list the diff gave.
+    local pipfiles declared_files base_ref merge_base workdir pf wf want got
+    pipfiles="$(python3 -c '
+import json, sys
+for path, kind in json.load(sys.stdin)["files"].items():
+    if kind == "pip-requirements":
+        print(path)
+' <<<"$verdict")" || die "could not read the pip files out of the classifier verdict"
+    declared_files="$(grep -c . <<<"$pipfiles" || true)"
+    if [ "$declared_files" != 0 ]; then
+        wf="${MAINTAINER_PIP_FILES_VERIFIER:-${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/verify_pip_files.py}"
+        [ -f "$wf" ] || die "no whole-file pip check at $wf; run ./install.sh"
+        base_ref="$(gh pr view "$pr" --repo "$REPO_SLUG" --json baseRefName --jq .baseRefName)" \
+            || die "could not read the base branch of #$pr"
+        [ -n "$base_ref" ] || die "could not read the base branch of #$pr"
+        merge_base="$(gh api "repos/$REPO_SLUG/compare/$base_ref...$real_head" --jq .merge_base_commit.sha)" \
+            || die "could not ask GitHub for the merge base of #$pr"
+        [[ "$merge_base" =~ ^[0-9a-f]{40}$ ]] || die "GitHub gave no merge base for #$pr: '${merge_base:0:40}'"
+        workdir="$(mktemp -d)"
+        while IFS= read -r pf; do
+            [ -n "$pf" ] || continue
+            [[ "$pf" =~ ^[A-Za-z0-9._/-]+$ ]] && [[ "$pf" != *..* ]] \
+                || { rm -rf "$workdir"; die "the requirements path '$pf' is not a plain path, so it is not put in an API URL"; }
+            gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO_SLUG/contents/$pf?ref=$merge_base" > "$workdir/base" \
+                || { rm -rf "$workdir"; die "could not read $pf at the merge base ${merge_base:0:8}"; }
+            gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO_SLUG/contents/$pf?ref=$real_head" > "$workdir/head" \
+                || { rm -rf "$workdir"; die "could not read $pf at the head ${real_head:0:8}"; }
+            got="$(python3 "$wf" "$workdir/base" "$workdir/head" 2>&1)" \
+                || { rm -rf "$workdir"; die "$pf, read whole the way pip reads it, is not a version bump:
+
+$(printf '%s' "$got" | sed 's/^/    /')"; }
+            want="$(PF="$pf" python3 -c '
+import json, os, sys
+print(json.dumps(sorted((p["name"], p["version"], sorted(p["hashes"]))
+                        for p in json.load(sys.stdin).get("pip", []) if p.get("path") == os.environ["PF"])))
+' <<<"$verdict")" || { rm -rf "$workdir"; die "could not read the pip packages for $pf out of the verdict"; }
+            got="$(python3 -c '
+import json, sys
+print(json.dumps(sorted((p["name"], p["version"], sorted(p["hashes"])) for p in json.load(sys.stdin)["changed"])))
+' <<<"$got")" || { rm -rf "$workdir"; die "could not read the whole-file answer for $pf"; }
+            [ "$want" = "$got" ] || { rm -rf "$workdir"; die "the diff and the whole file disagree about $pf:
+  diff:  ${want:0:300}
+  files: ${got:0:300}
+  A bump the two readings describe differently is not one this gate can vouch for."; }
+            say "pip file: $pf read whole at ${merge_base:0:8} and ${real_head:0:8} (same bump as the diff)"
+        done <<<"$pipfiles"
+        rm -rf "$workdir"
+    fi
+
     local files lines
     files="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(", ".join(f"{k} ({v})" for k,v in d["files"].items()))')"
     lines="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed_lines"])')"
     mkdir -p "$RECEIPTS"
-    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" "$images_checked" <<'PYEOF' \
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" "$images_checked" "$pip_checked" <<'PYEOF' \
         || die "could not record the dependency receipt"
 import json, sys, datetime, getpass
-out, pr, head, files, lines, pins, imgs = sys.argv[1:8]
+out, pr, head, files, lines, pins, imgs, pips = sys.argv[1:9]
 json.dump({
     "pr": int(pr), "head": head, "kind": "dependency",
     "proof": (f"pure dependency bump: {lines} changed line(s) in {files}; "
-              f"no source outside crates.io/registry.npmjs.org, no new install "
+              f"no source outside crates.io/registry.npmjs.org/PyPI, no new install "
               f"script, {pins} action pin(s) verified against their tags, "
-              f"{imgs} base image(s) verified against their registry"),
+              f"{imgs} base image(s) verified against their registry, "
+              f"{pips} pip package(s) verified against PyPI"),
     "files": files, "changed_lines": int(lines), "pins_verified": int(pins),
-    "images_verified": int(imgs),
+    "images_verified": int(imgs), "pip_verified": int(pips),
     "recorded_at": datetime.datetime.now().astimezone().isoformat(),
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
 PYEOF
     receipt_seal "$RECEIPTS/$pr.json"
-    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s), $images_checked image(s) verified)"
+    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s), $images_checked image(s), $pip_checked pip package(s) verified)"
 }
 
 # maintainer-merge verify <pr> <head-sha> <test-filter> <sed-mutation> [crate]

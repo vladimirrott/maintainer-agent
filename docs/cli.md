@@ -45,7 +45,7 @@ and refuse when they cannot ask. See [the doctrine](maintainer-doctrine.md).
 | command | what it does |
 |---|---|
 | `maintainer-merge verify <pr> <sha> <filter> <sed> [suite]` | run the test in a container, apply the mutation, run it again, and record a receipt only if it passed clean and failed mutated. The mutation must reach a file the profile calls production, or the receipt would say a test notices its own edit. `suite` names a `verify.d` suite when the paths do not pick one; see [Verifying](verifying.md) |
-| `maintainer-merge verify-deps <pr> <sha>` | the receipt for a pull request that only bumps dependencies or pins: there is no guard to mutate, so the diff is classified and its pins and image digests are checked |
+| `maintainer-merge verify-deps <pr> <sha>` | the receipt for a pull request that only bumps dependencies or pins: there is no guard to mutate, so the diff is classified and its pins, image digests and pip hashes are checked |
 | `maintainer-merge verify-part <pr> <sha> <filter> <sed> <suite>` | one suite's share of a diff no single suite covers. `merge` checks that the parts add up to every production path |
 | `maintainer-merge merge <pr>` | merge, if every condition holds. See the table in the README |
 | `maintainer-merge show [pr]` | print a recorded receipt |

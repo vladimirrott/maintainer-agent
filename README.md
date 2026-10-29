@@ -110,7 +110,7 @@ A receipt comes in three kinds, and two of them merge unattended:
 | kind | written by | who may merge on it |
 |---|---|---|
 | `observed` | `maintainer-merge verify`, which runs the mutation and records what it saw | anyone, including a timer |
-| `dependency` | `maintainer-merge verify-deps`, which classifies a dependency bump's diff and checks every action pin and image digest against GitHub and the registry | anyone, including a timer |
+| `dependency` | `maintainer-merge verify-deps`, which classifies a dependency bump's diff and checks every action pin, image digest and pip hash against GitHub, the registry and PyPI | anyone, including a timer |
 | `asserted` | `maintainer-merge receipt`, which records a sentence a human typed | a human only |
 
 Signing stops a receipt being written with a text editor, and that is all it

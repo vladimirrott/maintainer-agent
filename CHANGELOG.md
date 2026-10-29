@@ -10,6 +10,78 @@ middle digit.
 
 ## [Unreleased]
 
+### Security
+
+- **The dependency classifier reads a diff the way git wrote it.** It split the
+  diff with Python's `splitlines()`, which also breaks at form feed, vertical
+  tab, `\x1c`-`\x1e`, NEL, U+2028, U+2029 and a lone CR, and it skipped any
+  line starting `--- ` or `+++ ` as a file header, inside a hunk too. Both hid
+  content from every arm: a pip line `+...\x0c -e git+https://...` classified as
+  a clean bump, and so would a workflow pin line carrying a step after U+2028,
+  which YAML reads as a line break. The diff is now split on newline alone, any
+  changed line holding one of those characters is refused, hunk lines are
+  counted from the `@@` header instead of guessed from their prefix, the input
+  must be UTF-8, and a diff that renames, copies or deletes a file, or names a
+  file without changing a line of it, is refused. 25 recent sysknife Dependabot
+  pull requests classify exactly as before ([lesson 119](docs/lessons.md)).
+- **`verify-deps`, `maintainer deps` and `maintainer screen` read the net diff,
+  not `gh pr diff --patch`.** An mbox carries every commit message, and a
+  message is author text: one could hold a forged `diff --git` and a hunk
+  removing `evilpkg==0.1`, so a pull request adding `evilpkg` read as an
+  upgrade. The classifier refuses mbox input by name, and every test stub for
+  `gh pr diff` fails if `--patch` is asked for again. Flagged by an automated
+  security review of the pushed branch.
+- **A requirements file is read whole, the way pip reads it.** A diff shows
+  three lines of context, and pip's reading depends on lines it does not show:
+  a trailing backslash joins the next unchanged line (an `--index-url` line
+  swallowed this way read as a clean bump), a `# coding:` cookie on line 1 or 2
+  re-decodes the file, and a hash chain can start far above the hunk.
+  `verify-deps` now fetches each requirements file at the merge base and the
+  head, reads both with `scripts/verify_pip_files.py` (pip's own line joining,
+  comment stripping and option split; printable ASCII only, no cookie, no BOM,
+  no option lines), and refuses unless the pins that moved are exactly the ones
+  the diff gave.
+- **The other arms check that a bump still names the same thing.** A workflow pin
+  repointed at another owner's action, or a new `uses:` step, passed: the gate
+  only asked whether the comment's tag exists in that action's repository. Now
+  the added and removed pins must name the same actions. A `package.json` value
+  must be a semver range under a dependency the manifest already had (a tarball
+  URL, `github:`, `npm:` alias, a dist-tag, a rewritten script and a new `"main"`
+  all passed). A `resolved` URL must start with `https://registry.npmjs.org/`
+  exactly, since Node and `urlparse` disagree about `evil.example\\@registry...`.
+  A `Cargo.toml` literal that moved must be a version, not a git URL or a
+  `package =` rename. A Dockerfile stage keeps its name and count. A blank
+  `CARGO_LOCK_OK` entry made the Cargo.lock line check pass every line; it is
+  gone. A line past a hunk's declared counts is refused instead of dropped.
+- **`verify-deps` gives the classifier 60 seconds** (`MAINTAINER_CLASSIFY_TIMEOUT`)
+  and refuses by name when it runs out, so an input that makes a pattern
+  backtrack cannot stall an unattended run. `maintainer deps` uses the same
+  bound, and the Dockerfile arm no longer costs quadratic time.
+
+### Added
+
+- **`verify-deps` gates a hash-pinned pip bump.** sysknife added a pip ecosystem
+  for `tools/ci-python` on 2026-10-29, and its first Dependabot bump, #735
+  (PyYAML 6.0.2 to 6.0.3), was refused as "not dependency metadata", which left
+  a hand receipt or `gh pr merge --admin` as the only ways to land it. The
+  classifier now has a `pip-requirements` arm for `requirements*.txt` whose
+  grammar is an allowlist: a `name==version` pin, an indented
+  `--hash=sha256:` line, a comment. `--index-url`, `--extra-index-url`, `-e`,
+  `name @ url` and ranges match none of it and are refused on either side of
+  the diff, since dropping a private index is a new place to download from as
+  much as adding one. A bump must move the version of a package the file
+  already pins, upward, with the same marker and new hashes: a swap, a removal,
+  a marker flip, a downgrade, a pin moved without its hashes and a package
+  added twice are each refused. pip reads every space-separated token from the first one
+  starting with `-` as an option, quotes or not, so a requirement line with such
+  a token is refused too: the marker slot cannot carry `--config-settings`. A hash with no added requirement above it, and a
+  requirement that arrives without hashes in a hash-pinned file, are refused.
+  `scripts/verify_pypi_release.py` then asks PyPI's JSON API for that release
+  and refuses a yanked release, one with no files, and any hash that is not one
+  of its files; `verify-deps` counts declared against verified packages. Each
+  refusal test asserts its reason text, and 56 mutants
+  ([lesson 118](docs/lessons.md)).
+
 ## [0.9.0] — 2026-10-28
 
 ### Security
