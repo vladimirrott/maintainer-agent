@@ -479,6 +479,60 @@ $(printf '%s' "$answer" | sed 's/^/    /')"
     [ "$pip_checked" = "$declared_pip" ] || die "the classifier declared $declared_pip pip package(s) and
   $pip_checked were verified. No receipt written: the check did not run."
 
+    # And every requirements file read whole, the way pip reads it. A diff shows
+    # three lines of context; pip joins a trailing backslash onto the next line
+    # whether or not it changed, honours an encoding cookie on line 1 or 2, and
+    # attaches hashes that sit far outside a hunk. So the file at the merge base
+    # and at the head go through scripts/verify_pip_files.py, and its list of
+    # moved pins has to be exactly the list the diff gave.
+    local pipfiles declared_files base_ref merge_base workdir pf wf want got
+    pipfiles="$(python3 -c '
+import json, sys
+for path, kind in json.load(sys.stdin)["files"].items():
+    if kind == "pip-requirements":
+        print(path)
+' <<<"$verdict")" || die "could not read the pip files out of the classifier verdict"
+    declared_files="$(grep -c . <<<"$pipfiles" || true)"
+    if [ "$declared_files" != 0 ]; then
+        wf="${MAINTAINER_PIP_FILES_VERIFIER:-${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/verify_pip_files.py}"
+        [ -f "$wf" ] || die "no whole-file pip check at $wf; run ./install.sh"
+        base_ref="$(gh pr view "$pr" --repo "$REPO_SLUG" --json baseRefName --jq .baseRefName)" \
+            || die "could not read the base branch of #$pr"
+        [ -n "$base_ref" ] || die "could not read the base branch of #$pr"
+        merge_base="$(gh api "repos/$REPO_SLUG/compare/$base_ref...$real_head" --jq .merge_base_commit.sha)" \
+            || die "could not ask GitHub for the merge base of #$pr"
+        [[ "$merge_base" =~ ^[0-9a-f]{40}$ ]] || die "GitHub gave no merge base for #$pr: '${merge_base:0:40}'"
+        workdir="$(mktemp -d)"
+        while IFS= read -r pf; do
+            [ -n "$pf" ] || continue
+            [[ "$pf" =~ ^[A-Za-z0-9._/-]+$ ]] && [[ "$pf" != *..* ]] \
+                || { rm -rf "$workdir"; die "the requirements path '$pf' is not a plain path, so it is not put in an API URL"; }
+            gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO_SLUG/contents/$pf?ref=$merge_base" > "$workdir/base" \
+                || { rm -rf "$workdir"; die "could not read $pf at the merge base ${merge_base:0:8}"; }
+            gh api -H 'Accept: application/vnd.github.raw' "repos/$REPO_SLUG/contents/$pf?ref=$real_head" > "$workdir/head" \
+                || { rm -rf "$workdir"; die "could not read $pf at the head ${real_head:0:8}"; }
+            got="$(python3 "$wf" "$workdir/base" "$workdir/head" 2>&1)" \
+                || { rm -rf "$workdir"; die "$pf, read whole the way pip reads it, is not a version bump:
+
+$(printf '%s' "$got" | sed 's/^/    /')"; }
+            want="$(PF="$pf" python3 -c '
+import json, os, sys
+print(json.dumps(sorted((p["name"], p["version"], sorted(p["hashes"]))
+                        for p in json.load(sys.stdin).get("pip", []) if p.get("path") == os.environ["PF"])))
+' <<<"$verdict")" || { rm -rf "$workdir"; die "could not read the pip packages for $pf out of the verdict"; }
+            got="$(python3 -c '
+import json, sys
+print(json.dumps(sorted((p["name"], p["version"], sorted(p["hashes"])) for p in json.load(sys.stdin)["changed"])))
+' <<<"$got")" || { rm -rf "$workdir"; die "could not read the whole-file answer for $pf"; }
+            [ "$want" = "$got" ] || { rm -rf "$workdir"; die "the diff and the whole file disagree about $pf:
+  diff:  ${want:0:300}
+  files: ${got:0:300}
+  A bump the two readings describe differently is not one this gate can vouch for."; }
+            say "pip file: $pf read whole at ${merge_base:0:8} and ${real_head:0:8} (same bump as the diff)"
+        done <<<"$pipfiles"
+        rm -rf "$workdir"
+    fi
+
     local files lines
     files="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(", ".join(f"{k} ({v})" for k,v in d["files"].items()))')"
     lines="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed_lines"])')"

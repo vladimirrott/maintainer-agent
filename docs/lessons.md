@@ -3449,15 +3449,16 @@ files. Name and version must be plain before they reach the URL, for the reason
 lesson 117 gives. `verify-deps` counts the packages the classifier declared
 against the ones it verified, as it does for pins and images.
 
-48 tests, each refusal asserting its reason text; the checker runs offline
+Each refusal test asserts its reason text; the checker runs offline
 against a `file://` tree through `MAINTAINER_PYPI_URL`. 30 mutants, one per
 guard, all killed, run against a slice of the suite with each file restored from a
 pristine copy and its hash checked.
 
-## 119. The classifier split lines where git does not, and a review found nineteen ways through
+## 119. The classifier split lines where git does not, and two reviews found the ways through
 
-A Sonnet review of the pip arm, briefed to break it, came back with nineteen
-diffs the classifier called pure bumps. Every one reproduced. Three causes:
+A Sonnet review of the pip arm, briefed to break it, came back with twenty
+hostile diffs: seventeen the classifier called pure bumps, one that stalled it
+past 45 seconds, and two slow ones it still refused. Three causes:
 
 - `parse()` split the diff with `str.splitlines()`, which breaks at form feed,
   vertical tab, `\x1c`-`\x1e`, NEL, U+2028, U+2029 and a lone CR. git ends a
@@ -3505,4 +3506,27 @@ because a message may itself hold a `---` line. The classifier now refuses mbox
 input, and `verify-deps`, `maintainer deps` and `maintainer screen` ask for the
 net diff. The same 25 Dependabot pull requests, read as net diffs, classify
 exactly as they did from `--patch` before.
+
+A second review, briefed the same way against the fixed parser, found the rest
+of the shape. Three pip families survived any diff rule, because pip reads lines
+the diff does not show: a trailing backslash on the last added hash line joins
+the next unchanged line, so an `--index-url` below it disappears from pip's
+reading; a `# coding: latin-1` cookie on line 1 re-decodes bytes `c5 85` as NEL;
+and a pin can lose its backslash while its old hash lines stay as context. So
+`verify-deps` now reads the whole file at the merge base and at the head with
+pip's own line joining, refuses anything outside printable ASCII, a cookie, a
+BOM and any option line, and requires the moved pins to be exactly the diff's.
+
+The same review found the other arms had never asked whether a bump still names
+the same thing: a workflow pin repointed at another owner's action, a new
+`uses:` step, a `package.json` tarball URL or `github:` spec, a rewritten script
+under the same key, a `resolved` URL Node reads as another host, a `Cargo.toml`
+git URL, and a renamed Dockerfile stage all classified as bumps, in v0.9.0 as
+shipped. `CARGO_LOCK_OK` held `""`, and every string starts with `""`, so the
+Cargo.lock line check passed everything. Each now has a pairing or a grammar,
+a test from the review's own input, and a mutant.
+
+**Guard, for the whole class:** a bump names the same things before and after,
+and only versions and digests move. Every arm now states that as a comparison
+between the removed and the added side, not as a grammar for one line.
 

@@ -31,9 +31,32 @@ middle digit.
   upgrade. The classifier refuses mbox input by name, and every test stub for
   `gh pr diff` fails if `--patch` is asked for again. Flagged by an automated
   security review of the pushed branch.
+- **A requirements file is read whole, the way pip reads it.** A diff shows
+  three lines of context, and pip's reading depends on lines it does not show:
+  a trailing backslash joins the next unchanged line (an `--index-url` line
+  swallowed this way read as a clean bump), a `# coding:` cookie on line 1 or 2
+  re-decodes the file, and a hash chain can start far above the hunk.
+  `verify-deps` now fetches each requirements file at the merge base and the
+  head, reads both with `scripts/verify_pip_files.py` (pip's own line joining,
+  comment stripping and option split; printable ASCII only, no cookie, no BOM,
+  no option lines), and refuses unless the pins that moved are exactly the ones
+  the diff gave.
+- **The other arms check that a bump still names the same thing.** A workflow pin
+  repointed at another owner's action, or a new `uses:` step, passed: the gate
+  only asked whether the comment's tag exists in that action's repository. Now
+  the added and removed pins must name the same actions. A `package.json` value
+  must be a semver range under a dependency the manifest already had (a tarball
+  URL, `github:`, `npm:` alias, a dist-tag, a rewritten script and a new `"main"`
+  all passed). A `resolved` URL must start with `https://registry.npmjs.org/`
+  exactly, since Node and `urlparse` disagree about `evil.example\\@registry...`.
+  A `Cargo.toml` literal that moved must be a version, not a git URL or a
+  `package =` rename. A Dockerfile stage keeps its name and count. A blank
+  `CARGO_LOCK_OK` entry made the Cargo.lock line check pass every line; it is
+  gone. A line past a hunk's declared counts is refused instead of dropped.
 - **`verify-deps` gives the classifier 60 seconds** (`MAINTAINER_CLASSIFY_TIMEOUT`)
   and refuses by name when it runs out, so an input that makes a pattern
-  backtrack cannot stall an unattended run.
+  backtrack cannot stall an unattended run. `maintainer deps` uses the same
+  bound, and the Dockerfile arm no longer costs quadratic time.
 
 ### Added
 
@@ -55,8 +78,8 @@ middle digit.
   requirement that arrives without hashes in a hash-pinned file, are refused.
   `scripts/verify_pypi_release.py` then asks PyPI's JSON API for that release
   and refuses a yanked release, one with no files, and any hash that is not one
-  of its files; `verify-deps` counts declared against verified packages. 48
-  tests, each refusal asserting its reason text, and 30 mutants
+  of its files; `verify-deps` counts declared against verified packages. Each
+  refusal test asserts its reason text, and 56 mutants
   ([lesson 118](docs/lessons.md)).
 
 ## [0.9.0] — 2026-10-28

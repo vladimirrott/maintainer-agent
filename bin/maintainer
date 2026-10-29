@@ -3170,7 +3170,12 @@ def _deps_read(pr: str, diff: bool) -> dict:
         rc, patch = _sh("gh", "pr", "diff", pr, "--repo", SLUG)
         if rc != 0 or not patch.strip():
             raise _Unreadable("its diff")
-        p = _spawn(("python3", str(_deps_classifier())), input=patch)
+        # Bounded, as in verify-deps: the classifier reads text an author wrote.
+        limit = _tunable_int("CLASSIFY_TIMEOUT")
+        try:
+            p = _spawn(("python3", str(_deps_classifier())), input=patch, timeout=limit)
+        except subprocess.TimeoutExpired:
+            raise _Unreadable(f"its diff through the classifier (it ran past {limit}s)")
         try:
             verdict = json.loads(p.stdout)
         except ValueError:
