@@ -137,7 +137,9 @@ semver class out of the `updated-dependencies` block Dependabot puts in its
 commit message, runs the classifier over the diff, counts the checks and reads
 the merge state. Then it names one next step: `rebase`, `wait`,
 `investigate <check>`, `verify` (earn the `dependency` receipt, approve, merge),
-or `human` for a semver-major member, a classifier refusal or anything
+or `human` for a semver-major member, a member with no semver class (a Docker
+digest moving under the same image and tag is the one exception), a classifier
+refusal or anything
 `DEPS_AUTOMERGE` (`none`, `patch` or `minor`; default `minor`) does not allow. A
 commit by anybody else makes it a contributor's pull request. `deps rebase`
 asks Dependabot and never updates the branch itself, since a commit of ours
@@ -634,7 +636,7 @@ The short version follows.
 ./scripts/check_drift.py    # the docs agree with the code
 ```
 
-<!-- fig:tests floor=100 -->1,400+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
+<!-- fig:tests floor=100 -->1,500+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

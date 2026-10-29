@@ -3651,6 +3651,24 @@ grep -q '"verdict": "dependency-bump"' <<<"$vout" \
     && ok "a base-image digest bump is a dependency bump and reports the image to verify" \
     || bad "the Dockerfile digest bump was not reported for verification: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
 
+# A digest bump keeps the tag and moves only the digest, and the verdict says so,
+# because `maintainer deps` lets that shape through with no semver class to read.
+grep -q '"same_tag": true' <<<"$(dep_case "$dp/docker.patch")" \
+    && ok "a digest-only base image bump is reported as keeping its tag" \
+    || bad "the verdict does not say the docker.patch bump kept its tag"
+cat > "$dp/docker-retag.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,7 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
++FROM docker.io/library/rust:1-trixie@sha256:93ce27a88655056a51dbdd8f5f2d7ddc071c7b0070fb288a37b5a285fc83971e AS builder
+PATCH
+vout="$(dep_case "$dp/docker-retag.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" && grep -q '"same_tag": false' <<<"$vout" \
+    && ok "a base image that changes tag is reported as not keeping it" \
+    || bad "a retagged base image was not reported as same_tag false: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+
 # The pin is the whole control. A bump that leaves the image on a bare tag has
 # given up the property the digest was there for, whatever Dependabot titled it.
 cat > "$dp/docker-unpinned.patch" <<'PATCH'
@@ -9624,6 +9642,33 @@ out="$(deps_run -- 688)"
 check "a member with no update-type goes to a person" "$(next_of "$out" 688)" "human"
 grep -q 'library/debian carries no update-type' <<<"$out" && grep -q 'ecosystem: docker' <<<"$out" \
     && ok "naming it, and the ecosystem comes from Dependabot's branch name" || bad "the digest member is not explained: $out"
+# A digest-only bump carries no update-type, and it is the one shape allowed
+# through anyway: same image, same tag, only the digest moved, which verify-deps
+# then checks against the registry. A tag change with no update-type is not.
+digest_args=(msg=digest "title=chore(deps): bump library/rust" branch=dependabot/docker/library/rust-48b7f43)
+dreset; DPR_DIFF="$dp/docker.patch" dpr 689 "${digest_args[@]}"
+check "a digest-only base image bump is ready to verify" "$(next_of "$(deps_run -- 689)" 689)" "verify"
+check "and DEPS_AUTOMERGE=patch lets it through too" "$(next_of "$(deps_run MAINTAINER_DEPS_AUTOMERGE=patch -- 689)" 689)" "verify"
+check "but DEPS_AUTOMERGE=none does not" "$(next_of "$(deps_run MAINTAINER_DEPS_AUTOMERGE=none -- 689)" 689)" "human"
+dreset; DPR_DIFF="$dp/docker-retag.patch" dpr 689 "${digest_args[@]}"
+out="$(deps_run -- 689)"
+check "a base image that changes tag with no update-type goes to a person" "$(next_of "$out" 689)" "human"
+grep -q 'library/debian carries no update-type' <<<"$out" && ok "naming the member it could not classify" \
+    || bad "the retag was not explained: $out"
+# Only a diff that is nothing but digest moves: a lockfile beside it, or a
+# Dockerfile change that adds no image at all, is not that shape.
+cat "$dp/docker.patch" "$dp/lock.patch" > "$dp/docker-and-lock.patch"
+dreset; DPR_DIFF="$dp/docker-and-lock.patch" dpr 689 "${digest_args[@]}"
+check "a digest move beside a lockfile change, with no update-type, goes to a person" "$(next_of "$(deps_run -- 689)" 689)" "human"
+cat > "$dp/docker-drop.patch" <<'PATCH'
+diff --git a/Dockerfile b/Dockerfile
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -6,7 +6,6 @@
+-FROM docker.io/library/rust:1-bookworm@sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa AS builder
+PATCH
+dreset; DPR_DIFF="$dp/docker-drop.patch" dpr 689 "${digest_args[@]}"
+check "a Dockerfile change that moves no digest, with no update-type, goes to a person" "$(next_of "$(deps_run -- 689)" 689)" "human"
 dreset; DPR_DIFF="$dp/pin-plus.patch" dpr 692
 out="$(deps_run -- 692)"
 check "a workflow change beyond SHA pin lines goes to a person" "$(next_of "$out" 692)" "human"
@@ -9775,6 +9820,30 @@ for case in "merge=CLEAN|not BEHIND or DIRTY" "commits=dep,human:carla|not a ver
     [ "$rc" != 0 ] && grep -q "$want" <<<"$out" && [ ! -e "$DD/posted-690" ] \
         && ok "rebase refuses with $args, and posts nothing" || bad "rebase with $args (rc=$rc): $out"
 done
+# A pull request another actor has leased is theirs for now, as it is for
+# maintainer-merge: the ask waits, and says who holds it.
+dreset; dpr 690 merge=BEHIND; mkdir -p "$DD/state/leases"
+printf '{"holder":"interactive","kind":"interactive","note":"reading the bump","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(date +%s)" "$(date +%s)" > "$DD/state/leases/pr-690.json"
+out="$(deps_run MAINTAINER_IN_RUN=deps/review -- rebase 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'interactive' <<<"$out" && grep -q 'reading the bump' <<<"$out" && [ ! -e "$DD/posted-690" ] \
+    && ok "rebase refuses a pull request another actor has leased, naming the holder" \
+    || bad "rebase asked on a leased pull request (rc=$rc): $out"
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" = 0 ] && [ -s "$DD/posted-690" ] && ok "and the lease holder itself may ask" \
+    || bad "the lease holder could not ask (rc=$rc): $out"
+dreset; dpr 690 merge=BEHIND; printf 'not a lease\n' > "$DD/state/leases/pr-690.json"
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'cannot be read as a lease' <<<"$out" && [ ! -e "$DD/posted-690" ] \
+    && ok "an unreadable lease refuses the ask rather than reading as free" \
+    || bad "rebase asked past an unreadable lease (rc=$rc): $out"
+dreset; dpr 690 merge=BEHIND
+printf '{"holder":"interactive","kind":"interactive","note":"long gone","acquired":1,"renewed":%s,"ttl_seconds":60}\n' \
+    "$(( $(date +%s) - 3600 ))" > "$DD/state/leases/pr-690.json"
+out="$(deps_run MAINTAINER_IN_RUN=deps/review -- rebase 690)"; rc=$?
+[ "$rc" = 0 ] && [ -s "$DD/posted-690" ] && ok "an expired lease blocks nobody" \
+    || bad "an expired lease blocked the ask (rc=$rc): $out"
+rm -f "$DD/state/leases/pr-690.json"
 dreset; dpr 690 merge=BEHIND
 out="$(deps_run MAINTAINER_POST=off -- rebase 690)"; rc=$?
 [ "$rc" = 0 ] && grep -q 'would ask Dependabot to rebase #690' <<<"$out" && [ ! -e "$DD/posted-690" ] \
@@ -9796,11 +9865,11 @@ for pdj in "$root"/profiles/*/deny.json; do
         && bad "$pn: the wall denies the maintainer helper, so deps rebase is unreachable" \
         || ok "$pn: the wall leaves maintainer deps rebase reachable, and that is the only new path"
 done
-for f in profiles/sysknife/prompts/review.md profiles/magent/prompts/review.md; do
+for f in profiles/sysknife/prompts/review.md profiles/magent/prompts/review.md profiles/_template/prompts/review.md; do
     txt="$(cat "$root/$f")"
     grep -qE '^## ([0-9]+\. )?Dependabot pull requests' <<<"$txt" && grep -q 'maintainer deps rebase' <<<"$txt" \
       && grep -q 'maintainer-merge verify-deps' <<<"$txt" && grep -q -- '--approve' <<<"$txt" \
-      && grep -q 'Ready to merge, awaiting Vladimir' <<<"$txt" && grep -q 'gh pr update-branch' <<<"$txt" \
+      && grep -q '## Ready to merge, awaiting ' <<<"$txt" && grep -q 'gh pr update-branch' <<<"$txt" \
         && ok "$f drives Dependabot pull requests through maintainer deps" \
         || bad "$f has no Dependabot section naming deps, verify-deps, the approval and the report heading"
 done

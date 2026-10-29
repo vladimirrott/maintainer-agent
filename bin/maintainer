@@ -3265,6 +3265,16 @@ def _deps_route(info: dict, level: str, me: str) -> tuple[str, list[str]]:
         reasons.append("the classifier refused it: " + safe_for_prompt(verdict.get("reason", "no reason given"), 120)
                        + (f" ({safe_for_prompt(where, 120)})" if where else ""))
     members, problem = info["members"]
+    # A Docker digest bump has no semver class: Dependabot writes no update-type
+    # when the tag stays and only the digest moves. That shape, and only that
+    # one, passes without a class: every changed file a Dockerfile, every image
+    # keeping its image and tag. verify-deps then checks each digest against the
+    # registry.
+    files = verdict.get("files") or {}
+    images = verdict.get("images") or []
+    digest_only = (verdict.get("verdict") == "dependency-bump" and bool(files) and bool(images)
+                   and all(k == "dockerfile" for k in files.values())
+                   and all(i.get("same_tag") is True for i in images))
     if members is None:
         reasons.append(problem + ", so no member has a semver class")
     for m in members or []:
@@ -3272,9 +3282,13 @@ def _deps_route(info: dict, level: str, me: str) -> tuple[str, list[str]]:
         cls = _SEMVER.match(m.get("update-type", ""))
         if cls and cls.group(1) == "major":
             reasons.append(f"{name} is semver-major")
+        elif not cls and digest_only and DEPS_LEVELS[level]:
+            continue
+        elif not cls and digest_only:
+            reasons.append(f"{name} is a digest-only bump and DEPS_AUTOMERGE={level}")
         elif not cls:
-            reasons.append(f"{name} carries no update-type (a digest-only bump writes none), so its "
-                           f"semver class is unknown")
+            reasons.append(f"{name} carries no update-type and the diff is not a digest-only bump of "
+                           f"the same image and tag, so its semver class is unknown")
         elif cls.group(1) not in DEPS_LEVELS[level]:
             reasons.append(f"{name} is semver-{cls.group(1)} and DEPS_AUTOMERGE={level}")
     if reasons:
@@ -3372,6 +3386,16 @@ def _deps_rebase(pr: str) -> None:
         raise SystemExit("maintainer deps rebase: the profile names no GitHub account (GH_ACCOUNT), so I\n"
                          "            cannot tell which rebase requests are mine. Nothing was posted.")
     try:
+        # A pull request another actor has leased is theirs for now, the rule
+        # maintainer-merge keeps through lease_gate. An unreadable lease is not
+        # a free one.
+        try:
+            held = _lease_read(pr)
+        except _LeaseUnreadable as e:
+            raise _Refused(str(e).rstrip("."))
+        now = datetime.now().timestamp()
+        if held is not None and not _lease_expired(held, now) and held["holder"] != _lease_actor()[1]:
+            raise _Refused(f"#{pr} is leased by another actor: {_lease_describe(pr, held, now)}")
         info = _deps_read(pr, diff=False)
         meta = info["meta"]
         if meta.get("state") != "OPEN":

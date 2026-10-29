@@ -252,8 +252,13 @@ def main():
                 if match["image"] not in was:
                     refuse("the base image comes from a different image than the one "
                            "it replaces", path, match.string.strip())
+                # same_tag: the image kept its tag and only the digest moved.
+                # A Dependabot digest bump carries no semver class, and this
+                # is the shape `maintainer deps` lets through without one.
                 images.append({"image": match["image"], "tag": match["tag"],
-                               "digest": match["digest"]})
+                               "digest": match["digest"],
+                               "same_tag": any(m["image"] == match["image"] and m["tag"] == match["tag"]
+                                               for m in removed)})
 
         elif kind == "workflow":
             for sign, text in lines:

@@ -43,12 +43,18 @@ middle digit.
   name it prints that GitHub returned, check names included, is flattened to
   one line and capped, since the `next:` line is what an unattended run acts on.
 - **`maintainer deps rebase <pr>`** posts `@dependabot rebase` once per head, only
-  on a verified Dependabot pull request that is `BEHIND` or `DIRTY`, reads the
-  comment back, and rehearses at `POST=off`.
+  on a verified Dependabot pull request that is `BEHIND` or `DIRTY` and that no
+  other actor has leased, reads the comment back, and rehearses at `POST=off`.
+- **A Docker digest bump can be verified.** Dependabot writes no `update-type`
+  when a base image keeps its tag and only the digest moves. When every changed
+  file is a Dockerfile and every image keeps its image and tag (the classifier
+  now reports `same_tag` per image), `deps` routes it to `verify` at `patch` or
+  `minor`, and `verify-deps` checks the digest against the registry. A tag change
+  or any other change without a semver class still goes to a person.
 - **New defaults** `DEPS_AUTOMERGE` (`minor`; `none`, `patch` or `minor`),
   `DEPS_UNKNOWN_READS` (3) and `DEPS_UNKNOWN_WAIT` (5). The sysknife and magent
   profiles set `DEPS_AUTOMERGE="minor"`.
-- **The sysknife and magent review prompts drive Dependabot pull requests with
+- **The sysknife, magent and template review prompts drive Dependabot pull requests with
   `maintainer deps`**: no reply to the bot, no next-issue invite, one merge at a
   time, and every `human` under `## Ready to merge, awaiting Vladimir` with the
   upstream changelog read for each major member.
