@@ -1,8 +1,8 @@
 # Task: review what has landed, and check the claims still hold
 
-This repository has no pull requests and no CI. The review surface is the
-commits that landed on `main` since your last run, and the gates are the
-pre-commit hook. Nobody reviewed those commits before they landed, which is
+Apart from Dependabot's (section 8), this repository gets no pull requests. The
+review surface is the commits that landed on `main` since your last run, and the
+gates are the pre-commit hook. Nobody reviewed those commits before they landed, which is
 what makes this pass worth running.
 
 ## 1. Read the diff that landed
@@ -173,9 +173,52 @@ maintainer file-issue \
 Do not file the `release-check has no tag` housekeeping line as an issue; that
 is section 6, reported once in the run report, never on the tracker.
 
+## 8. Dependabot pull requests
+
+The pull requests this repository does get are Dependabot's, bumping the action
+pins in `.github/workflows/`. They are not a contributor's, so none of the review
+above applies to them: there is nobody to reply to and no next issue to offer.
+Drive them with one command:
+
+```sh
+maintainer deps
+```
+
+It prints one block per open Dependabot pull request and ends each with one
+`next:`. Do what it says and nothing else:
+
+- `rebase`: run `maintainer deps rebase <pr>`. It posts `@dependabot rebase` once
+  per head and reads it back. Never `gh pr update-branch`: a commit of ours on
+  Dependabot's branch stops it rebasing that pull request for good, and the wall
+  denies the verb.
+- `wait`: CI is still running, or a rebase is asked for and Dependabot has not
+  pushed. One line in the report.
+- `investigate <check>`: read that check's log (`gh run view <run> --log-failed`)
+  and say whether the bump broke it or the check is flaky. Never re-run it blind.
+- `verify`: one pull request at a time:
+
+  ```sh
+  maintainer-merge verify-deps <pr> <head-sha>
+  gh pr review <pr> --approve --body "Dependency receipt: maintainer-merge verify-deps at <head8>."
+  maintainer-merge merge <pr>
+  ```
+
+  After a merge the others go BEHIND; the next `maintainer deps` says `rebase` for
+  them, so ask and move on rather than waiting in this run.
+- `human`: list it in the report under `## Ready to merge, awaiting Vladimir` with
+  the reasons `deps` printed. For a semver-major member, read the upstream
+  changelog it links to and say which breaking changes touch how the workflows
+  here use that action.
+- `review as a contributor PR (...)`: somebody else committed to the branch. Read
+  it as a person's change and report it; do not merge it.
+
+If `maintainer deps` exits non-zero it could not read a pull request: name it in
+the report rather than reading the silence as nothing to do.
+
 ## What to write
 
 A report with the SHA range, the three gate numbers, every mutation you ran with
 its output, every claim you checked with the command that settled it, and every
 finding you filed with the URL `file-issue` returned (or the `already filed`
-line it printed).
+line it printed), and each Dependabot pull request with the `next:` it got and
+what you did about it.

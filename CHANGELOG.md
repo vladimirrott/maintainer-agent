@@ -45,6 +45,16 @@ middle digit.
 - **New defaults** `DEPS_AUTOMERGE` (`minor`; `none`, `patch` or `minor`),
   `DEPS_UNKNOWN_READS` (3) and `DEPS_UNKNOWN_WAIT` (5). The sysknife and magent
   profiles set `DEPS_AUTOMERGE="minor"`.
+- **The sysknife and magent review prompts drive Dependabot pull requests with
+  `maintainer deps`**: no reply to the bot, no next-issue invite, one merge at a
+  time, and every `human` under `## Ready to merge, awaiting Vladimir` with the
+  upstream changelog read for each major member.
+
+### Changed
+
+- **The deny wall denies `gh pr update-branch`** in every profile. A commit of
+  ours on a Dependabot branch stops Dependabot rebasing it for good, and on a
+  contributor's branch it is a push the doctrine already forbids.
 
 ## [0.8.1] — 2026-10-27
 

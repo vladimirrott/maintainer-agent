@@ -9745,6 +9745,23 @@ dreset; dpr 690 merge=BEHIND; : > "$DD/fail-comments-690"
 out="$(deps_run -- rebase 690)"; rc=$?
 [ "$rc" != 0 ] && grep -q 'nothing was posted' <<<"$out" && [ ! -e "$DD/posted-690" ] \
     && ok "rebase refuses when it cannot read whether it already asked" || bad "rebase asked blind (rc=$rc): $out"
+for pdj in "$root"/profiles/*/deny.json; do
+    pn="$(basename "$(dirname "$pdj")")"; w="$stub_dir/wall-$pn/settings.json"
+    [ -f "$w" ] || { bad "$pn: no rendered wall to read"; continue; }
+    grep -qF 'Bash(gh pr update-branch:*)' "$w" && grep -qF 'Bash(/usr/bin/gh pr update-branch:*)' "$w" \
+        && ok "$pn: the wall denies gh pr update-branch, every spelling" || bad "$pn: the wall lets gh pr update-branch through"
+    grep -qE '"Bash\(([^"]*/)?maintainer( deps)?(:|\))' "$w" \
+        && bad "$pn: the wall denies the maintainer helper, so deps rebase is unreachable" \
+        || ok "$pn: the wall leaves maintainer deps rebase reachable, and that is the only new path"
+done
+for f in profiles/sysknife/prompts/review.md profiles/magent/prompts/review.md; do
+    txt="$(cat "$root/$f")"
+    grep -qE '^## ([0-9]+\. )?Dependabot pull requests' <<<"$txt" && grep -q 'maintainer deps rebase' <<<"$txt" \
+      && grep -q 'maintainer-merge verify-deps' <<<"$txt" && grep -q -- '--approve' <<<"$txt" \
+      && grep -q 'Ready to merge, awaiting Vladimir' <<<"$txt" && grep -q 'gh pr update-branch' <<<"$txt" \
+        && ok "$f drives Dependabot pull requests through maintainer deps" \
+        || bad "$f has no Dependabot section naming deps, verify-deps, the approval and the report heading"
+done
 rm -f "$stub_dir/gh"
 
 if [ "$skip" -gt 0 ]; then

@@ -105,32 +105,52 @@ two was written because a real pull request could not be merged without it, and
 refusing to merge is the safe outcome, so both gaps were invisible until someone
 hit them.
 
-A receipt comes in two kinds, and only one of them merges unattended:
+A receipt comes in three kinds, and two of them merge unattended:
 
 | kind | written by | who may merge on it |
 |---|---|---|
 | `observed` | `maintainer-merge verify`, which runs the mutation and records what it saw | anyone, including a timer |
+| `dependency` | `maintainer-merge verify-deps`, which classifies a dependency bump's diff and checks every action pin and image digest against GitHub and the registry | anyone, including a timer |
 | `asserted` | `maintainer-merge receipt`, which records a sentence a human typed | a human only |
 
 Signing stops a receipt being written with a text editor, and that is all it
 stops: the agent runs as the same user as its owner, so it can reach the same
 key. What separates them is that `verify` records something a reader can
 re-check. So `receipt` refuses to run inside a run, the deny wall spells the
-command, and `merge` refuses any receipt that is not `observed` while a run is in
-progress. Only the third of those survives an agent editing its own environment,
+command, and `merge` refuses any receipt that is neither `observed` nor
+`dependency` while a run is in progress. Only the third of those survives an agent editing its own environment,
 which is why it exists.
 
 Every refusal path is tested, including both directions of the production-diff
 rule against a real git repository.
+
+Dependabot's pull requests take their own path, because there is no guard to
+mutate and nobody to reply to:
+
+```sh
+maintainer deps              # every open Dependabot pull request, and what each needs next
+maintainer deps rebase 690   # ask Dependabot to rebase one, once per head
+```
+
+`deps` checks that Dependabot alone wrote the pull request, reads each member's
+semver class out of the `updated-dependencies` block Dependabot puts in its
+commit message, runs the classifier over the diff, counts the checks and reads
+the merge state. Then it names one next step: `rebase`, `wait`,
+`investigate <check>`, `verify` (earn the `dependency` receipt, approve, merge),
+or `human` for a semver-major member, a classifier refusal or anything
+`DEPS_AUTOMERGE` (`none`, `patch` or `minor`; default `minor`) does not allow. A
+commit by anybody else makes it a contributor's pull request. `deps rebase`
+asks Dependabot and never updates the branch itself, since a commit of ours
+there stops Dependabot rebasing it; `gh pr update-branch` is in the deny wall.
 
 ## Containment, layer by layer
 
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries **<!-- fig:denied_verbs -->37<!-- /fig --> denied verbs**: `git push`, `git tag`,
+backend, `--settings` carries **<!-- fig:denied_verbs -->38<!-- /fig --> denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
-`gh repo delete`, `gh issue create` (issue creation goes through the deduplicating `maintainer file-issue`), `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
+`gh repo delete`, `gh issue create` (issue creation goes through the deduplicating `maintainer file-issue`), `gh pr update-branch` (a Dependabot branch is rebased by asking Dependabot), `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
 `~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.
 Rehearsal adds every GitHub write verb on top. `tests/run-tests.sh` pins them
 for **every** profile and is mutation-proved: delete a verb from any profile's

@@ -10,7 +10,8 @@
   "The receipt-signing key sits in credential_paths on purpose: a receipt",
   "is only unforgeable while the key is unreadable, so it belongs beside",
   "the SSH keys rather than in a list of its own.",
-  "The scheduler verbs are here because a run of the magent profile ran ./install.sh --uninstall against the live machine and turned off every timer, including another project's."
+  "The scheduler verbs are here because a run of the magent profile ran ./install.sh --uninstall against the live machine and turned off every timer, including another project's.",
+  "gh pr update-branch is here because a commit of ours on a Dependabot branch stops Dependabot rebasing it for good, and on a contributor's branch it is a push the doctrine forbids."
  ],
  "spelled_everywhere": [
   "cargo publish",
@@ -23,6 +24,7 @@
   "gh issue create",
   "gh pr create",
   "gh pr merge",
+  "gh pr update-branch",
   "gh release",
   "gh repo delete",
   "gh repo edit",
