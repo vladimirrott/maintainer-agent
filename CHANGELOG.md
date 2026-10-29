@@ -24,6 +24,13 @@ middle digit.
   must be UTF-8, and a diff that renames, copies or deletes a file, or names a
   file without changing a line of it, is refused. 25 recent sysknife Dependabot
   pull requests classify exactly as before ([lesson 119](docs/lessons.md)).
+- **`verify-deps`, `maintainer deps` and `maintainer screen` read the net diff,
+  not `gh pr diff --patch`.** An mbox carries every commit message, and a
+  message is author text: one could hold a forged `diff --git` and a hunk
+  removing `evilpkg==0.1`, so a pull request adding `evilpkg` read as an
+  upgrade. The classifier refuses mbox input by name, and every test stub for
+  `gh pr diff` fails if `--patch` is asked for again. Flagged by an automated
+  security review of the pushed branch.
 - **`verify-deps` gives the classifier 60 seconds** (`MAINTAINER_CLASSIFY_TIMEOUT`)
   and refuses by name when it runs out, so an input that makes a pattern
   backtrack cannot stall an unattended run.

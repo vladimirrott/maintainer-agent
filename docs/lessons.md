@@ -3495,3 +3495,14 @@ in all, every one killed). Before merging, the new parser ran over the 25 most
 recent merged Dependabot pull requests on sysknife: same verdict, same line,
 pin and image counts for all 25.
 
+A third finding came after that commit, from an automated security review:
+`verify-deps` classified `gh pr diff --patch`, and the parser skipped the
+commit message between two patches. A message is text the author writes, and
+it can hold a whole forged `diff --git` and hunk. A fake removed
+`evilpkg==0.1` in a message, before a real patch adding `evilpkg==1.0`, makes a
+new package read as an upgrade. No rule for where a message ends is safe,
+because a message may itself hold a `---` line. The classifier now refuses mbox
+input, and `verify-deps`, `maintainer deps` and `maintainer screen` ask for the
+net diff. The same 25 Dependabot pull requests, read as net diffs, classify
+exactly as they did from `--patch` before.
+

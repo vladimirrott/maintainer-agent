@@ -181,20 +181,21 @@ HUNK = re.compile(r"^@@ -\d+(?:,(?P<old>\d+))? \+\d+(?:,(?P<new>\d+))? @@")
 # A sentinel between hunks. Context lines are dropped, so without it two added
 # lines from different hunks look adjacent.
 HUNK_START = ("@", "")
+# The first line of each patch in `git format-patch` / `gh pr diff --patch`.
+MBOX_FROM = re.compile(r"^From [0-9a-f]{40} ")
 
 
 def parse(diff):
     """{path: [(sign, text), ...]} for every changed line, in order.
 
-    Only inside a hunk. `gh pr diff --patch` concatenates one mbox patch per
-    commit, so between two diffs there is a `From <sha>` line, the commit
-    message and a bare `---`. Reading +/- by first character alone turns that
-    `---` into a removed line and every `- bullet` in a commit body into
-    another, filed under whichever path the previous patch ended on. The first
-    version did that, and sysknife#494 was refused with a complaint about a
-    manifest line reading `--`. It failed closed, which is the right direction
-    for the wrong reason: every rebased Dependabot pull request would be refused
-    the same way.
+    Only inside a hunk, and only from a net diff. This used to read
+    `gh pr diff --patch`, one mbox patch per commit, and skip the commit
+    messages between them (sysknife#494 was refused when a `---` separator read
+    as a removed line). A commit message is text the author writes, though, and
+    one can hold a whole forged `diff --git` and hunk: a fake `-evilpkg==0.1`
+    turns a new package into an upgrade. No rule for where a message ends is
+    safe, since a message may itself hold a `---` line, so mbox input is
+    refused and the callers ask for the net diff.
 
     Inside a hunk the header's line counts decide what a line is, never its
     prefix. A removed file line `-- x` prints as `--- x`, and skipping it as a
@@ -232,11 +233,10 @@ def parse(diff):
         # message sits outside any file and may say "deleted file" in prose.
         if path is not None and line.startswith("deleted file"):
             refuse("the diff deletes a file, which is not a version bump", path)
-        if line.startswith("From ") and len(line.split()) > 2:
-            # The next commit's mbox header: nothing after it belongs to the
-            # file the previous patch was describing.
-            path = None
-            continue
+        if MBOX_FROM.match(line):
+            refuse("the diff is an mbox (`gh pr diff --patch`). Its commit messages are "
+                   "author text and can forge a `diff --git` and a hunk, so only the net "
+                   "diff is classified")
         match = HUNK.match(line)
         if match and path is not None:
             old = int(match["old"] if match["old"] is not None else 1)

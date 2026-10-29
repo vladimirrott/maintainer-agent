@@ -2719,6 +2719,7 @@ screen_stub() {  # $1 = files json, $2 = changedFiles count, $3 = diff text, $4 
 {\"files\":$1,\"headRefOid\":\"abcdef1234567890\",\"author\":{\"login\":\"stranger\"},\"title\":\"t\",\"changedFiles\":$2}
 J
         ;;
+      *'pr diff'*'--patch'*) echo 'screen asked for --patch' >&2; exit 9 ;;
       *'pr diff'*) printf '%s\n' '$3' ;;
       *actions/runs*) printf '%s\n' '$runs' ;;
       *pulls/*/commits*) printf '%s\n' '[{\"sha\":\"abcdef1234567890\"}]' ;;
@@ -3910,7 +3911,11 @@ grep -q 'verify-deps' "$root/bin/maintainer-merge" \
 # classifier did exactly that: sysknife#494 was refused with
 # `a manifest line changed outside its version literal` naming the line `--`.
 # It failed closed, which is the right direction and the wrong reason, and it
-# would refuse every rebased Dependabot pull request the same way.
+# would refuse every rebased Dependabot pull request the same way. The parser
+# then learned to skip the messages, and that was worse: a message is author
+# text, and it can hold a forged hunk. Mbox input is now refused outright and
+# the gate asks for the net diff, so this rebased-PR shape must be refused by
+# name, never read.
 cat > "$dp/multicommit.patch" <<'PATCH'
 From 97c226f0ee1a0f0b0e0d0c0b0a09080706050403 Mon Sep 17 00:00:00 2001
 From: dependabot[bot] <support@github.com>
@@ -3957,15 +3962,34 @@ index 5d61b394..30a412b8 100644
  source = "registry+https://github.com/rust-lang/crates.io-index"
 PATCH
 vout="$(dep_case "$dp/multicommit.patch")"
-grep -q '"verdict": "dependency-bump"' <<<"$vout" \
-    && ok "an mbox header between commits is not read as a changed line" \
-    || bad "the commit metadata was parsed as content: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
-# And the count has to be the hunks' own lines: two in the manifest and two in
-# the lockfile. Under the defect it also counted `---` and the two bullets in
-# the second commit's message.
-grep -q '"changed_lines": 4' <<<"$vout" \
-    && ok "only the hunk bodies are counted, not the commit messages around them" \
-    || bad "the changed-line count includes lines from outside a hunk: $(grep changed_lines <<<"$vout")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -q 'mbox' <<<"$vout" \
+    && ok "an mbox (gh pr diff --patch) is refused by name, not read" \
+    || bad "an mbox was classified instead of refused: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+# The attack that makes it matter: a commit message forging a removed pin, so
+# a package the pull request adds reads as one it upgrades.
+cat > "$dp/forged.patch" <<'PATCH'
+From 97c226f0ee1a0f0b0e0d0c0b0a09080706050403 Mon Sep 17 00:00:00 2001
+From: someone <someone@example.invalid>
+Subject: [PATCH] add a requirement
+
+diff --git a/requirements.txt b/requirements.txt
+@@ -1,2 +0,0 @@
+-evilpkg==0.1 \
+-    --hash=sha256:0000000000000000000000000000000000000000000000000000000000000000
+---
+ requirements.txt | 2 ++
+
+diff --git a/requirements.txt b/requirements.txt
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -1,0 +1,2 @@
++evilpkg==1.0 \
++    --hash=sha256:1111111111111111111111111111111111111111111111111111111111111111
+PATCH
+vout="$(dep_case "$dp/forged.patch")"
+grep -q '"verdict": "refused"' <<<"$vout" && grep -q 'mbox' <<<"$vout" \
+    && ok "a commit message forging a removed pin cannot make a new package an upgrade" \
+    || bad "a forged hunk in a commit message was read: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
 
 # End to end, because a subcommand that exists and a subcommand that works are
 # different claims and grep cannot tell them apart.
@@ -3978,6 +4002,7 @@ dep_gate() {  # $1 = patch file, $2 = the commit GitHub says the tag is, or the 
       *'auth switch'*) exit 0 ;;
       *'api user'*) echo testuser ;;
       *headRefOid*) echo cafe1234cafe1234 ;;
+      *'pr diff'*'--patch'*) echo 'the gate asked for --patch' >&2; exit 9 ;;
       *'pr diff'*) cat '$1' ;;
       *'/git/ref/tags/'*'.ref'*) printf 'refs/tags/%s\tcommit\t%s\n' \"\${2#*/git/ref/tags/}\" '$2' ;;
       *'/git/ref/heads/'*'.ref'*) printf 'refs/heads/%s\n' \"\${2#*/git/ref/heads/}\" ;;
@@ -4286,6 +4311,7 @@ case "\$*" in
   *'auth switch'*) exit 0 ;;
   *'api user'*) echo testuser ;;
   *headRefOid*) echo cafe1234cafe1234 ;;
+  *'pr diff'*'--patch'*) echo 'the gate asked for --patch' >&2; exit 9 ;;
   *'pr diff'*) cat '$1' ;;
   *'/git/ref/tags/'*'.ref'*) [ '${PG_REF:-404}' = 404 ] && nf; printf '%b\n' '${PG_REF:-}' ;;
   *'/git/tags/'*) [ '${PG_TAGOBJ:-404}' = 404 ] && nf; printf '%b\n' '${PG_TAGOBJ:-}' ;;
@@ -9807,6 +9833,7 @@ case "$*" in
           printf '{"mergeStateStatus":"%s","mergeable":"%s"}\n' "$s" "$m"
       else python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({k:d[k] for k in ("mergeStateStatus","mergeable")}))' "$DD/pr-$n.json"; fi ;;
   *'pr view'*) [ -f "$DD/fail-view-$n" ] && { echo 'HTTP 502' >&2; exit 1; }; cat "$DD/pr-$n.json" ;;
+  *'pr diff'*'--patch'*) echo 'deps asked for --patch' >&2; exit 9 ;;
   *'pr diff'*) [ -f "$DD/fail-diff-$n" ] && exit 1; cat "$DD/diff-$n.patch" ;;
   *'-X POST'*'/comments'*) printf '%s\n' "$*" >> "$DD/posted-$n"
       [ -f "$DD/swallow-$n" ] && exit 0

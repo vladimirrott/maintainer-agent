@@ -2068,7 +2068,8 @@ def cmd_screen(pr: str) -> None:
 
     blocks = _screen_blocks(paths)
 
-    rc, diff = _sh("gh", "pr", "diff", pr, "--patch")
+    # The net diff: with --patch, a commit message could forge a hunk here too.
+    rc, diff = _sh("gh", "pr", "diff", pr)
     if rc != 0:
         raise SystemExit(f"maintainer: could not read the diff for PR {pr}; screen FAILED, treat as READ-ONLY")
     for path in (p for p in paths if p.endswith("Cargo.toml")):
@@ -3164,7 +3165,9 @@ def _deps_read(pr: str, diff: bool) -> dict:
     info = {"pr": pr, "meta": meta, "head": head, "commits": commits,
             "head_time": _ts(at_head[0].get("date")), "comments": None, "verdict": None}
     if diff:
-        rc, patch = _sh("gh", "pr", "diff", pr, "--repo", SLUG, "--patch")
+        # The net diff, never --patch: commit messages are author text, and one
+        # can hold a forged `diff --git` and hunk the classifier would read.
+        rc, patch = _sh("gh", "pr", "diff", pr, "--repo", SLUG)
         if rc != 0 or not patch.strip():
             raise _Unreadable("its diff")
         p = _spawn(("python3", str(_deps_classifier())), input=patch)
