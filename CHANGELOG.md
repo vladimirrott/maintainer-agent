@@ -10,6 +10,25 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`verify-deps` gates a hash-pinned pip bump.** sysknife added a pip ecosystem
+  for `tools/ci-python` on 2026-10-29, and its first Dependabot bump, #735
+  (PyYAML 6.0.2 to 6.0.3), was refused as "not dependency metadata", which left
+  a hand receipt or `gh pr merge --admin` as the only ways to land it. The
+  classifier now has a `pip-requirements` arm for `requirements*.txt` whose
+  grammar is an allowlist: a `name==version` pin, an indented
+  `--hash=sha256:` line, a comment. `--index-url`, `--extra-index-url`, `-e`,
+  `name @ url` and ranges match none of it and are refused on either side of
+  the diff, since dropping a private index is a new place to download from as
+  much as adding one. A hash with no added requirement above it, and a
+  requirement that arrives without hashes in a hash-pinned file, are refused.
+  `scripts/verify_pypi_release.py` then asks PyPI's JSON API for that release
+  and refuses a yanked release, one with no files, and any hash that is not one
+  of its files; `verify-deps` counts declared against verified packages. 22
+  tests, each refusal pinned to its own reason, and 15 mutants
+  ([lesson 118](docs/lessons.md)).
+
 ## [0.9.0] — 2026-10-28
 
 ### Security

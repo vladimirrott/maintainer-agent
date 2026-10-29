@@ -79,6 +79,8 @@ Every name below is read by the code. A test fails when the code reads a
 | `MAINTAINER_SHELL_IMAGE` | the image the sysknife shell suite runs in. The test suite points it at a registry image |
 | `MAINTAINER_RECEIPT_KEY` | path of the receipt signing key. Default: `~/.local/share/maintainer/receipt.key` |
 | `MAINTAINER_IMAGE_RESOLVER` | the script `verify-deps` asks what an image tag resolves to. Default: `scripts/resolve_image_digest.py` |
+| `MAINTAINER_PYPI_VERIFIER` | the script `verify-deps` asks whether every pinned pip hash is a file the release publishes. Default: `scripts/verify_pypi_release.py` |
+| `MAINTAINER_PYPI_URL` | the JSON API that script asks. Default: `https://pypi.org/pypi`. The test suite points it at a `file://` tree |
 | `MAINTAINER_FAILURE_SHAPES` | path of the failure-classification table. Default: `lib/failure-shapes.json` |
 | `MAINTAINER_SETTINGS` | the permission file the backend uses (the claude settings or the opencode config), replacing the profile's own. `run.sh` sets it itself to swap in the rehearsal wall |
 | `MAINTAINER_THINKING` | thinking-token budget for the claude backend when the profile sets no `THINKING_<task>` |

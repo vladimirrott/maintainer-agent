@@ -3717,6 +3717,85 @@ grep -q '"verdict": "refused"' <<<"$vout" \
     && ok "a Dockerfile line that is not a base image pin is refused" \
     || bad "an added RUN rode along with a base image bump"
 
+# pip, as Dependabot writes it for a hash-pinned requirements file. sysknife
+# added a pip ecosystem for tools/ci-python on 2026-10-29, and its first bump
+# (sysknife#735, PyYAML 6.0.2 -> 6.0.3) was refused as "not dependency
+# metadata". The file is a lockfile in all but name: every package pinned with
+# `==` and every artifact named by its sha256, installed with --require-hashes.
+cat > "$dp/pip.patch" <<'PATCH'
+diff --git a/tools/ci-python/requirements.txt b/tools/ci-python/requirements.txt
+index e0b9b360..215aaf42 100644
+--- a/tools/ci-python/requirements.txt
++++ b/tools/ci-python/requirements.txt
+@@ -18,8 +18,8 @@
+ pathspec==1.1.1 \
+     --hash=sha256:17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a \
+     --hash=sha256:a00ce642f577bf7f473932318056212bc4f8bfdf53128c78bbd5af0b9b20b189
+-PyYAML==6.0.2 \
+-    --hash=sha256:01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff \
+-    --hash=sha256:0833f8694549e586547b576dcfaba4a6b55b9e96098b36cdc7ebefe667dfed48
++PyYAML==6.0.3 \
++    --hash=sha256:00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c \
++    --hash=sha256:0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a
+ yamllint==1.38.0 \
+PATCH
+vout="$(dep_case "$dp/pip.patch")"
+grep -q '"verdict": "dependency-bump"' <<<"$vout" \
+    && grep -q '"pip-requirements"' <<<"$vout" \
+    && grep -q '"name": "PyYAML"' <<<"$vout" && grep -q '"version": "6.0.3"' <<<"$vout" \
+    && grep -q '0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a' <<<"$vout" \
+    && ok "a hash-pinned pip bump is a dependency bump and reports the package and hashes to verify" \
+    || bad "the pip bump was not reported for verification: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+
+# A requirements file can name where to download from, and any of these lines
+# is a new place to download from. The grammar is an allowlist (a pin, a hash,
+# a comment), so each one is refused without being listed.
+pip_refused() {  # $1 = name, $2 = the reason the verdict must give, $3 = the changed lines
+    printf '%s\n' 'diff --git a/requirements.txt b/requirements.txt' \
+        '--- a/requirements.txt' '+++ b/requirements.txt' '@@ -1,3 +1,3 @@' "$3" > "$dp/pip-$1.patch"
+    vout="$(dep_case "$dp/pip-$1.patch")"
+    grep -q '"verdict": "refused"' <<<"$vout" && grep -q "$2" <<<"$vout" \
+        && ok "a pip bump that $1 is refused" \
+        || bad "a pip bump that $1 passed: $(tr -d '\n' <<<"$vout" | cut -c1-160)"
+}
+h1=00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c
+h0=01179a4a8559ab5de078078f37e5c1a30d76bb88519906844fd7bdea1b7729ff
+pip_refused "adds an extra index" 'not a pinned requirement' \
+    "+--extra-index-url https://example.invalid/simple"
+pip_refused "drops a private index" 'not a pinned requirement' \
+    "---index-url https://pypi.internal.invalid/simple"
+pip_refused "installs from a URL" 'not a pinned requirement' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML @ https://example.invalid/PyYAML-6.0.3.tar.gz"
+pip_refused "installs an editable checkout" 'not a pinned requirement' "+-e git+https://example.invalid/pyyaml#egg=PyYAML"
+pip_refused "drops the hashes" 'drops hash pinning' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML==6.0.3"
+pip_refused "swaps a hash under an unchanged pin" 'without the requirement' \
+    "-    --hash=sha256:$h0
++    --hash=sha256:$h1"
+pip_refused "loosens the pin to a range" 'not a pinned requirement' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML>=6.0.2 \\
++    --hash=sha256:$h1"
+# pip joins a requirement and its hashes into one logical line at each trailing
+# backslash. A hash after a line that does not continue belongs to no
+# requirement, so there is no release to check it against.
+pip_refused "puts a hash under a requirement that does not continue" 'without the requirement' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML==6.0.3
++    --hash=sha256:$h1"
+pip_refused "adds a hash after the last one of its requirement" 'without the requirement' \
+    "-PyYAML==6.0.2 \\
+-    --hash=sha256:$h0
++PyYAML==6.0.3 \\
++    --hash=sha256:$h1
++    --hash=sha256:$h0"
+
 # And the gate has to spend that classification: a dependency receipt is one an
 # unattended run may merge on, because the gate observed the checks itself.
 grep -q 'verify-deps' "$root/bin/maintainer-merge" \
@@ -3807,6 +3886,7 @@ dep_gate() {  # $1 = patch file, $2 = the commit GitHub says the tag is, or the 
         MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
         MAINTAINER_SCRIPTS="${DEP_SCRIPTS:-$root/scripts}" \
         MAINTAINER_IMAGE_RESOLVER="${DEP_RESOLVER:-$root/scripts/resolve_image_digest.py}" \
+        MAINTAINER_PYPI_VERIFIER="${DEP_PYPI:-$root/scripts/verify_pypi_release.py}" \
         bash "$root/bin/maintainer-merge" verify-deps 9 cafe1234cafe1234 2>&1
 }
 
@@ -3899,6 +3979,81 @@ else
 fi
 unset DEP_RESOLVER
 
+# The pip half, end to end. A hash pin makes the same two claims a digest pin
+# does: the install uses these exact files, and these files are the release the
+# version names. pip enforces the first with --require-hashes and nothing
+# enforces the second, so verify-deps asks PyPI for that release's digests.
+fake_pypi() {  # $1 = "ok", or the reason to refuse with; the argv lands in $stub_dir/pypi-argv
+    local f="$stub_dir/pypi-$RANDOM.py"
+    printf 'import sys\nopen(%s, "w").write("\\n".join(sys.argv[1:]))\n' "'$stub_dir/pypi-argv'" > "$f"
+    if [ "$1" = ok ]; then
+        printf 'print("2 of 73 files")\n' >> "$f"
+    else
+        printf 'sys.stderr.write(%s + "\\n")\nraise SystemExit(1)\n' "'$1'" >> "$f"
+    fi
+    printf '%s' "$f"
+}
+rm -f "$stub_dir/pypi-argv"
+DEP_PYPI="$(fake_pypi ok)"
+dout="$(dep_gate "$dp/pip.patch" unused)"; drc=$?
+if [ "$drc" = 0 ] && [ -f "$dep_state/receipts/9.json" ] \
+   && grep -q '"pip_verified": 1' "$dep_state/receipts/9.json"; then
+    ok "verify-deps writes a receipt when PyPI publishes every hash the bump pins"
+else
+    bad "a clean pip bump earned no receipt (rc=$drc): $(tr -d '\n' <<<"$dout" | cut -c1-160)"
+fi
+pargv="$(cat "$stub_dir/pypi-argv" 2>/dev/null)"
+grep -qx PyYAML <<<"$pargv" && grep -qx 6.0.3 <<<"$pargv" \
+    && grep -q '00c4bdeba853cc34e7dd471f16b4114f4162dc03e6b7afcc2128711f0eca823c' <<<"$pargv" \
+    && grep -q '0150219816b6a1fa26fb4699fb7daa9caf09eb1999f3b70fb6e786805e80375a' <<<"$pargv" \
+    && ok "verify-deps hands PyPI the package, the version and every pinned hash" \
+    || bad "the PyPI check did not receive the package, version and both hashes: $(tr '\n' ' ' <<<"$pargv")"
+
+DEP_PYPI="$(fake_pypi 'sha256:00c4bdeb is not a file PyPI publishes for PyYAML 6.0.3')"
+dout="$(dep_gate "$dp/pip.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'could not confirm PyYAML==6.0.3' <<<"$dout" \
+   && grep -q 'is not a file PyPI publishes' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "verify-deps refuses a pip hash PyPI does not publish, and says which"
+else
+    bad "a hash PyPI does not publish earned a receipt (rc=$drc)"
+fi
+unset DEP_PYPI
+
+# The real checker, offline: MAINTAINER_PYPI_URL points it at a file:// tree
+# shaped like https://pypi.org/pypi/<name>/<version>/json.
+vpr="$root/scripts/verify_pypi_release.py"
+pypi_root="$stub_dir/pypi"; mkdir -p "$pypi_root/PyYAML/6.0.3" "$pypi_root/Yanked/1.0" "$pypi_root/Empty/1.0"
+python3 - "$pypi_root" "$h1" <<'PYEOF'
+import json, sys
+root, h1 = sys.argv[1], sys.argv[2]
+def release(digests, yanked=False):
+    return {"info": {"version": "x", "yanked": yanked},
+            "urls": [{"filename": f"f{i}.whl", "digests": {"sha256": d}, "yanked": yanked}
+                     for i, d in enumerate(digests)]}
+json.dump(release([h1, "ab" * 32]), open(f"{root}/PyYAML/6.0.3/json", "w"))
+json.dump(release([h1], yanked=True), open(f"{root}/Yanked/1.0/json", "w"))
+json.dump(release([]), open(f"{root}/Empty/1.0/json", "w"))
+PYEOF
+vpr_case() {  # $1 = label, $2 = expected rc, $3 = text the output must hold, rest = argv
+    local label="$1" want="$2" text="$3"; shift 3
+    local out rc=0
+    out="$(MAINTAINER_PYPI_URL="file://$pypi_root" timeout 20 python3 "$vpr" "$@" 2>&1)" || rc=$?
+    if [ "$rc" = "$want" ] && grep -q -- "$text" <<<"$out"; then
+        ok "verify_pypi_release: $label"
+    else
+        bad "verify_pypi_release: $label (rc=$rc, want $want): $(tr -d '\n' <<<"$out" | cut -c1-160)"
+    fi
+}
+vpr_case "every pinned hash is a published file" 0 '1 of 2' PyYAML 6.0.3 "$h1"
+vpr_case "a hash the release does not publish is refused" 1 "sha256:${h0:0:12}" PyYAML 6.0.3 "$h1,$h0"
+vpr_case "a yanked release is refused" 1 'yanked' Yanked 1.0 "$h1"
+vpr_case "a release with no files is refused, not read as agreement" 1 'no files' Empty 1.0 "$h1"
+vpr_case "a release PyPI does not have is could-not-ask" 1 'could not ask' PyYAML 9.9.9 "$h1"
+vpr_case "a name that is not a plain package name never reaches the URL" 1 'not a plain' '../PyYAML' 6.0.3 "$h1"
+vpr_case "a version that is not a plain version never reaches the URL" 1 'not a plain' PyYAML '6.0.3/../../x' "$h1"
+vpr_case "a hash that is not 64 hex is refused" 1 'not a sha256' PyYAML 6.0.3 'abc'
+
 # And the fail-open the loops used to have. `while ... done < <(python3 ...)`
 # reports the redirection's status, so a producer that died left the loop with
 # nothing to read, the counter at zero, and a sealed receipt claiming the pins
@@ -3918,6 +4073,25 @@ if [ "$drc" != 0 ] && [ ! -f "$dep_state/receipts/9.json" ]; then
     ok "a pin the gate could not read refuses the receipt, rather than counting zero"
 else
     bad "a verdict whose pins could not be read still earned a receipt (rc=$drc)"
+fi
+# The pip loop skips a blank line, the way the pin loop does. Tab is IFS
+# whitespace, so `read` collapses empty fields, and only an entry with every
+# field empty reaches the skip. A verdict that declares a package the loop
+# then skips must not receipt "0 pip package(s) verified" about a diff that
+# pinned one.
+cat > "$fake_scripts/classify_dependency_bump.py" <<'STUB'
+import json, sys
+sys.stdin.read()
+json.dump({"verdict": "dependency-bump", "files": {"requirements.txt": "pip-requirements"},
+           "changed_lines": 2, "pins": [], "images": [],
+           "pip": [{"name": "", "version": "", "hashes": []}]}, sys.stdout)
+STUB
+dout="$(dep_gate "$dp/pip.patch" unused)"; drc=$?
+if [ "$drc" != 0 ] && grep -q 'declared 1 pip package' <<<"$dout" \
+   && [ ! -f "$dep_state/receipts/9.json" ]; then
+    ok "a pip package the gate skipped refuses the receipt, rather than counting zero"
+else
+    bad "a pip package the gate skipped refuses the receipt, and this one did not (rc=$drc)"
 fi
 unset DEP_SCRIPTS
 rm -f "$stub_dir/gh"

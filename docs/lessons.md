@@ -3405,3 +3405,45 @@ survived, because the segment regex already refuses a leading `.`. The clause
 was removed rather than given a test of its own, and the regex was mutated
 instead, which the suite caught. The tag-object loop's mutant runs under a
 60-second cap that the test asserts it did not hit.
+
+## 118. A pip bump was refused for being a pip bump
+
+sysknife added a pip ecosystem to its Dependabot config for `tools/ci-python` on
+2026-10-29. The first pull request it opened, #735, moved PyYAML from 6.0.2 to
+6.0.3: one pin line and 126 hash lines in a requirements file CI installs with
+`pip install --require-hashes`. `verify-deps` refused it with
+`tools/ci-python/requirements.txt is not dependency metadata`. The classifier
+knew Cargo, npm, workflows and Dockerfiles, so a hash-pinned requirements file,
+a lockfile in everything but name, sent the bump back to the same corner lesson
+101 found for base images: a hand receipt, which an unattended run may not
+write, or `gh pr merge --admin`.
+
+I checked #735 by hand before changing anything. The 73 hashes it added were
+exactly the 73 file digests PyPI publishes for PyYAML 6.0.3, none yanked, and
+the lines for pathspec and yamllint were byte-identical to main. That check is
+mechanical, so the gate now runs it.
+
+**Guard:** a `pip-requirements` arm whose grammar is an allowlist. A changed line
+is a `name==version` pin (an environment marker allowed, in a character set with
+no `@`, `/` or `:`; extras refused, because `name[x]` installs packages the line
+does not name), an indented `--hash=sha256:<64 hex>` line, a comment, or blank.
+Everything pip can read as a source (`--index-url`, `--extra-index-url`, `-f`,
+`-e`, `-r`, `name @ url`) matches nothing and is refused on either side of the
+diff: removing a private index is a new place to download from as much as
+adding a public one. Each added hash must hang off an added requirement through
+pip's trailing-backslash continuation, so a hash swapped under an unchanged pin,
+or one after a line that does not continue, belongs to no release and is
+refused. A requirement that arrives without hashes in a file that had them is
+refused before pip would refuse it in CI.
+
+`scripts/verify_pypi_release.py` asks `pypi.org/pypi/<name>/<version>/json` and
+refuses a yanked release, a release with no files (an empty set every hash
+"matches" by not being checked), and any hash that is not one of the release's
+files. Name and version must be plain before they reach the URL, for the reason
+lesson 117 gives. `verify-deps` counts the packages the classifier declared
+against the ones it verified, as it does for pins and images.
+
+22 tests, each refusal asserting its own reason; the checker runs offline
+against a `file://` tree through `MAINTAINER_PYPI_URL`. 15 mutants, one per
+guard, run against a slice of the suite with each file restored from a
+pristine copy and its hash checked.

@@ -274,10 +274,11 @@ PYEOF
 # What this checks instead, all of it mechanical and none of it asserted:
 #
 #   * every changed path is dependency metadata (lockfile, manifest, action pin)
-#   * no changed line adds a source outside crates.io or registry.npmjs.org, and
-#     no npm package newly runs an install script
+#   * no changed line adds a source outside crates.io, registry.npmjs.org or
+#     PyPI, and no npm package newly runs an install script
 #   * every added action pin is a 40-hex SHA whose tag comment is the tag GitHub
-#     says that SHA is on
+#     says that SHA is on, every base image digest is what its tag resolves to,
+#     and every pip hash is a file PyPI publishes for that version
 #
 # scripts/classify_dependency_bump.py does the first two from the diff and is
 # tested on its own; the third needs the network and happens here.
@@ -346,6 +347,14 @@ for i in json.load(sys.stdin).get("images", []):
         || die "could not count the action pins the classifier declared"
     declared_images="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("images",[])))' <<<"$verdict")" \
         || die "could not count the base images the classifier declared"
+    local piplines declared_pip
+    piplines="$(python3 -c '
+import json, sys
+for p in json.load(sys.stdin).get("pip", []):
+    print("\t".join((p["name"], p["version"], ",".join(p["hashes"]))))
+' <<<"$verdict")" || die "could not read the pip packages out of the classifier verdict"
+    declared_pip="$(python3 -c 'import json,sys;print(len(json.load(sys.stdin).get("pip",[])))' <<<"$verdict")" \
+        || die "could not count the pip packages the classifier declared"
 
     local checked=0 action tag pinsha upstream repo pinkind status
     while IFS=$'\t' read -r action pinsha tag pinkind; do
@@ -446,28 +455,47 @@ $(printf '%s' "$live" | sed 's/^/    /')"
     [ "$images_checked" = "$declared_images" ] || die "the classifier declared $declared_images base image(s) and
   $images_checked were verified. No receipt written: the check did not run."
 
+    # And every pip requirement, against the release on PyPI. pip enforces that
+    # it installs the hashed files; nothing else says those files are the
+    # version the pin names.
+    local verifier pip_checked=0 pkg version hashes answer
+    verifier="${MAINTAINER_PYPI_VERIFIER:-${MAINTAINER_SCRIPTS:-$HOME/.local/share/maintainer/scripts}/verify_pypi_release.py}"
+    while IFS=$'\t' read -r pkg version hashes; do
+        [ -n "$pkg" ] || continue
+        [ -f "$verifier" ] || die "no PyPI verifier at $verifier; run ./install.sh"
+        answer="$(python3 "$verifier" "$pkg" "$version" "$hashes" 2>&1)" || die "could not confirm $pkg==$version against PyPI,
+  so the pin is unverified:
+
+$(printf '%s' "$answer" | sed 's/^/    /')"
+        say "pip: $pkg==$version, $answer (PyPI agrees)"
+        pip_checked=$((pip_checked+1))
+    done <<<"$piplines"
+    [ "$pip_checked" = "$declared_pip" ] || die "the classifier declared $declared_pip pip package(s) and
+  $pip_checked were verified. No receipt written: the check did not run."
+
     local files lines
     files="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(", ".join(f"{k} ({v})" for k,v in d["files"].items()))')"
     lines="$(printf '%s\n' "$verdict" | python3 -c 'import json,sys;print(json.load(sys.stdin)["changed_lines"])')"
     mkdir -p "$RECEIPTS"
-    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" "$images_checked" <<'PYEOF' \
+    python3 - "$RECEIPTS/$pr.json" "$pr" "$real_head" "$files" "$lines" "$checked" "$images_checked" "$pip_checked" <<'PYEOF' \
         || die "could not record the dependency receipt"
 import json, sys, datetime, getpass
-out, pr, head, files, lines, pins, imgs = sys.argv[1:8]
+out, pr, head, files, lines, pins, imgs, pips = sys.argv[1:9]
 json.dump({
     "pr": int(pr), "head": head, "kind": "dependency",
     "proof": (f"pure dependency bump: {lines} changed line(s) in {files}; "
-              f"no source outside crates.io/registry.npmjs.org, no new install "
+              f"no source outside crates.io/registry.npmjs.org/PyPI, no new install "
               f"script, {pins} action pin(s) verified against their tags, "
-              f"{imgs} base image(s) verified against their registry"),
+              f"{imgs} base image(s) verified against their registry, "
+              f"{pips} pip package(s) verified against PyPI"),
     "files": files, "changed_lines": int(lines), "pins_verified": int(pins),
-    "images_verified": int(imgs),
+    "images_verified": int(imgs), "pip_verified": int(pips),
     "recorded_at": datetime.datetime.now().astimezone().isoformat(),
     "recorded_by": getpass.getuser(),
 }, open(out, "w"), indent=2)
 PYEOF
     receipt_seal "$RECEIPTS/$pr.json"
-    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s), $images_checked image(s) verified)"
+    say "dependency receipt recorded for #$pr at ${real_head:0:8} ($lines line(s), $checked pin(s), $images_checked image(s), $pip_checked pip package(s) verified)"
 }
 
 # maintainer-merge verify <pr> <head-sha> <test-filter> <sed-mutation> [crate]

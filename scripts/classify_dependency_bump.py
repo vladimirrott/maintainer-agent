@@ -11,10 +11,12 @@ A dependency bump does carry a provable claim; it is just a different one:
 
   1. nothing outside dependency metadata changed,
   2. no new place to download from appeared, and
-  3. every GitHub Action pin is still a SHA, and names the tag it claims.
+  3. every GitHub Action pin is still a SHA, and names the tag it claims (and
+     every base image digest, and every pip hash, is what its registry
+     publishes under that tag or version).
 
-This script answers 1 and 2 from the diff alone, and hands the caller the pins
-for 3, which needs the network and belongs to whoever has a token.
+This script answers 1 and 2 from the diff alone, and hands the caller the pins,
+images and pip packages for 3, which needs the network.
 
 It prints JSON and exits 0 for a dependency bump, 1 for a refusal. A refusal
 names the file and the line, because "refused" with no line is indistinguishable
@@ -96,6 +98,22 @@ FROM_PIN = re.compile(
     re.IGNORECASE,
 )
 
+# A requirements file as pip-compile and Dependabot write it: `name==version`,
+# then one `--hash=sha256:` line per published file, every line but the last
+# ending in a backslash. That grammar is the whole allowlist. pip also reads
+# `--index-url`, `--extra-index-url`, `-f`, `-e`, `-r`, `-c` and `name @ url`
+# from this file, and each of those is a place to download from, so none of
+# them gets a pattern: a line that matches nothing here goes to a person.
+# Extras are left out as well, because `name[x]` installs packages the line
+# does not name. An environment marker may follow the pin, in a character set
+# with no `@`, `/` or `:`, so it cannot carry a URL.
+PIP_REQ = re.compile(
+    r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)==(?P<version>[A-Za-z0-9][A-Za-z0-9.+!_-]*)"
+    r"(?:\s*;\s*[A-Za-z0-9_.<>=!'\" ()~-]+?)?\s*(?P<cont>\\)?\s*$"
+)
+PIP_HASH = re.compile(r"^\s+--hash=sha256:(?P<digest>[0-9a-f]{64})\s*(?P<cont>\\)?\s*$")
+PIP_INERT = re.compile(r"^\s*(?:#.*)?$")
+
 
 def classify_path(path):
     base = os.path.basename(path)
@@ -113,6 +131,8 @@ def classify_path(path):
         return "workflow"
     if base == "Dockerfile" or base.startswith("Dockerfile.") or base.endswith(".Dockerfile"):
         return "dockerfile"
+    if base.startswith("requirements") and base.endswith(".txt"):
+        return "pip-requirements"
     return None
 
 
@@ -188,7 +208,7 @@ def main():
         # here, and one of them must not be called a dependency bump.
         refuse("the diff named no changed file, so nothing was classified")
 
-    pins, images, kinds, changed_lines = [], [], {}, 0
+    pins, images, packages, kinds, changed_lines = [], [], [], {}, 0
     for path, lines in sorted(files.items()):
         kind = classify_path(path)
         if kind is None:
@@ -260,6 +280,43 @@ def main():
                                "same_tag": any(m["image"] == match["image"] and m["tag"] == match["tag"]
                                                for m in removed)})
 
+        elif kind == "pip-requirements":
+            # Each added hash belongs to the requirement above it. A hash with no
+            # requirement in the diff changed under a pin the diff does not show,
+            # so the version it belongs to is unknown here and nothing could
+            # check it against the release it claims to be.
+            current, hashed, added = None, False, []
+            for sign, text in lines:
+                req, digest = PIP_REQ.match(text), PIP_HASH.match(text)
+                if not (req or digest or PIP_INERT.match(text)):
+                    refuse("a requirements line is not a pinned requirement, a hash or a comment",
+                           path, text.strip())
+                hashed = hashed or bool(digest)
+                if sign != "+":
+                    continue
+                if req:
+                    package = {"name": req["name"], "version": req["version"], "hashes": []}
+                    added.append(package)
+                    current = package if req["cont"] else None
+                elif digest:
+                    if current is None:
+                        refuse("a hash changed without the requirement it belongs to",
+                               path, text.strip())
+                    current["hashes"].append(digest["digest"])
+                    if not digest["cont"]:
+                        current = None
+                else:
+                    current = None
+            # Once either side of the diff shows a hash, the file is hash-pinned,
+            # and a requirement that arrives without one has given up the check
+            # --require-hashes makes. pip would refuse to install it; this says
+            # why before CI does.
+            for package in added:
+                if hashed and not package["hashes"]:
+                    refuse(f"the bump drops hash pinning for {package['name']}", path,
+                           f"{package['name']}=={package['version']}")
+            packages.extend(added)
+
         elif kind == "workflow":
             for sign, text in lines:
                 match = PIN.match(text)
@@ -288,6 +345,9 @@ def main():
         # And these against the registry, for the same reason: a digest that is
         # not the one its tag resolves to is a pin whose comment is false.
         "images": images,
+        # And these against PyPI: a hash that is not one of the files the
+        # release publishes pins bytes the version number does not name.
+        "pip": packages,
     }, sys.stdout, indent=2)
     print()
 
