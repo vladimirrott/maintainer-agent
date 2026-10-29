@@ -17,6 +17,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -2986,6 +2987,465 @@ def cmd_reviewed(pr: str) -> None:
         print("lease: leased. " + _lease_describe(pr, d, now))
 
 
+# --- Dependabot pull requests ---------------------------------------------------
+# `maintainer-merge verify-deps` could receipt a pure dependency bump, and nothing
+# drove it. The review treated a Dependabot pull request like a contributor's: it
+# would review it, reply to a bot, offer the bot a next issue, and never ask it to
+# rebase. On 2026-10-28 five of them (sysknife #688-#692) had sat a day untouched,
+# against a project rule that a green one merges the same day. `deps` says what
+# each one needs next, from GitHub alone, and `deps rebase` is the one write.
+DEPENDABOT_APP = "app/dependabot"          # the author gh reports for the app
+DEPENDABOT_BOT = "dependabot[bot]"         # the login on its commits
+# Dependabot's commits are committed by GitHub itself and signed with its key:
+# on #688-#692 every one reads committer `web-flow`, verified. So web-flow counts
+# only with a verified signature. A maintainer's "Update branch" is also
+# committed by web-flow, and its AUTHOR is the maintainer, which is what the
+# author check catches.
+GITHUB_COMMITTER = "web-flow"
+REBASE_ASK = "@dependabot rebase"
+DEPS_LEVELS = {"none": (), "patch": ("patch",), "minor": ("patch", "minor")}
+_SEMVER = re.compile(r"^version-update:semver-(major|minor|patch)$")
+_DEPS_KEY = re.compile(r"^(-| ) ([a-z][a-z-]*): ?(.*)$")
+_DEPS_FIELDS = ("number,title,state,author,headRefOid,headRefName,isCrossRepository,"
+                "headRepository,headRepositoryOwner,mergeStateStatus,mergeable,statusCheckRollup")
+
+
+def _deps_level() -> str:
+    level = _tunable("DEPS_AUTOMERGE").strip().lower()
+    if level not in DEPS_LEVELS:
+        raise SystemExit(f"maintainer deps: DEPS_AUTOMERGE must be one of {', '.join(DEPS_LEVELS)}, "
+                         f"got {level!r}. Fix MAINTAINER_DEPS_AUTOMERGE or DEPS_AUTOMERGE in profile.env.")
+    return level
+
+
+def _deps_metadata(message: str):
+    """(members, "") from Dependabot's `updated-dependencies:` block, or (None, why).
+
+    The block is YAML Dependabot writes into every commit message it makes, and
+    it is the only place the semver class of each member is stated. It is read
+    line by line, strictly: anything that is not `- key: value` or `  key: value`
+    before the closing `...` makes the block unreadable, and an unreadable block
+    is reported as one, never filled in from the title.
+    """
+    lines = (message or "").splitlines()
+    try:
+        at = [l.rstrip() for l in lines].index("updated-dependencies:")
+    except ValueError:
+        return None, "the commit message has no updated-dependencies block"
+    members: list[dict] = []
+    for raw in lines[at + 1:]:
+        line = raw.rstrip()
+        if line == "...":
+            break
+        m = _DEPS_KEY.match(line)
+        if not m:
+            return None, f"the updated-dependencies block has a line I cannot read: {safe_for_prompt(line, 60)!r}"
+        lead, key, value = m.groups()
+        value = value.strip().strip("'\"")
+        if lead == "-":
+            members.append({})
+        elif not members:
+            return None, "the updated-dependencies block starts with a field, not a member"
+        members[-1][key] = value
+    else:
+        return None, "the updated-dependencies block never closes with '...'"
+    if not members or any(not m.get("dependency-name") for m in members):
+        return None, "the updated-dependencies block names no dependency"
+    return members, ""
+
+
+def _deps_links(message: str, name: str) -> list[tuple[str, str]]:
+    """(label, url) for one member's release notes and changelog, from the commit body.
+
+    Dependabot writes a paragraph per member, `Bumps [name](...) from a to b.` or
+    ``Updates `name` from a to b``, followed by `- [Release notes](url)` lines.
+    """
+    out = []
+    for para in re.split(r"\n\s*\n", message or ""):
+        first = para.strip().splitlines()[0] if para.strip() else ""
+        if not (first.startswith(f"Updates `{name}` from") or first.startswith(f"Bumps [{name}](")
+                or first.startswith(f"Bumps {name} from")):
+            continue
+        for label, url in re.findall(r"^- \[(Release notes|Changelog)\]\((https://[^)\s]+)\)", para, re.M):
+            out.append((label.lower(), url))
+    return out
+
+
+def _deps_ci(rollup) -> dict:
+    """Counts from statusCheckRollup. A check with no conclusion is PENDING.
+
+    `(.conclusion // "") == ""`: a running check reports conclusion "", an empty
+    STRING, and a poll that only looked for IN_PROGRESS settled with eight checks
+    still running (MISTAKES 6c). A commit status has a `state` instead, and is
+    read from that, so a green status context does not wait forever.
+    """
+    ci = {"pass": 0, "skipped": 0, "failing": [], "pending": [], "total": 0}
+    for c in rollup or []:
+        ci["total"] += 1
+        if c.get("__typename") == "StatusContext":
+            name, v = c.get("context") or "?", (c.get("state") or "").upper()
+            if v == "SUCCESS":
+                ci["pass"] += 1
+            elif v in ("", "PENDING", "EXPECTED"):
+                ci["pending"].append(name)
+            else:
+                ci["failing"].append(name)
+            continue
+        name, v = c.get("name") or "?", (c.get("conclusion") or "").upper()
+        if v == "":
+            ci["pending"].append(name)
+        elif v in ("SUCCESS", "NEUTRAL"):
+            ci["pass"] += 1
+        elif v == "SKIPPED":
+            ci["skipped"] += 1
+        else:
+            # FAILURE, CANCELLED, TIMED_OUT, ACTION_REQUIRED, STARTUP_FAILURE and
+            # anything GitHub adds next year: none of them is a verdict of green.
+            ci["failing"].append(name)
+    return ci
+
+
+def _deps_classifier() -> Path:
+    here = Path(os.path.realpath(__file__)).parent.parent
+    for d in (os.environ.get("MAINTAINER_SCRIPTS") or "", str(here / "scripts"),
+              str(Path.home() / ".local/share/maintainer/scripts")):
+        if d and (Path(d) / "classify_dependency_bump.py").is_file():
+            return Path(d) / "classify_dependency_bump.py"
+    raise SystemExit("maintainer deps: no scripts/classify_dependency_bump.py beside this tool or under\n"
+                     "            ~/.local/share/maintainer/scripts, so no diff can be classified.\n"
+                     "            Run ./install.sh from the repository.")
+
+
+def _deps_comments(pr: str) -> list[dict]:
+    rows = _gh_ndjson("api", f"repos/{SLUG}/issues/{pr}/comments", "--paginate", "--jq",
+                      ".[] | {user: .user.login, body, created_at, html_url} | tojson")
+    if rows is None:
+        raise _Unreadable("its comments")
+    return rows
+
+
+def _deps_read(pr: str, diff: bool) -> dict:
+    """Everything `deps` decides from, read from GitHub. Raises _Unreadable naming the read."""
+    meta = gh_json("pr", "view", pr, "--repo", SLUG, "--json", _DEPS_FIELDS)
+    if not isinstance(meta, dict):
+        raise _Unreadable("the pull request")
+    head = meta.get("headRefOid") or ""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        raise _Unreadable("the pull request's head commit")
+    # GitHub computes mergeability after a push, and UNKNOWN is "not yet", not
+    # an answer. Asked again a few times before it is reported as it stands.
+    reads, wait = _tunable_int("DEPS_UNKNOWN_READS"), _tunable_int("DEPS_UNKNOWN_WAIT")
+    for _ in range(max(reads, 1) - 1):
+        if "UNKNOWN" not in (meta.get("mergeStateStatus"), meta.get("mergeable")):
+            break
+        time.sleep(wait)
+        again = gh_json("pr", "view", pr, "--repo", SLUG, "--json", "mergeStateStatus,mergeable")
+        if not isinstance(again, dict):
+            raise _Unreadable("the pull request's merge state")
+        meta.update(again)
+    commits = _gh_ndjson("api", f"repos/{SLUG}/pulls/{pr}/commits", "--paginate", "--jq",
+                         ".[] | {sha, author: .author.login, committer: .committer.login, "
+                         "name: .commit.author.name, verified: .commit.verification.verified, "
+                         "date: .commit.committer.date, message: .commit.message} | tojson")
+    if commits is None:
+        raise _Unreadable("its commits")
+    # A pull request always has a commit. An empty list is a read that returned
+    # nothing, and the identity check would pass over it (MISTAKES 6b).
+    if not commits:
+        raise _Unreadable("its commits (the list came back empty)")
+    at_head = [c for c in commits if c.get("sha") == head]
+    if not at_head:
+        raise _Unreadable(f"its commits (none of them is the head {head[:8]}; it moved while I read)")
+    info = {"pr": pr, "meta": meta, "head": head, "commits": commits,
+            "head_time": _ts(at_head[0].get("date")), "comments": None, "verdict": None}
+    if diff:
+        rc, patch = _sh("gh", "pr", "diff", pr, "--repo", SLUG, "--patch")
+        if rc != 0 or not patch.strip():
+            raise _Unreadable("its diff")
+        p = _spawn(("python3", str(_deps_classifier())), input=patch)
+        try:
+            verdict = json.loads(p.stdout)
+        except ValueError:
+            verdict = None
+        if p.returncode not in (0, 1) or not isinstance(verdict, dict):
+            raise _Unreadable(f"its diff through the classifier (exit {p.returncode})")
+        info["verdict"] = verdict
+    return info
+
+
+def _deps_identity(info: dict):
+    """None when this is Dependabot's own pull request and nobody else's, else (route, why)."""
+    meta = info["meta"]
+    author = (meta.get("author") or {}).get("login") or ""
+    if author != DEPENDABOT_APP:
+        return "contributor", f"author {safe_for_prompt(author or 'unknown', 40)}"
+    owner, _, name = SLUG.partition("/")
+    h_owner = (meta.get("headRepositoryOwner") or {}).get("login") or ""
+    h_name = (meta.get("headRepository") or {}).get("name") or ""
+    if meta.get("isCrossRepository") is not False or _login(h_owner) != _login(owner) \
+            or _login(h_name) != _login(name):
+        return "refused", (f"the branch lives in {safe_for_prompt(h_owner or '?', 40)}/"
+                           f"{safe_for_prompt(h_name or '?', 60)}, not in {SLUG}: Dependabot pushes "
+                           f"to the base repository, so a fork head is not its pull request")
+    for c in info["commits"]:
+        who = c.get("author") or c.get("name") or "an unknown author"
+        sha = (c.get("sha") or "?")[:8]
+        if c.get("author") != DEPENDABOT_BOT:
+            return "contributor", f"commit {sha} by {safe_for_prompt(who, 40)}"
+        committer = c.get("committer") or ""
+        if committer == DEPENDABOT_BOT or (committer == GITHUB_COMMITTER and c.get("verified") is True):
+            continue
+        how = "" if committer != GITHUB_COMMITTER else " without a verified signature"
+        return "contributor", (f"commit {sha} by {safe_for_prompt(who, 40)}, committed by "
+                               f"{safe_for_prompt(committer or 'an unknown committer', 40)}{how}")
+    return None
+
+
+def _deps_stale(meta: dict) -> bool:
+    """BEHIND or DIRTY: the board describes a tree that is not the one a merge would land."""
+    return meta.get("mergeStateStatus") in ("BEHIND", "DIRTY") or meta.get("mergeable") == "CONFLICTING"
+
+
+def _deps_asked(info: dict, me: str):
+    """This account's latest `@dependabot rebase` after the head was committed, or None."""
+    asks = [c for c in info["comments"] or []
+            if _login(c.get("user")) == me and (c.get("body") or "").strip() == REBASE_ASK
+            and _ts(c.get("created_at")) > info["head_time"]]
+    return max(asks, key=lambda c: _ts(c.get("created_at"))) if asks else None
+
+
+def _deps_route(info: dict, level: str, me: str) -> tuple[str, list[str]]:
+    """(next, reasons). The order is the decision: who wrote it, whether the
+    branch is current, whether CI has spoken, and only then what it bumps."""
+    ident = _deps_identity(info)
+    if ident and ident[0] == "contributor":
+        return f"review as a contributor PR ({ident[1]})", [
+            "a commit or an author that is not Dependabot's makes this a person's change: "
+            "review it like any other pull request"]
+    if ident:
+        return "human", [ident[1]]
+    meta = info["meta"]
+    if _deps_stale(meta):
+        asked = _deps_asked(info, me)
+        if asked:
+            why = [f"a rebase was asked for at {asked.get('created_at')}, after the head was committed, "
+                   f"and Dependabot has not pushed since"]
+            replies = [c for c in info["comments"] or []
+                       if _login(c.get("user")) == _login(DEPENDABOT_BOT)
+                       and _ts(c.get("created_at")) > _ts(asked.get("created_at"))]
+            if replies:
+                why.append("Dependabot replied: " + safe_for_prompt(_last_line(replies[-1].get("body")), 120))
+            return "wait", why
+        return "rebase", [f"{meta.get('mergeStateStatus')} against its base, and no rebase request "
+                          f"from {me} since the head was committed"]
+    if "UNKNOWN" in (meta.get("mergeStateStatus"), meta.get("mergeable")):
+        return "wait", ["GitHub has not computed whether it merges cleanly; read it again later"]
+    ci = info["ci"]
+    if ci["total"] == 0:
+        return "wait", ["no check has reported on this head yet, and an empty board is not a pass"]
+    if ci["pending"]:
+        return "wait", [f"{len(ci['pending'])} check(s) pending: {', '.join(ci['pending'][:5])}"]
+    if ci["failing"]:
+        return f"investigate {ci['failing'][0]}", [
+            f"failing: {', '.join(ci['failing'])}. Read the log and say whether it is the bump or a "
+            f"flake; never re-run it blind"]
+    reasons = []
+    if ci["pass"] == 0:
+        reasons.append("every check was skipped, so nothing ran")
+    if meta.get("mergeStateStatus") == "DRAFT":
+        reasons.append("it is a draft")
+    verdict = info["verdict"] or {}
+    if verdict.get("verdict") != "dependency-bump":
+        where = ": ".join(str(verdict[k]) for k in ("path", "line") if verdict.get(k))
+        reasons.append("the classifier refused it: " + safe_for_prompt(verdict.get("reason", "no reason given"), 120)
+                       + (f" ({safe_for_prompt(where, 120)})" if where else ""))
+    members, problem = info["members"]
+    if members is None:
+        reasons.append(problem + ", so no member has a semver class")
+    for m in members or []:
+        name = safe_for_prompt(m.get("dependency-name", "?"), 60)
+        cls = _SEMVER.match(m.get("update-type", ""))
+        if cls and cls.group(1) == "major":
+            reasons.append(f"{name} is semver-major")
+        elif not cls:
+            reasons.append(f"{name} carries no update-type (a digest-only bump writes none), so its "
+                           f"semver class is unknown")
+        elif cls.group(1) not in DEPS_LEVELS[level]:
+            reasons.append(f"{name} is semver-{cls.group(1)} and DEPS_AUTOMERGE={level}")
+    if reasons:
+        return "human", reasons
+    return "verify", []
+
+
+def _deps_block(pr: str, level: str, me: str) -> list[str]:
+    """The lines `deps` prints for one pull request. Raises _Unreadable."""
+    info = _deps_read(pr, diff=True)
+    meta = info["meta"]
+    if meta.get("state") != "OPEN":
+        return [f"#{pr} is {meta.get('state') or 'not open'}, so there is nothing to drive"]
+    if _deps_stale(meta):
+        info["comments"] = _deps_comments(pr)
+    msgs = "\n".join(c.get("message") or "" for c in info["commits"])
+    # Every commit's block, and a block that is there and unreadable spoils the
+    # lot: a member missed is a member whose semver class nobody checked.
+    members, problem = None, ""
+    for c in info["commits"]:
+        found, why = _deps_metadata(c.get("message") or "")
+        if found is not None:
+            members = (members or []) + found
+        elif "no updated-dependencies" not in why:
+            members, problem = None, why
+            break
+        else:
+            problem = problem or why
+    info["members"] = (members, problem)
+    info["ci"] = ci = _deps_ci(meta.get("statusCheckRollup"))
+    nxt, why = _deps_route(info, level, me)
+
+    title = safe_for_prompt(meta.get("title", ""), 100)
+    out = [f"#{pr} {info['head'][:8]} {title}"]
+    ident = _deps_identity(info)
+    if ident is None:
+        n = len(info["commits"])
+        out.append(f"  identity: {DEPENDABOT_APP}, branch in {SLUG}, {n} commit(s), each authored by "
+                   f"{DEPENDABOT_BOT} and committed by it or by GitHub with a verified signature")
+    else:
+        out.append(f"  identity: NOT a Dependabot pull request: {ident[1]}")
+    branch = meta.get("headRefName") or ""
+    eco = branch.split("/")[1] if branch.startswith("dependabot/") and branch.count("/") >= 2 else "unknown"
+    where = re.search(r"\bin (/[^\s,;]*)", meta.get("title") or "")
+    out.append(f"  ecosystem: {safe_for_prompt(eco, 40)} (branch {safe_for_prompt(branch, 80)}), "
+               f"directory: {safe_for_prompt(where.group(1), 80) if where else 'not named in the title'}")
+    if members is None:
+        out.append(f"  dependencies: {problem}")
+    else:
+        groups = sorted({m.get('dependency-group') for m in members if m.get('dependency-group')})
+        out.append(f"  dependencies: {len(members)}" + (f" (group {', '.join(groups)})" if groups else ""))
+        for m in members:
+            cls = _SEMVER.match(m.get("update-type", ""))
+            out.append(f"    {safe_for_prompt(m.get('dependency-name', '?'), 60)} "
+                       f"{safe_for_prompt(m.get('dependency-version', '?'), 40)} "
+                       f"{'semver-' + cls.group(1) if cls else 'no update-type'} "
+                       f"{safe_for_prompt(m.get('dependency-type', ''), 40)}".rstrip())
+            if cls and cls.group(1) == "major":
+                links = _deps_links(msgs, m.get("dependency-name", ""))
+                for label, url in links:
+                    out.append(f"      {label}: {safe_for_prompt(url, 200)}")
+                if not links:
+                    out.append("      no release-notes or changelog link in the commit message")
+    v = info["verdict"] or {}
+    if v.get("verdict") == "dependency-bump":
+        out.append(f"  classifier: a pure dependency bump, {v.get('changed_lines', '?')} changed line(s) "
+                   f"in {len(v.get('files') or {})} file(s)")
+    else:
+        out.append("  classifier: refused: " + safe_for_prompt(v.get("reason", "?"), 120))
+    out.append(f"  ci: {ci['pass']} pass, {ci['skipped']} skipped, {len(ci['failing'])} failing, "
+               f"{len(ci['pending'])} pending" + (f" (failing: {', '.join(ci['failing'])})" if ci["failing"] else ""))
+    out.append(f"  merge state: {meta.get('mergeStateStatus') or '?'}, mergeable {meta.get('mergeable') or '?'}")
+    out.append(f"  next: {nxt}")
+    out += [f"    why: {w}" for w in why]
+    if nxt == "verify":
+        out.append(f"    then: maintainer-merge verify-deps {pr} {info['head']}; "
+                   f"gh pr review {pr} --approve --body '<one line naming the receipt>'; "
+                   f"maintainer-merge merge {pr}")
+    if nxt == "rebase":
+        out.append(f"    then: maintainer deps rebase {pr}")
+    return out
+
+
+def _deps_rebase(pr: str) -> None:
+    """Ask Dependabot to rebase one of its pull requests, once, and read the ask back.
+
+    Never `gh pr update-branch`: a merge commit from anybody else on Dependabot's
+    branch is an edit Dependabot will not overwrite, so it stops rebasing that
+    pull request for good and a person has to close it.
+    """
+    if not pr.isdigit():
+        raise _Usage
+    me = _owner()
+    if not me:
+        raise SystemExit("maintainer deps rebase: the profile names no GitHub account (GH_ACCOUNT), so I\n"
+                         "            cannot tell which rebase requests are mine. Nothing was posted.")
+    try:
+        info = _deps_read(pr, diff=False)
+        meta = info["meta"]
+        if meta.get("state") != "OPEN":
+            raise _Refused(f"#{pr} is {meta.get('state') or 'not open'}")
+        ident = _deps_identity(info)
+        if ident:
+            raise _Refused(f"#{pr} is not a verified Dependabot pull request: {ident[1]}")
+        if not _deps_stale(meta):
+            raise _Refused(f"#{pr} is {meta.get('mergeStateStatus') or '?'} (mergeable "
+                           f"{meta.get('mergeable') or '?'}), not BEHIND or DIRTY, so there is nothing to rebase")
+        info["comments"] = _deps_comments(pr)
+        asked = _deps_asked(info, me)
+        if asked:
+            raise _Refused(f"{me} already asked at {asked.get('created_at')}, after the head was committed, "
+                           f"and Dependabot has not pushed since. Asking again changes nothing")
+    except _Refused as e:
+        raise SystemExit(f"maintainer deps rebase: {e}. Nothing was posted.")
+    except _Unreadable as e:
+        raise SystemExit(f"maintainer deps rebase: could not read #{pr} ({e}), so nothing was posted.")
+    post = _setting("MAINTAINER_POST", "POST", "off").strip().lower()
+    if post != "on":
+        print(f"would ask Dependabot to rebase #{pr} (POST={post or 'off'}): {REBASE_ASK!r}")
+        return
+    # -f, never -F: -F reads a value that starts with `@` as a FILE name.
+    p = _spawn(("gh", "api", "-X", "POST", f"repos/{SLUG}/issues/{pr}/comments",
+                "-f", f"body={REBASE_ASK}"), cwd=REPO)
+    try:
+        info["comments"] = _deps_comments(pr)
+        asked = _deps_asked(info, me)
+    except _Unreadable:
+        asked = None
+    if asked:
+        print(f"#{pr}: asked Dependabot to rebase ({asked.get('html_url') or 'comment posted'})")
+        return
+    raise SystemExit(
+        f"maintainer deps rebase: posted on #{pr} and could not read a rebase request from {me}\n"
+        f"            back after the head. gh said: {(p.stderr or p.stdout or '').strip()[:200] or 'nothing'}")
+
+
+def cmd_deps(args: list[str]) -> None:
+    """What each open Dependabot pull request needs next, or the one write it may need."""
+    if args[:1] == ["rebase"]:
+        if len(args) != 2:
+            raise _Usage
+        _deps_rebase(args[1])
+        return
+    if any(not a.isdigit() for a in args):
+        raise _Usage
+    me = _owner()
+    if not me:
+        raise SystemExit("maintainer deps: the profile names no GitHub account (GH_ACCOUNT), so I cannot\n"
+                         "            tell which rebase requests are mine.")
+    level = _deps_level()
+    _deps_classifier()
+    prs = list(args)
+    if not prs:
+        rows = gh_list("pr", "list", "--repo", SLUG, "--state", "open", "--author", DEPENDABOT_APP,
+                       "--json", "number")
+        if rows is None:
+            raise SystemExit("maintainer deps: could not list the open pull requests, so I cannot say which\n"
+                             "            are Dependabot's. That is not the same as none.")
+        prs = [str(r["number"]) for r in sorted(rows, key=lambda r: r["number"])]
+        if not prs:
+            print(f"no open pull request by {DEPENDABOT_APP}")
+            return
+    print(f"DEPS_AUTOMERGE={level}, account {me}")
+    unread = []
+    for pr in prs:
+        try:
+            lines = _deps_block(pr, level, me)
+        except _Unreadable as e:
+            unread.append(f"#{pr} ({e})")
+            lines = [f"#{pr}: COULD NOT READ {e}, so nothing is said about it"]
+        print("\n" + "\n".join(lines))
+    if unread:
+        raise SystemExit(f"\nmaintainer deps: could not read {', '.join(unread)}. A pull request I could not\n"
+                         f"            ask about is not one with nothing to do.")
+
+
 def cmd_status() -> None:
     ver = deployed_version()
     print(f"maintainer {ver['version']}  ({ver['commit']}, installed {ver.get('installed_at','?')[:16]})")
@@ -3319,6 +3779,9 @@ COMMANDS = {
                  cmd_lease, 2),
     "reviewed": Cmd("reviewed <pr>", "what this account already said at the PR's current head, and its lease",
                     lambda a: cmd_reviewed(a[0]), 1, 1),
+    "deps": Cmd("deps [pr...] | deps rebase <pr>",
+                "what each Dependabot pull request needs next; ask one to rebase",
+                cmd_deps),
     "log": Cmd("log [n]", "the last n lines of the run index (default 10)",
                lambda a: cmd_log(int(a[0]) if a else 10)),
     "start": Cmd("start <task>", "refresh, diff against the last run, open a report",

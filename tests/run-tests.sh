@@ -9383,6 +9383,370 @@ grep -qi 'runs yield to interactive work' "$root/docs/maintainer-doctrine.md" &&
     && ok "the doctrine says who yields to whom" || bad "docs/maintainer-doctrine.md does not say that runs yield to interactive work"
 # --- branch Y: leases (end) -----------------------------------------------------
 
+echo "== maintainer deps: what each Dependabot pull request needs next =="
+# `maintainer-merge verify-deps` could receipt a pure dependency bump and nothing
+# drove it. The review treated a Dependabot pull request like a contributor's: it
+# would reply to a bot, offer the bot a next issue and never ask it to rebase, and
+# sysknife #688-#692 sat a day untouched on 2026-10-28. `deps` reads each one from
+# GitHub and names one next step; these cases drive it against a gh stub that
+# serves one fixture per pull request and logs every call.
+DD="$stub_dir/deps"; rm -rf "$DD"; mkdir -p "$DD/state"
+cat > "$stub_dir/depsfx.py" <<'PYEOF'
+"""Write the fixtures for one pull request: depsfx.py <dir> <pr> key=value...
+
+author, cross, howner, hname, state, merge, mergeable, title, branch: the pr view.
+checks: comma list of name:CONCLUSION (empty = still running) or status:name:STATE.
+msg: group | patch | major | digest | none | malformed. commits: comma list of
+dep | human:<login> | unsigned | botcommitter; the last one is the head.
+asks: comma list of <login>@before|after, each a `@dependabot rebase` comment.
+reply: a comment by dependabot[bot] posted after every ask. diff: a patch file.
+"""
+import json, os, shutil, sys
+from datetime import datetime, timedelta, timezone
+
+d, pr, *kv = sys.argv[1:]
+o = dict(a.split("=", 1) for a in kv)
+BLOCK = "\n---\nupdated-dependencies:\n{}...\n\nSigned-off-by: dependabot[bot] <support@github.com>"
+def member(name, ver, kind):
+    out = f"- dependency-name: {name}\n  dependency-version: {ver}\n  dependency-type: direct:production\n"
+    return out + (f"  update-type: version-update:semver-{kind}\n" if kind else "")
+MSGS = {
+    "group": ("Bumps the cargo-minor-patch group with 3 updates in the / directory.\n\n"
+              "Updates `tauri` from 2.12.4 to 2.12.5\n- [Release notes](https://github.com/tauri-apps/tauri/releases)\n\n"
+              "Updates `rmcp` from 3.5.1 to 3.6.0\n- [Release notes](https://github.com/modelcontextprotocol/rust-sdk/releases)\n"
+              + BLOCK.format(member("rmcp", "3.6.0", "minor") + "  dependency-group: cargo-minor-patch\n"
+                             + member("tauri", "2.12.5", "patch") + "  dependency-group: cargo-minor-patch\n"
+                             + member("tauri-build", "2.7.4", "patch") + "  dependency-group: cargo-minor-patch\n")),
+    "patch": "Bumps [tauri](https://github.com/tauri-apps/tauri) from 2.12.4 to 2.12.5.\n"
+             + BLOCK.format(member("tauri", "2.12.5", "patch")),
+    "major": ("Bumps [serde](https://github.com/serde-rs/serde) from 1.0.200 to 2.0.0.\n"
+              "- [Release notes](https://github.com/serde-rs/serde/releases)\n"
+              "- [Changelog](https://github.com/serde-rs/serde/blob/master/CHANGELOG.md)\n"
+              "- [Commits](https://github.com/serde-rs/serde/compare/v1.0.200...v2.0.0)\n"
+              + BLOCK.format(member("serde", "2.0.0", "major"))),
+    "digest": "Bumps library/debian from `7c7b2c9` to `7ff6ba3`.\n"
+              + BLOCK.format(member("library/debian", "bookworm-slim", "")),
+    "none": "Bumps tauri from 2.12.4 to 2.12.5.\n\nSigned-off-by: dependabot[bot] <support@github.com>",
+    "malformed": "Bumps tauri.\n" + BLOCK.format(member("tauri", "2.12.5", "patch") + "garbage line\n"),
+}
+head = (pr * 40)[:40]
+t0 = datetime(2026, 10, 27, 17, 0, tzinfo=timezone.utc)
+iso = lambda t: t.strftime("%Y-%m-%dT%H:%M:%SZ")
+checks = []
+for spec in filter(None, o.get("checks", "rust:SUCCESS,docs:SKIPPED").split(",")):
+    parts = spec.split(":")
+    if parts[0] == "status":
+        checks.append({"__typename": "StatusContext", "context": parts[1], "state": parts[2]})
+    else:
+        checks.append({"__typename": "CheckRun", "name": parts[0], "conclusion": parts[1],
+                       "status": "COMPLETED" if parts[1] else "IN_PROGRESS"})
+view = {
+    "number": int(pr), "title": o.get("title", "chore(deps): bump the cargo-minor-patch group across 1 directory with 3 updates"),
+    "state": o.get("state", "OPEN"), "author": {"login": o.get("author", "app/dependabot"), "is_bot": True},
+    "headRefOid": head, "headRefName": o.get("branch", "dependabot/cargo/cargo-minor-patch-a685dc1303"),
+    "isCrossRepository": o.get("cross", "false") == "true",
+    "headRepository": {"name": o.get("hname", "r")}, "headRepositoryOwner": {"login": o.get("howner", "o")},
+    "mergeStateStatus": o.get("merge", "CLEAN"), "mergeable": o.get("mergeable", "MERGEABLE"),
+    "statusCheckRollup": checks,
+}
+json.dump(view, open(os.path.join(d, f"pr-{pr}.json"), "w"))
+kinds = o.get("commits", "dep").split(",")
+with open(os.path.join(d, f"commits-{pr}.ndjson"), "w") as f:
+    if o.get("commits") != "EMPTY":
+        for i, k in enumerate(kinds):
+            sha = head if i == len(kinds) - 1 else f"{i:x}" * 40
+            c = {"sha": sha, "author": "dependabot[bot]", "committer": "web-flow", "name": "dependabot[bot]",
+                 "verified": True, "date": iso(t0 - timedelta(minutes=len(kinds) - 1 - i)),
+                 "message": "chore(deps): bump\n\n" + MSGS[o.get("msg", "group")]}
+            if k.startswith("human:"):
+                c.update(author=k[6:], name=k[6:], message="Merge branch 'main' into the bump")
+            elif k == "unsigned":
+                c.update(verified=False)
+            elif k == "botcommitter":
+                c.update(committer="dependabot[bot]", verified=False)
+            f.write(json.dumps(c) + "\n")
+with open(os.path.join(d, f"comments-{pr}.ndjson"), "w") as f:
+    asks = [a for a in o.get("asks", "").split(",") if a]
+    for i, a in enumerate(asks):
+        who, when = a.split("@")
+        t = t0 + timedelta(hours=1 + i) if when == "after" else t0 - timedelta(hours=1 + i)
+        f.write(json.dumps({"user": who, "body": "@dependabot rebase", "created_at": iso(t),
+                            "html_url": f"https://x/{pr}#{i}"}) + "\n")
+    if "reply" in o:
+        f.write(json.dumps({"user": "dependabot[bot]", "body": o["reply"],
+                            "created_at": iso(t0 + timedelta(hours=9)), "html_url": "https://x/r"}) + "\n")
+shutil.copy(o["diff"], os.path.join(d, f"diff-{pr}.patch"))
+PYEOF
+cat > "$stub_dir/gh" <<'GHEOF'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$DD/calls"
+path=""; for a in "$@"; do case "$a" in repos/*) path="$a" ;; esac; done
+n="${3:-}"; case "$path" in */pulls/*|*/issues/*) n="${path#*/pulls/}"; n="${n#*/issues/}"; n="${n%%/*}" ;; esac
+case "$*" in
+  *'pr list'*) [ -f "$DD/fail-list" ] && { echo 'HTTP 502' >&2; exit 1; }; cat "$DD/list.json" ;;
+  *'pr view'*'mergeStateStatus,mergeable') [ -f "$DD/fail-view-$n" ] && exit 1
+      if [ -s "$DD/states-$n" ]; then read -r s m < "$DD/states-$n"; sed -i 1d "$DD/states-$n"
+          printf '{"mergeStateStatus":"%s","mergeable":"%s"}\n' "$s" "$m"
+      else python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(json.dumps({k:d[k] for k in ("mergeStateStatus","mergeable")}))' "$DD/pr-$n.json"; fi ;;
+  *'pr view'*) [ -f "$DD/fail-view-$n" ] && { echo 'HTTP 502' >&2; exit 1; }; cat "$DD/pr-$n.json" ;;
+  *'pr diff'*) [ -f "$DD/fail-diff-$n" ] && exit 1; cat "$DD/diff-$n.patch" ;;
+  *'-X POST'*'/comments'*) printf '%s\n' "$*" >> "$DD/posted-$n"
+      [ -f "$DD/swallow-$n" ] && exit 0
+      # "${*##...}" would strip each argument on its own; join them first.
+      all="$*"; printf '{"user":"owner","body":"%s","created_at":"%s","html_url":"https://x/%s#new"}\n' \
+          "${all##*body=}" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$n" >> "$DD/comments-$n.ndjson" ;;
+  *'/pulls/'*'/commits'*) [ -f "$DD/fail-commits-$n" ] && exit 1; cat "$DD/commits-$n.ndjson" ;;
+  *'/issues/'*'/comments'*) [ -f "$DD/fail-comments-$n" ] && exit 1; cat "$DD/comments-$n.ndjson" ;;
+  *) printf '%s\n' "$*" >> "$DD/unexpected"; exit 1 ;;
+esac
+GHEOF
+chmod +x "$stub_dir/gh"
+dpr() { python3 "$stub_dir/depsfx.py" "$DD" "$@" "diff=${DPR_DIFF:-$dp/lock.patch}"; }
+deps_run() {  # env assignments, then --, then the arguments after `deps`
+    local -a envs=(); while [ "$1" != -- ]; do envs+=("$1"); shift; done; shift
+    env PATH="$stub_dir:$PATH" DD="$DD" MAINTAINER_STATE="$DD/state" MAINTAINER_SLUG=o/r \
+        MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=owner MAINTAINER_PROFILE=deps MAINTAINER_POST=on \
+        MAINTAINER_DEPS_UNKNOWN_WAIT=0 MAINTAINER_SCRIPTS="$root/scripts" "${envs[@]}" \
+        python3 "$root/bin/maintainer" deps "$@" 2>&1
+}
+next_of() {  # $1 = output, $2 = pr -> that pull request's next: line, without the label
+    awk -v p="#$2 " 'index($0, p) == 1 { f = 1 } f && /^  next: / { sub(/^  next: /, ""); print; exit }' <<<"$1"
+}
+dreset() { rm -f "$DD"/calls "$DD"/posted-* "$DD"/fail-* "$DD"/swallow-* "$DD"/states-* "$DD"/unexpected; }
+
+# A group bump, green, every member patch or minor, the profile at minor.
+dreset; dpr 691
+out="$(deps_run -- 691)"; rc=$?
+check "a green group bump of patch and minor members is ready to verify" "$(next_of "$out" 691)" "verify"
+[ "$rc" = 0 ] && ok "and deps exits 0 when it could ask about every pull request" || bad "deps exited $rc on a readable PR: $out"
+grep -q '  dependencies: 3 (group cargo-minor-patch)' <<<"$out" && grep -q '    rmcp 3.6.0 semver-minor' <<<"$out" \
+    && grep -q '    tauri 2.12.5 semver-patch' <<<"$out" && grep -q '    tauri-build 2.7.4 semver-patch' <<<"$out" \
+    && ok "every member of the group is listed with its semver class" || bad "the group's members are not all listed: $out"
+grep -q "then: maintainer-merge verify-deps 691 $(printf '691%.0s' {1..14} | cut -c1-40)" <<<"$out" \
+    && ok "verify names the receipt command at the full head" || bad "verify did not name verify-deps at the head: $out"
+grep -q 'identity: app/dependabot, branch in o/r' <<<"$out" && grep -q 'ecosystem: cargo' <<<"$out" \
+    && ok "the block states the identity it checked and the ecosystem" || bad "no identity or ecosystem line: $out"
+dreset; dpr 691 merge=BLOCKED
+check "BLOCKED is a missing approval, which verify then gives" "$(next_of "$(deps_run -- 691)" 691)" "verify"
+
+# The branch is behind: ask for a rebase, once.
+dreset; dpr 690 merge=BEHIND
+out="$(deps_run -- 690)"
+check "a BEHIND pull request with no rebase request needs one" "$(next_of "$out" 690)" "rebase"
+grep -q 'then: maintainer deps rebase 690' <<<"$out" && ok "and the block names the command" || bad "no rebase command: $out"
+dreset; dpr 690 merge=DIRTY
+check "a DIRTY pull request needs a rebase" "$(next_of "$(deps_run -- 690)" 690)" "rebase"
+dreset; dpr 690 merge=BEHIND asks=owner@after
+out="$(deps_run -- 690)"
+check "a rebase asked for after the head is a wait" "$(next_of "$out" 690)" "wait"
+grep -q 'has not pushed since' <<<"$out" && ok "and it says the ask is outstanding" || bad "the wait does not say why: $out"
+dreset; dpr 690 merge=BEHIND asks=owner@after reply="Looks like this PR is already up-to-date with main!"
+grep -q 'Dependabot replied: Looks like this PR' <<<"$(deps_run -- 690)" \
+    && ok "a reply from Dependabot after the ask is shown, so a refusal does not read as a wait" \
+    || bad "Dependabot's reply to the ask was not shown"
+dreset; dpr 690 merge=BEHIND asks=owner@before
+check "a rebase asked for before the current head is spent: ask again" "$(next_of "$(deps_run -- 690)" 690)" "rebase"
+dreset; dpr 690 merge=BEHIND asks=carla@after
+check "somebody else's rebase request is not this account's" "$(next_of "$(deps_run -- 690)" 690)" "rebase"
+
+# CI. A running check has conclusion "", an empty string (MISTAKES 6c).
+dreset; dpr 691 checks=rust:SUCCESS,frontend:
+out="$(deps_run -- 691)"
+check "a check whose conclusion is the empty string is pending" "$(next_of "$out" 691)" "wait"
+grep -q 'ci: 1 pass, 0 skipped, 0 failing, 1 pending' <<<"$out" && ok "and it is counted as pending, not as a pass" \
+    || bad "the pending count is wrong: $(grep 'ci:' <<<"$out")"
+dreset; dpr 691 checks=
+check "an empty check board is a wait, not a pass" "$(next_of "$(deps_run -- 691)" 691)" "wait"
+dreset; dpr 691 checks=rust:FAILURE,docs:SUCCESS,lint:CANCELLED
+out="$(deps_run -- 691)"
+check "a failing check is investigated, by name" "$(next_of "$out" 691)" "investigate rust"
+grep -q 'failing: rust, lint' <<<"$out" && ok "and every failing check is named, a cancelled one included" || bad "failing checks not named: $out"
+dreset; dpr 691 checks=rust:SUCCESS,status:legacy-ci:SUCCESS
+check "a green commit status counts as a pass, read from its state" "$(next_of "$(deps_run -- 691)" 691)" "verify"
+dreset; dpr 691 checks=rust:SUCCESS,status:legacy-ci:PENDING
+check "a pending commit status is pending" "$(next_of "$(deps_run -- 691)" 691)" "wait"
+dreset; dpr 691 checks=rust:SKIPPED
+check "a board where every check skipped goes to a person" "$(next_of "$(deps_run -- 691)" 691)" "human"
+
+# What goes to a person.
+dreset; dpr 693 msg=major
+out="$(deps_run -- 693)"
+check "a semver-major member goes to a person" "$(next_of "$out" 693)" "human"
+# The whole line: the knob also sends a major to a person, with a longer reason,
+# and a prefix match passed with the major rule deleted.
+grep -qx '    why: serde is semver-major' <<<"$out" && ok "naming the major member, as a major and not as a knob setting" \
+    || bad "the major member is not named as a major: $out"
+grep -q 'changelog: https://github.com/serde-rs/serde/blob/master/CHANGELOG.md' <<<"$out" \
+    && grep -q 'release notes: https://github.com/serde-rs/serde/releases' <<<"$out" \
+    && ok "with its changelog and release-notes links from the commit message" || bad "no upstream links for the major: $out"
+dreset; dpr 694 msg=none
+out="$(deps_run -- 694)"
+check "a commit with no updated-dependencies block goes to a person" "$(next_of "$out" 694)" "human"
+grep -q 'dependencies: the commit message has no updated-dependencies block' <<<"$out" \
+    && ok "and it says the block is missing rather than reading the title" || bad "a missing block was not reported: $out"
+grep -qE '^    tauri ' <<<"$out" && bad "a member was guessed for a missing block" || ok "and no member is invented"
+dreset; dpr 694 msg=malformed
+grep -q "cannot read" <<<"$(deps_run -- 694)" && ok "a block with a line it cannot read is reported unreadable" \
+    || bad "a malformed block was read anyway"
+dreset; dpr 688 msg=digest title='chore(deps): bump library/debian from `7c7b2c9` to `7ff6ba3`' branch=dependabot/docker/library/debian-7ff6ba3
+out="$(deps_run -- 688)"
+check "a member with no update-type goes to a person" "$(next_of "$out" 688)" "human"
+grep -q 'library/debian carries no update-type' <<<"$out" && grep -q 'ecosystem: docker' <<<"$out" \
+    && ok "naming it, and the ecosystem comes from Dependabot's branch name" || bad "the digest member is not explained: $out"
+dreset; DPR_DIFF="$dp/pin-plus.patch" dpr 692
+out="$(deps_run -- 692)"
+check "a workflow change beyond SHA pin lines goes to a person" "$(next_of "$out" 692)" "human"
+grep -q 'the classifier refused it: a workflow line changed that is not an action pin' <<<"$out" \
+    && ok "with the classifier's reason" || bad "the classifier refusal is not given: $out"
+dreset; DPR_DIFF="$dp/pin.patch" dpr 692
+check "a workflow change that is only a SHA pin may be verified" "$(next_of "$(deps_run -- 692)" 692)" "verify"
+
+# The knob.
+dreset; dpr 691
+out="$(deps_run MAINTAINER_DEPS_AUTOMERGE=patch -- 691)"
+check "DEPS_AUTOMERGE=patch sends a minor member to a person" "$(next_of "$out" 691)" "human"
+grep -q 'rmcp is semver-minor and DEPS_AUTOMERGE=patch' <<<"$out" && ok "saying which member and why" || bad "the knob refusal is not explained: $out"
+dreset; dpr 695 msg=patch
+check "DEPS_AUTOMERGE=patch still verifies an all-patch bump" "$(next_of "$(deps_run MAINTAINER_DEPS_AUTOMERGE=patch -- 695)" 695)" "verify"
+check "DEPS_AUTOMERGE=none verifies nothing" "$(next_of "$(deps_run MAINTAINER_DEPS_AUTOMERGE=none -- 695)" 695)" "human"
+out="$(deps_run MAINTAINER_DEPS_AUTOMERGE=major -- 695)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'DEPS_AUTOMERGE must be one of none, patch, minor' <<<"$out" \
+    && ok "a DEPS_AUTOMERGE outside none|patch|minor is refused, not read as the nearest value" \
+    || bad "DEPS_AUTOMERGE=major was accepted (rc=$rc)"
+check "lib/defaults.env sets DEPS_AUTOMERGE to minor" "$(sed -n 's/^DEPS_AUTOMERGE=//p' "$root/lib/defaults.env")" "minor"
+for p in sysknife magent; do
+    # shellcheck disable=SC1090  # each profile in turn, by design
+    check "the $p profile allows patch and minor bumps" \
+        "$( . "$root/profiles/$p/profile.env" >/dev/null 2>&1; printf '%s' "${DEPS_AUTOMERGE:-}" )" "minor"
+done
+
+# Identity. A commit from anybody else makes it a person's pull request.
+dreset; dpr 696 commits=dep,human:carla
+out="$(deps_run -- 696)"
+check "a commit by a person routes to the contributor review" "$(next_of "$out" 696)" \
+    "review as a contributor PR (commit $(printf '696%.0s' {1..14} | cut -c1-8) by carla)"
+dreset; dpr 696 author=carla
+check "a pull request a person opened is a contributor's" "$(next_of "$(deps_run -- 696)" 696)" \
+    "review as a contributor PR (author carla)"
+dreset; dpr 696 commits=unsigned
+check "a commit GitHub committed without a verified signature is not Dependabot's" \
+    "$(next_of "$(deps_run -- 696)" 696)" \
+    "review as a contributor PR (commit 69669669 by dependabot[bot], committed by web-flow without a verified signature)"
+dreset; dpr 696 commits=botcommitter
+check "a commit Dependabot both wrote and committed is Dependabot's" "$(next_of "$(deps_run -- 696)" 696)" "verify"
+dreset; dpr 697 cross=true howner=mallory hname=r
+out="$(deps_run -- 697)"
+check "a Dependabot-authored pull request from a fork is refused to a person" "$(next_of "$out" 697)" "human"
+grep -q 'identity: NOT a Dependabot pull request: the branch lives in mallory/r' <<<"$out" \
+    && ok "and the identity line says the head is a fork" || bad "the fork is not named: $out"
+# Each half on its own, so neither check hides behind the other.
+dreset; dpr 697 cross=true
+check "a head GitHub calls cross-repository is refused, whatever it is named" "$(next_of "$(deps_run -- 697)" 697)" "human"
+dreset; dpr 697 howner=mallory
+check "a head in another owner's repository is refused, whatever GitHub calls it" "$(next_of "$(deps_run -- 697)" 697)" "human"
+
+# GitHub computes mergeability after a push. UNKNOWN is asked again.
+dreset; dpr 691 merge=UNKNOWN mergeable=UNKNOWN; printf 'UNKNOWN UNKNOWN\nCLEAN MERGEABLE\n' > "$DD/states-691"
+out="$(deps_run -- 691)"
+check "an UNKNOWN merge state is read again until GitHub answers" "$(next_of "$out" 691)" "verify"
+dreset; dpr 691 merge=UNKNOWN mergeable=UNKNOWN; printf 'UNKNOWN UNKNOWN\nUNKNOWN UNKNOWN\nUNKNOWN UNKNOWN\n' > "$DD/states-691"
+out="$(deps_run -- 691)"
+check "a merge state that stays UNKNOWN is reported as a wait" "$(next_of "$out" 691)" "wait"
+want="$(sed -n 's/^DEPS_UNKNOWN_READS=//p' "$root/lib/defaults.env")"
+if [ -n "$want" ] && [ "$want" -gt 1 ]; then
+    check "after DEPS_UNKNOWN_READS ($want) reads in all" "$(grep -c 'pr view 691' "$DD/calls")" "$want"
+else
+    bad "lib/defaults.env has no DEPS_UNKNOWN_READS above 1, so the re-read count is not measured"
+fi
+
+# Listing, and one next per block.
+dreset; dpr 691; dpr 690 merge=BEHIND; dpr 693 msg=major
+printf '[{"number":693},{"number":690},{"number":691}]\n' > "$DD/list.json"
+out="$(deps_run --)"; rc=$?
+grep -q -- "--author app/dependabot" "$DD/calls" && ok "with no argument it lists the pull requests the Dependabot app opened" \
+    || bad "the listing did not ask for Dependabot's pull requests: $(head -1 "$DD/calls")"
+check "every listed pull request gets exactly one next line" "$(grep -c '^  next: ' <<<"$out")" "3"
+check "and they come in number order" "$(grep -oE '^#[0-9]+' <<<"$out" | paste -sd' ')" "#690 #691 #693"
+printf '[]\n' > "$DD/list.json"
+out="$(deps_run --)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'no open pull request by app/dependabot' <<<"$out" \
+    && ok "no Dependabot pull request open is said, and exits 0" || bad "an empty listing (rc=$rc): $out"
+
+# Could not ask is never nothing to do (MISTAKES 6).
+for what in view commits diff; do
+    dreset; dpr 691; dpr 692; printf '[{"number":691},{"number":692}]\n' > "$DD/list.json"; : > "$DD/fail-$what-692"
+    out="$(deps_run --)"; rc=$?
+    if [ "$rc" != 0 ] && grep -q 'could not read #692' <<<"$out" && [ "$(next_of "$out" 691)" = verify ] \
+       && ! grep -qE '^#692 [0-9a-f]{8} ' <<<"$out"; then
+        ok "a failed $what read exits non-zero, names the pull request, and still reports the others"
+    else
+        bad "a failed $what read on #692 (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+    fi
+done
+dreset; dpr 690 merge=BEHIND; : > "$DD/fail-comments-690"
+out="$(deps_run -- 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'its comments' <<<"$out" && [ -z "$(next_of "$out" 690)" ] \
+    && ok "an unreadable comment list refuses rather than reading as no rebase request" \
+    || bad "the comments read failed and deps still answered (rc=$rc): $out"
+dreset; dpr 691 commits=EMPTY
+out="$(deps_run -- 691)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'came back empty' <<<"$out" \
+    && ok "an empty commit list is a failed read, not an identity with nothing to check" \
+    || bad "an empty commit list passed (rc=$rc): $out"
+dreset; : > "$DD/fail-list"
+out="$(deps_run --)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'could not list the open pull requests' <<<"$out" \
+    && ok "a listing that failed exits non-zero instead of saying none" || bad "a failed listing (rc=$rc): $out"
+[ ! -s "$DD/unexpected" ] && ok "deps asked gh nothing outside what it reads" \
+    || bad "deps made a call the stub does not serve: $(head -2 "$DD/unexpected")"
+grep -q -- '-X POST' "$DD/calls" 2>/dev/null && bad "deps without rebase posted something" \
+    || ok "deps without rebase is a pure read"
+
+echo "== maintainer deps rebase: one ask, read back, never update-branch =="
+# A maintainer commit on Dependabot's branch is an edit Dependabot will not
+# overwrite, so `gh pr update-branch` stops it rebasing that pull request for good.
+# The way to bring one up to date is to ask Dependabot, once per head.
+dreset; dpr 690 merge=BEHIND
+out="$(deps_run -- rebase 690)"; rc=$?
+if [ "$rc" = 0 ] && grep -q 'asked Dependabot to rebase' <<<"$out" && [ "$(wc -l < "$DD/posted-690")" = 1 ]; then
+    ok "a BEHIND Dependabot pull request gets one @dependabot rebase, read back"
+else
+    bad "the rebase ask did not go out once (rc=$rc): $out"
+fi
+grep -qF -- '-f body=@dependabot rebase' "$DD/posted-690" && grep -q 'repos/o/r/issues/690/comments' "$DD/posted-690" \
+    && ok "posted with -f, so the leading @ is text and not a file name" || bad "the post was not -f body=@dependabot rebase: $(cat "$DD/posted-690")"
+grep -qE 'update-branch|pr merge|pr edit' "$DD/calls" \
+    && bad "deps rebase reached for the branch itself: $(grep -E 'update-branch|pr merge|pr edit' "$DD/calls" | head -1)" \
+    || ok "and it never touches the branch: no update-branch, edit or merge call"
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'already asked' <<<"$out" && [ "$(wc -l < "$DD/posted-690")" = 1 ] \
+    && ok "a second ask at the same head is refused and posts nothing" || bad "rebase asked twice at one head (rc=$rc): $out"
+dreset; dpr 690 merge=BEHIND asks=owner@before
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" = 0 ] && [ -s "$DD/posted-690" ] && ok "an ask from before the current head does not block a new one" \
+    || bad "an ask on an older head blocked the rebase (rc=$rc): $out"
+for case in "merge=CLEAN|not BEHIND or DIRTY" "commits=dep,human:carla|not a verified Dependabot" \
+            "author=carla|not a verified Dependabot" "cross=true howner=mallory|a fork head" "state=CLOSED|CLOSED"; do
+    args="${case%%|*}" want="${case#*|}"
+    dreset; read -r -a fx <<<"$args"; dpr 690 merge=BEHIND "${fx[@]}"
+    out="$(deps_run -- rebase 690)"; rc=$?
+    [ "$rc" != 0 ] && grep -q "$want" <<<"$out" && [ ! -e "$DD/posted-690" ] \
+        && ok "rebase refuses with $args, and posts nothing" || bad "rebase with $args (rc=$rc): $out"
+done
+dreset; dpr 690 merge=BEHIND
+out="$(deps_run MAINTAINER_POST=off -- rebase 690)"; rc=$?
+[ "$rc" = 0 ] && grep -q 'would ask Dependabot to rebase #690' <<<"$out" && [ ! -e "$DD/posted-690" ] \
+    && ok "at POST=off it says what it would post and posts nothing" || bad "POST=off (rc=$rc): $out"
+dreset; dpr 690 merge=BEHIND; : > "$DD/swallow-690"
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'could not read a rebase request' <<<"$out" \
+    && ok "an ask that cannot be read back is reported as not done" || bad "an unread ask reported success (rc=$rc): $out"
+dreset; dpr 690 merge=BEHIND; : > "$DD/fail-comments-690"
+out="$(deps_run -- rebase 690)"; rc=$?
+[ "$rc" != 0 ] && grep -q 'nothing was posted' <<<"$out" && [ ! -e "$DD/posted-690" ] \
+    && ok "rebase refuses when it cannot read whether it already asked" || bad "rebase asked blind (rc=$rc): $out"
+rm -f "$stub_dir/gh"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
