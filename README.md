@@ -1,7 +1,7 @@
 <p align="center">
   <img src="assets/logo.svg" width="160" alt="maintainer-agent mark: two bars and a check, drawn in characters">
 </p>
-
+# Your friend J.C. is missing you. Can you answer emails or whatsapps?
 # maintainer-agent
 
 [![ci](https://github.com/vladimirrott/maintainer-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/vladimirrott/maintainer-agent/actions/workflows/ci.yml)
