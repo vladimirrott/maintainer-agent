@@ -362,6 +362,50 @@ else
     fi
 fi
 
+head_ "Sandbox"
+# The timers run under the hardening in maintainer@.service, and an interactive
+# shell does not, so every check above can pass while an unattended run cannot
+# do something it needs. 2026-10-29 to 11-02: RestrictSUIDSGID=yes made tar's
+# openat2 call fail with ENOSYS, `verify` extracted nothing, and no unattended
+# run could merge. This probes the extraction `verify` actually uses, inside a
+# transient unit carrying the directives read from the installed unit, so a new
+# directive, systemd or tar that breaks it turns up here and not in a missed merge.
+_unit="$HOME/.config/systemd/user/maintainer@.service"
+if [ "$(uname -s)" != Linux ] || [ ! -f "$_unit" ] || ! command -v systemd-run >/dev/null 2>&1; then
+    green "no systemd user unit to probe on this machine"
+else
+    _dirs="$(grep -E '^(NoNewPrivileges|LockPersonality|MemoryDenyWriteExecute|PrivateTmp|Protect[A-Za-z]+|Restrict[A-Za-z]+|SystemCall[A-Za-z]+)=' "$_unit")"; _grc=$?
+    _mm="$(command -v maintainer-merge)"
+    if [ "$_grc" -ne 0 ] || [ -z "$_dirs" ]; then
+        yellow "no hardening directive found in $_unit (grep exited $_grc)" \
+               "the sandbox probe has nothing to apply; read the unit by hand"
+    elif [ -z "$_mm" ]; then
+        yellow "maintainer-merge is not on PATH, so the sandbox probe cannot run" "./install.sh"
+    elif ! systemd-run --user --wait --pipe --quiet true >/dev/null 2>&1; then
+        yellow "systemd-run --user cannot start a transient unit, so the sandbox is unprobed" \
+               "log in to a user session, then re-run"
+    else
+        _sargs=(); while IFS= read -r _l; do _sargs+=(-p "$_l"); done <<<"$_dirs"
+        _sb="$(mktemp -d)"
+        git init -q -b main "$_sb/r" \
+            && printf 'x\n' > "$_sb/r/f" && git -C "$_sb/r" add f \
+            && git -C "$_sb/r" -c user.email=t@t -c user.name=t -c commit.gpgsign=false \
+                   -c core.hooksPath=/dev/null commit -qm probe; _src=$?
+        mkdir -p "$_sb/x" "$_sb/s"
+        if [ "$_src" -ne 0 ]; then
+            yellow "could not build the probe repository" "check git and ${TMPDIR:-/tmp}"
+        elif _pout="$(systemd-run --user --wait --pipe --quiet "${_sargs[@]}" \
+                -E MAINTAINER_REPO="$_sb/r" -E MAINTAINER_STATE="$_sb/s" \
+                bash -c '. "$1" && extract_tree HEAD "$2"' _ "$_mm" "$_sb/x" 2>&1)"; then
+            green "verify extracts a tree under the unit's hardening ($(( ${#_sargs[@]} / 2 )) directive(s) applied)"
+        else
+            red "verify cannot extract a tree under the unit's hardening: $(printf '%s' "$_pout" | head -n 2 | tr '\n' ' ')" \
+                "a directive in $_unit blocks a call the extraction needs; every unattended verify fails until it is fixed"
+        fi
+        rm -rf "$_sb"
+    fi
+fi
+
 head_ "Audit trail"
 st="${STATE_DIR:-}"
 if [ -z "$st" ]; then

@@ -636,7 +636,7 @@ The short version follows.
 ./scripts/check_drift.py    # the docs agree with the code
 ```
 
-<!-- fig:tests floor=100 -->1,500+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
+<!-- fig:tests floor=100 -->1,600+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

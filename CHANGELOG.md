@@ -12,6 +12,17 @@ middle digit.
 
 ### Fixed
 
+- **An unattended `verify` extracts the pull request.** The timer unit sets
+  `RestrictSUIDSGID=yes`, whose seccomp filter cannot read the struct `openat2`
+  takes and answers ENOSYS. tar 1.35 creates every file through `openat2`, so
+  `git archive | tar -x` wrote nothing, the pipe dropped tar's status, and the
+  rust suite failed with a message that blamed the container's network. From
+  2026-10-29 to 2026-11-02 no unattended run could verify or merge (#158). The
+  tree now comes from `git read-tree` and `checkout-index`, and a count of
+  tracked files against files on disk refuses a partial or empty tree. Each
+  guard has its own test, and each was proved by deleting it. `maintainer-doctor`
+  has a Sandbox section that extracts a tree inside a transient unit carrying
+  the directives read from the installed unit.
 - **An install refused for a run in flight writes nothing.** The check sat just
   above the step that replaces `profiles/`, so a refused install had already
   replaced `run.sh`, `defaults.env` and every script and stamped `VERSION` with

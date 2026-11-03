@@ -5582,6 +5582,120 @@ grep -q CANARY "$sl/evil.sh" && [ -L "$sl/evil.sh" ] \
     && ok "with -type f the symlink is left alone" \
     || bad "the symlink was dereferenced even with -type f"
 
+echo "== the pull request's tree is extracted without tar =="
+# The timer unit sets RestrictSUIDSGID=yes. Its seccomp filter cannot read the
+# struct openat2 takes and answers ENOSYS, and tar 1.35 creates every file
+# through openat2, so under the unit `git archive | tar -x` wrote nothing:
+#     tar: .github/FUNDING.yml: Cannot open: Function not implemented
+# The pipe dropped tar's status, the suite then failed with a message about the
+# container's network, and no unattended run could verify or merge for five days
+# (2026-10-29 to 11-02, magent#158). A tar that fails the way the unit's did
+# stands in for the sandbox here, because CI has no user session to run it in;
+# `maintainer-doctor` probes the real hardening on the machine that has one.
+xt="$stub_dir/xtreerepo"; rm -rf "$xt"; mkdir -p "$xt/sub/deep"
+git -C "$xt" init -q -b main; git -C "$xt" config user.email t@t; git -C "$xt" config user.name t
+printf 'one\n' > "$xt/a.txt"; printf 'two\n' > "$xt/sub/deep/b.txt"
+printf '#!/bin/sh\n' > "$xt/run.sh"; chmod +x "$xt/run.sh"; ln -s a.txt "$xt/link"
+git -C "$xt" add -A; git -C "$xt" commit -qm tree
+git -C "$xt" update-index --add --cacheinfo "160000,$(git -C "$xt" rev-parse HEAD),vendor/mod"
+git -C "$xt" commit -qm submodule
+xt_et="$(git -C "$xt" hash-object -w -t tree /dev/null)"
+xt_empty="$(git -C "$xt" commit-tree "$xt_et" -m empty)"
+notar="$stub_dir/notar"; mkdir -p "$notar"
+cat > "$notar/tar" <<'TAREOF'
+#!/bin/sh
+: > "$XT_MARK"
+echo "tar: x: Cannot open: Function not implemented" >&2
+exit 2
+TAREOF
+chmod +x "$notar/tar"
+xtree() { # $1 ref, $2 dir: the real extract_tree, tar broken, stderr kept
+    ( export MAINTAINER_REPO="$xt" MAINTAINER_STATE="$stub_dir/xtstate" XT_MARK="$stub_dir/tar-called"
+      # shellcheck disable=SC1090
+      . "$mg" >/dev/null 2>&1; PATH="$notar:$PATH" extract_tree "$@" ) 2>&1
+}
+rm -f "$stub_dir/tar-called"
+xo="$stub_dir/xt-out"; rm -rf "$xo"; mkdir -p "$xo"
+xout="$(xtree HEAD "$xo")"; xrc=$?
+[ "$xrc" -eq 0 ] && [ -z "$xout" ] \
+    && ok "a tree extracts although tar answers ENOSYS" \
+    || bad "extraction failed with tar broken (rc=$xrc): $(printf '%s' "$xout" | head -c 160)"
+[ ! -e "$stub_dir/tar-called" ] \
+    && ok "and tar was never run" \
+    || bad "the extraction still calls tar, which the unit's seccomp filter breaks"
+want_files="$(git -C "$xt" ls-tree -r --name-only HEAD | grep -vx 'vendor/mod' | sort)"
+got_files="$(cd "$xo" && find . \( -type f -o -type l \) | sed 's#^\./##' | sort)"
+[ -n "$want_files" ] && [ "$want_files" = "$got_files" ] \
+    && ok "every tracked file arrives, a submodule excepted" \
+    || bad "the extracted files differ from the tracked ones: $(printf '%s' "$got_files" | tr '\n' ' ')"
+[ -x "$xo/run.sh" ] && [ "$(readlink "$xo/link")" = a.txt ] && [ -d "$xo/vendor/mod" ] \
+    && ok "the exec bit, a symlink and a submodule directory survive" \
+    || bad "a mode, a link or a gitlink was lost in extraction"
+# Each refusal below is its own guard, and each case is shaped so that only that
+# guard stands between the input and a clean exit.
+xo2="$stub_dir/xt-out2"; rm -rf "$xo2"; mkdir -p "$xo2"; printf 'stray\n' > "$xo2/stray.txt"
+xout="$(xtree HEAD "$xo2")"; xrc=$?
+[ "$xrc" -ne 0 ] && grep -q 'extracted' <<<"$xout" \
+    && ok "a directory holding a file the tree does not track is refused" \
+    || bad "an extra file in the target passed the count check (rc=$xrc)"
+xo3="$stub_dir/xt-out3"; rm -rf "$xo3"; mkdir -p "$xo3"; printf 'mine\n' > "$xo3/a.txt"
+xout="$(xtree HEAD "$xo3")"; xrc=$?
+[ "$xrc" -ne 0 ] \
+    && ok "a file that checkout-index will not overwrite is refused, not skipped" \
+    || bad "checkout-index failed and the extraction still reported success"
+xo4="$stub_dir/xt-out4"; rm -rf "$xo4"; mkdir -p "$xo4"
+xout="$(xtree no-such-ref "$xo4")"; xrc=$?
+[ "$xrc" -ne 0 ] && [ -z "$(ls -A "$xo4")" ] \
+    && ok "an unknown ref is refused and writes nothing" \
+    || bad "an unreadable ref was accepted (rc=$xrc)"
+xo5="$stub_dir/xt-out5"; rm -rf "$xo5"; mkdir -p "$xo5"
+xout="$(xtree "$xt_empty" "$xo5")"; xrc=$?
+[ "$xrc" -ne 0 ] && grep -q 'lists no files' <<<"$xout" \
+    && ok "a ref with no files is refused, since zero of zero is not an extraction" \
+    || bad "an empty tree was accepted (rc=$xrc)"
+
+echo "== doctor probes extraction under the unit's own hardening =="
+# Driven against a stand-in for systemd-run: a control call with no properties
+# succeeds, and under SR_MODE=blocked any call that carries one fails the way the
+# real unit did. A probe that never applied the directives would pass both runs.
+doc="$root/bin/maintainer-doctor"
+sr="$stub_dir/sysrun"; mkdir -p "$sr"; ln -sf "$mg" "$sr/maintainer-merge"
+cat > "$sr/systemd-run" <<'SREOF'
+#!/usr/bin/env bash
+props=0; envs=()
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -p) props=$((props+1)); shift 2 ;;
+        -E) envs+=("$2"); shift 2 ;;
+        --*) shift ;;
+        *) break ;;
+    esac
+done
+if [ "${SR_MODE:-}" = blocked ] && [ "$props" -gt 0 ]; then
+    echo "tar: f: Cannot open: Function not implemented" >&2; exit 2
+fi
+exec env ${envs[@]+"${envs[@]}"} "$@"
+SREOF
+chmod +x "$sr/systemd-run"
+sbh="$stub_dir/sandboxhome"; rm -rf "$sbh"; mkdir -p "$sbh/.local/share/maintainer/profiles/p" "$sbh/.config/systemd/user" "$sbh/state/state" "$sbh/state/runs"
+printf 'PROFILE_NAME=p\nTASKS="review"\nSTATE_DIR=%s\nREPO_PATH=%s\n' "$sbh/state" "$sbh" \
+    > "$sbh/.local/share/maintainer/profiles/p/profile.env"
+printf '[Service]\nNoNewPrivileges=yes\nRestrictSUIDSGID=yes\nExecStart=/bin/true\n' \
+    > "$sbh/.config/systemd/user/maintainer@.service"
+sbout="$(PATH="$sr:$stub_dir:$PATH" HOME="$sbh" bash "$doc" --quick 2>&1 || true)"
+grep -q 'verify extracts a tree under the unit.s hardening (2 directive' <<<"$sbout" \
+    && ok "doctor reports a working extraction and counts the directives it applied" \
+    || bad "the sandbox probe did not pass on a sandbox that allows extraction: $(grep -a -A2 Sandbox <<<"$sbout" | tr '\n' ' ' | cut -c1-200)"
+sbout="$(SR_MODE=blocked PATH="$sr:$stub_dir:$PATH" HOME="$sbh" bash "$doc" --quick 2>&1 || true)"
+grep -aq 'FAIL.*verify cannot extract a tree under the unit.s hardening' <<<"$sbout" \
+    && ok "and goes red when the hardening breaks it" \
+    || bad "a sandbox that blocks extraction was reported as fine"
+printf '[Service]\nExecStart=/bin/true\n' > "$sbh/.config/systemd/user/maintainer@.service"
+sbout="$(SR_MODE=blocked PATH="$sr:$stub_dir:$PATH" HOME="$sbh" bash "$doc" --quick 2>&1 || true)"
+grep -aq 'warn.*no hardening directive found' <<<"$sbout" \
+    && ok "a unit with no directives is a warning, not a pass" \
+    || bad "a probe with nothing to apply reported success"
+
 echo "== the shellcheck sweep runs locally, or says it did not =="
 # It lived inline in ci.yml, so the pre-commit hook could not run it and a push
 # was the first thing to report SC1090 on four lines that had passed every gate

@@ -955,6 +955,42 @@ suite_extra_args() { declare -F suite_podman_args >/dev/null && suite_podman_arg
 # that had been on main for months, that the pull request did not touch, and
 # that goes nowhere near the host. It blamed the contributor for the
 # repository's own layout.
+# extract_tree <ref> <dir>: write the files <ref> tracks into the empty <dir>.
+#
+# This was `git archive <ref> | tar -x -C <dir>`. The timer unit sets
+# RestrictSUIDSGID=yes, whose seccomp filter cannot look inside the struct that
+# openat2 takes, so it answers ENOSYS. tar 1.35 creates every file and directory
+# through openat2, so under the unit not one file arrived:
+#
+#     tar: .github/FUNDING.yml: Cannot open: Function not implemented
+#
+# The pipe threw tar's status away, the index seed then succeeded over an empty
+# tree, and the suite failed later with a dependency-fetch message that blamed
+# the container's network. No unattended run could verify, so none could merge.
+#
+# git writes the files itself with ordinary open and mkdir calls, which the
+# filter lets through. The count check at the end is what stops a partial
+# extraction from reaching a suite: it is the difference between a tree that
+# arrived and one that merely did not raise an error.
+extract_tree() {
+    local ref="$1" dir="$2" tmp want got
+    scratch_dir tmp
+    env GIT_INDEX_FILE="$tmp/index" git -C "$REPO_PATH" -c core.hooksPath=/dev/null \
+        read-tree "$ref" || { printf 'read-tree %s failed\n' "$ref" >&2; return 1; }
+    env GIT_INDEX_FILE="$tmp/index" git -C "$REPO_PATH" -c core.hooksPath=/dev/null \
+        checkout-index -a --prefix="$dir/" \
+        || { printf 'checkout-index of %s into %s failed\n' "$ref" "$dir" >&2; return 1; }
+    git -C "$REPO_PATH" ls-tree -r -z "$ref" > "$tmp/listing" \
+        || { printf 'ls-tree %s failed\n' "$ref" >&2; return 1; }
+    # A submodule is a commit, not a file, and checkout-index leaves it a bare
+    # directory. Everything else is a file or a symlink and must be on disk.
+    want="$(grep -zvc '^160000 ' "$tmp/listing")" || true
+    [ "${want:-0}" -gt 0 ] || { printf '%s lists no files\n' "$ref" >&2; return 1; }
+    got="$(find "$dir" \( -type f -o -type l \) -print0 | tr -cd '\0' | wc -c)"
+    [ "$((got))" -eq "$want" ] \
+        || { printf 'extracted %s of the %s files in %s\n' "$((got))" "$want" "$ref" >&2; return 1; }
+}
+
 tree_escapes() {  # $1 = tree root -> "path -> target" per escaping link
     python3 - "$1" <<'PYEOF'
 import os, sys
@@ -1083,8 +1119,10 @@ cmd_verify() {
     local real_head; real_head="$(git -C "$REPO_PATH" rev-parse "v-$pr")"
     case "$real_head" in "$sha"*) ;; *) git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
         die "head is $real_head, not the $sha you named" ;; esac
-    git -C "$REPO_PATH" archive "v-$pr" | tar -x -C "$work"
+    local extracted=0
+    extract_tree "v-$pr" "$work" || extracted=1
     git -C "$REPO_PATH" branch -D "v-$pr" >/dev/null 2>&1
+    [ "$extracted" -eq 0 ] || die "cannot extract #$pr; nothing was verified"
 
     local links; links="$(tree_escapes "$work")"
     if [ -n "$links" ]; then
