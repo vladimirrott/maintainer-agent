@@ -10,6 +10,8 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-11-03
+
 ### Fixed
 
 - **An unattended `verify` extracts the pull request.** The timer unit sets
@@ -1440,7 +1442,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.10.1
 [0.10.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.10.0
 [0.9.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.9.0
 [0.8.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.8.1
