@@ -931,6 +931,16 @@ done
 ( . "$nsuite" >/dev/null 2>&1; suite_covers crates/sysknife-daemon/src/lib.rs ) \
     && bad "the node suite claims Rust it cannot run" \
     || ok "and claims nothing it cannot run"
+# setup-contract.test.mjs probes a Unix socket with netcat, and the bare
+# node:24-slim image has none, so the clean run failed and sysknife#749 sat
+# unmergeable for two review runs. Sourced and asked, not grepped: the doctor
+# resolves exactly this list inside the image.
+# shellcheck disable=SC1090
+nneeds="$( . "$nsuite" >/dev/null 2>&1; suite_needs )"
+case " $nneeds " in
+    *" nc "*) ok "the node suite's image is checked for the netcat its contract test drives" ;;
+    *) bad "the node suite no longer requires nc, so the image can lose it unnoticed" ;;
+esac
 # A count that cannot be read is a vacuous pass. node --test prints "# pass N".
 npass="$stub_dir/npass"; rm -rf "$npass"; mkdir -p "$npass"
 # node --test prints `ℹ pass N` under its default reporter and `# pass N` under

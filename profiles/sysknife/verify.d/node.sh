@@ -13,19 +13,21 @@ suite_covers() {  # $1 = a path from the pull request
     return 1
 }
 
-# node:24-slim, matching what CI runs. The package declares no dependencies at
-# all and its test script is `node --test tests/*.test.mjs`, so there is no
-# install step and nothing to fetch: the container runs with --network=none and
-# an `npm install` would fail there anyway. That property is worth keeping. If
+# node:24-slim plus netcat, built from node.Containerfile beside this file (see
+# there for why the bare image is not enough). The base matches what CI runs.
+# The package declares no dependencies at all and its test script is
+# `node --test tests/*.test.mjs`, so there is no install step and nothing to
+# fetch: the container runs with --network=none and an `npm install` would fail
+# there anyway. That property is worth keeping. If
 # packages/setup ever takes a dependency, this suite needs a prefetch phase the
 # way the rust suite has one, and the clean run will say so rather than pass.
-suite_image() { printf 'docker.io/library/node:24-slim'; }
+suite_image() { printf 'localhost/sk-node:1'; }
 
 # What that image has to contain. maintainer-doctor runs the image and checks
 # each of these resolves, because nothing else ties the image to what the suite
 # runs inside it. sysknife's shell suite sat in an image with no cargo for three
 # review runs and the gate reported it as the pull request failing its own test.
-suite_needs() { printf 'node npm'; }
+suite_needs() { printf 'node npm nc'; }
 
 # JSON is in the list because the support floor lives in package.json's
 # `engines.node` as well as in the preflight, and a mutation that moves one and

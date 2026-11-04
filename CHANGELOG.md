@@ -10,6 +10,16 @@ middle digit.
 
 ## [Unreleased]
 
+### Fixed
+
+- **The sysknife node suite can run `setup-contract.test.mjs` unmutated.** The
+  suite ran in the bare `node:24-slim` image, which has no `nc`, and that test
+  probes a Unix socket with netcat. The clean run failed, no receipt was
+  earnable, and sysknife#749 (test-only, approved) waited two review runs. The
+  suite now builds `localhost/sk-node:1` from `node.Containerfile` (node:24-slim
+  plus `netcat-openbsd`), and `maintainer-doctor` checks the image carries `nc`
+  and the recipe matches.
+
 ## [0.10.1] — 2026-11-03
 
 ### Fixed
