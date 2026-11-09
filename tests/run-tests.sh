@@ -5809,6 +5809,49 @@ if [ -n "$rt" ] && ( "$rt" image inspect docker.io/library/bash:5 >/dev/null 2>&
     grep -q 'receipt recorded\|observed' <<<"$out" \
         && ok "a mutation that breaks the production file still earns a receipt" \
         || bad "the production mutation was refused: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
+    # Production code, but not the code this pull request changed. The check above
+    # asked only whether the mutation hit production; a mutation of any other
+    # production file proves a test notices a break somewhere in the repository,
+    # and the receipt would then speak for a change nothing here broke. The pull
+    # request below changes scripts/thing.sh and prodcheck2.sh; the test guards
+    # scripts/other.sh, which it did not touch.
+    printf '#!/usr/bin/env bash\nOTHER_GUARD=on\n[ "$OTHER_GUARD" = on ] || exit 1\n' > "$vr/scripts/other.sh"
+    printf '#!/usr/bin/env bash\necho "prodcheck2 ran"\nbash scripts/other.sh\n' > "$vr/prodcheck2.sh"
+    git -C "$vr" add -A; git -C "$vr" commit -qm prod2
+    verify_head_prod2="$(git -C "$vr" rev-parse HEAD)"
+    git -C "$vr" update-ref "refs/pull/44/head" "$verify_head_prod2"
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) printf 'prodcheck2.sh\nscripts/thing.sh\n';;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate7" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          PROD_GLOBS="scripts/*" \
+          bash "$mg" verify 44 "$verify_head_prod2" prodcheck2.sh 's/OTHER_GUARD=on/OTHER_GUARD=off/' shell 2>&1)
+    grep -q 'production code this pull request did not change' <<<"$out" \
+        && ok "a mutation of production code the pull request did not change earns no receipt" \
+        || bad "an unrelated production mutation was accepted: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    grep -q 'receipt recorded' <<<"$out" \
+        && bad "an unrelated production mutation wrote a receipt" \
+        || ok "and no receipt was written for it"
+    grep -q 'scripts/other.sh' <<<"$out" && grep -q 'scripts/thing.sh' <<<"$out" \
+        && ok "the refusal names the file that was mutated and the files the pull request changed" \
+        || bad "the refusal does not name both sides: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-300)"
+    # The same mutation, once the pull request does change that file, still earns
+    # a receipt: the check is an intersection, not a blanket refusal.
+    make_stub gh "case \"\$*\" in
+      *'auth switch'*) exit 0;;
+      *'api user'*) echo testuser;;
+      *files*) printf 'prodcheck2.sh\nscripts/other.sh\n';;
+    esac"
+    out=$(PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/vstate8" MAINTAINER_ACCOUNT=testuser \
+          MAINTAINER_SLUG=o/r MAINTAINER_REPO="$vr" PROFILE_DIR="$root/profiles/sysknife" \
+          PROD_GLOBS="scripts/*" \
+          bash "$mg" verify 44 "$verify_head_prod2" prodcheck2.sh 's/OTHER_GUARD=on/OTHER_GUARD=off/' shell 2>&1)
+    grep -q 'receipt recorded\|observed' <<<"$out" \
+        && ok "the same mutation earns a receipt once the pull request changes that file" \
+        || bad "a mutation of a changed production file was refused: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
     # Restore the stub the cases below expect.
     make_stub gh "case \"\$*\" in
       *'auth switch'*) exit 0;;
@@ -11401,14 +11444,18 @@ sweep_run() {  # sweep_run <path> <meminfo-file> [VAR=val ...]; sets out, rc, an
     out="$(env -u CI HK_LOG="$hk/sc.log" HK_SDLOG="$hk/sd.log" PATH="$p" MAGENT_MEMINFO="$mi" \
         MAGENT_SWEEP_WAIT=0 MAGENT_SWEEP_POLL=1 "$@" bash "$sw" 2>&1)"; rc=$?
 }
+swept_all() {  # the linter ran once per script announced; each call got the severity flag and exactly one file
+    local n; n="$(sed -n 's/^checking \([0-9]*\) scripts$/\1/p' <<<"$out")"
+    [ "${n:-0}" -gt 0 ] && [ "$(wc -l < "$hk/sc.log")" = "$n" ] && [ "$(sort -u "$hk/sc.log")" = "shellcheck 2" ]
+}
 p_plain="$(hk_path plain)"; p_cap="$(hk_path capped systemd-run)"
 sweep_run "$p_plain" "$(meminfo 1000)"
 [ "$rc" = 75 ] && grep -q 'MemAvailable' <<<"$out" && [ ! -s "$hk/sc.log" ] \
     && ok "the sweep refuses to start (75) when too little memory is free, and never starts the linter" \
     || bad "low memory did not stop the sweep (rc=$rc, linter ran: $(wc -l < "$hk/sc.log")): $out"
 sweep_run "$p_plain" "$(meminfo 20000000)"
-[ "$rc" = 0 ] && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
-    && ok "with enough memory free the sweep runs the linter once, over every script" \
+[ "$rc" = 0 ] && swept_all \
+    && ok "with enough memory free the sweep runs the linter once per script, over every script" \
     || bad "the sweep with enough memory (rc=$rc, linter runs: $(wc -l < "$hk/sc.log")): $out"
 printf 'MemTotal: 32000000 kB\n' > "$hk/nomem"
 sweep_run "$p_plain" "$hk/nomem"
@@ -11419,7 +11466,7 @@ sweep_run "$p_cap" "$(meminfo 20000000)"
 # The scope probe logs the same flags (it ends in `true`), so the case reads the
 # line that carries the linter: that is the one proving the linter ran inside it.
 [ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=12G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
-    && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && swept_all \
     && ok "the linter runs inside a memory-capped scope with no swap" \
     || bad "the linter ran uncapped (rc=$rc): $(cat "$hk/sd.log")"
 sweep_run "$p_cap" "$(meminfo 20000000)" MAGENT_SWEEP_MEM_MAX=3G
@@ -11427,15 +11474,15 @@ grep -q 'MemoryMax=3G.* shellcheck ' "$hk/sd.log" \
     && ok "MAGENT_SWEEP_MEM_MAX sets the cap" \
     || bad "the cap ignored MAGENT_SWEEP_MEM_MAX: $(cat "$hk/sd.log")"
 sweep_run "$p_cap" "$(meminfo 20000000)" SC_RC=137
-[ "$rc" != 0 ] && grep -q 'killed' <<<"$out" \
-    && ok "a linter killed by the cap fails the sweep and says so" \
+[ "$rc" = 137 ] && grep -q 'killed' <<<"$out" && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && ok "a linter killed by the cap fails the sweep (137), says so, and stops at the first kill" \
     || bad "a killed linter passed or went unexplained (rc=$rc): $out"
 sweep_run "$p_cap" "$(meminfo 1000)" CI=1
-[ "$rc" = 0 ] && [ ! -s "$hk/sd.log" ] && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+[ "$rc" = 0 ] && [ ! -s "$hk/sd.log" ] && swept_all \
     && ok "under CI the gate and the cap stand down: the runner is its own sandbox" \
     || bad "CI was gated or capped (rc=$rc): $out"
 sweep_run "$p_cap" "$(meminfo 20000000)" SD_FAIL=1
-[ "$rc" = 0 ] && grep -q 'no memory cap' <<<"$out" && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+[ "$rc" = 0 ] && grep -q 'no memory cap' <<<"$out" && swept_all \
     && ok "a host with no user scope runs uncapped and says so" \
     || bad "a failing systemd-run broke or silently uncapped the sweep (rc=$rc): $out"
 

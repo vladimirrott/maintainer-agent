@@ -94,19 +94,34 @@ case_merge_pins_current_head() {
 }
 cz_case "merge success: --match-head-commit names the head GitHub reports, not the receipt's head" case_merge_pins_current_head
 
-# Pins current behaviour. Not in the plan's decision register: no plan decision
-# covers it yet. The head is read with no check of gh's exit status, so a gh
-# that fails there leaves it empty, the staleness check treats an empty head as
-# "moved", and the merge goes ahead with an empty --match-head-commit argument.
+# F9, FIXED here. This case first pinned the old behaviour: the head was read with
+# no check of gh's exit status, a gh that failed there left it empty, and the
+# merge went ahead with an empty --match-head-commit argument, so the one fence
+# that stops a late push from being merged unchecked was gone. The merge now
+# refuses before it reads any other fact. The Rust gate must refuse the same way.
 case_merge_head_read_fails() {
     cz_merge_ready 7
     cz_gh pr-view.headRefOid "" 1
     cz_mm merge 7
-    cz_expect_rc 0
-    cz_expect_stdout_has "head moved $CZ_C0 -> , no production diff; receipt still applies"
-    cz_expect_gh_line "$(cz_argv pr merge 7 --repo o/r --squash --delete-branch --match-head-commit "")"
+    cz_expect_refusal 1 "maintainer-merge: could not read the head commit of #7; refusing to merge without a head to pin it to"
 }
-cz_case "merge: a failed read of the head still merges, with an empty --match-head-commit (pins current behaviour, no plan decision yet)" case_merge_head_read_fails
+cz_case "merge: a failed read of the head refuses, and gh pr merge is never called (F9, fixed)" case_merge_head_read_fails
+
+case_merge_head_read_empty() {
+    cz_merge_ready 7
+    cz_gh pr-view.headRefOid "" 0
+    cz_mm merge 7
+    cz_expect_refusal 1 "maintainer-merge: the head commit of #7 came back as '', which is not a commit id; refusing to merge without a head to pin it to"
+}
+cz_case "merge: an empty head from a successful read refuses (F9, fixed)" case_merge_head_read_empty
+
+case_merge_head_read_garbage() {
+    cz_merge_ready 7
+    cz_gh pr-view.headRefOid "NOT-A-COMMIT" 0
+    cz_mm merge 7
+    cz_expect_refusal 1 "maintainer-merge: the head commit of #7 came back as 'NOT-A-COMMIT', which is not a commit id; refusing to merge without a head to pin it to"
+}
+cz_case "merge: a head that is not a commit id refuses (F9, fixed)" case_merge_head_read_garbage
 
 # --- 2. POST=off ---------------------------------------------------------------
 

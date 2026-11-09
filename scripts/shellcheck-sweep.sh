@@ -104,9 +104,18 @@ if [ -z "${CI:-}" ] && [ -z "${MAGENT_SWEEP_NO_CAP:-}" ]; then
 fi
 if command -v nice >/dev/null 2>&1; then runner+=(nice -n 15); fi
 
-${runner[@]+"${runner[@]}"} shellcheck --severity=warning "${files[@]}"
-rc=$?
-if [ "$rc" -eq 137 ]; then
-    printf 'sweep: shellcheck was killed (rc=137), most likely by the MemoryMax=%s cap. Raise MAGENT_SWEEP_MEM_MAX.\n' "$cap" >&2
-fi
+# One linter process per script. Without -x it analyses each file on its own, so
+# the diagnostics are the same as one run over all of them, but the peak memory
+# is the largest single file (tests/run-tests.sh, 8.7 GB) instead of the sum:
+# one process over 39 scripts grew past the 12 GB cap and was killed.
+rc=0
+for f in "${files[@]}"; do
+    ${runner[@]+"${runner[@]}"} shellcheck --severity=warning "$f"
+    r=$?
+    [ "$r" -gt "$rc" ] && rc=$r
+    if [ "$r" -eq 137 ]; then
+        printf 'sweep: shellcheck was killed (rc=137) on %s, most likely by the MemoryMax=%s cap. Raise MAGENT_SWEEP_MEM_MAX.\n' "$f" "$cap" >&2
+        break
+    fi
+done
 exit "$rc"

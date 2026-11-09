@@ -1510,12 +1510,17 @@ $(tail -3 "$clean_log" | sed 's/^/    /')"
     # test-only pull request has no production path to mutate, and the refusals
     # in pick_suite already decide what a receipt may claim about those.
     if [ "${#PROD_GLOBS[@]}" -gt 0 ]; then
-        local diff_has_prod=0 mutation_hit_prod=0 p
+        local diff_has_prod=0 mutation_hit_prod=0 mutation_hit_changed=0 p q
+        local -a changed_prod=()
         for p in "${path_list[@]}"; do
-            is_production "$p" && { diff_has_prod=1; break; }
+            is_production "$p" && { diff_has_prod=1; changed_prod+=("$p"); }
         done
         for p in "${mutated[@]}"; do
-            is_production "$p" && { mutation_hit_prod=1; break; }
+            is_production "$p" || continue
+            mutation_hit_prod=1
+            for q in ${changed_prod[@]+"${changed_prod[@]}"}; do
+                [ "$p" = "$q" ] && { mutation_hit_changed=1; break; }
+            done
         done
         if [ "$diff_has_prod" = 1 ] && [ "$mutation_hit_prod" = 0 ]; then
             die "the mutation landed only outside production code, so this run says
@@ -1529,6 +1534,24 @@ $(printf '    %s\n' "${mutated[@]}")
   A mutation inside a test proves the test notices its own edit. The receipt is
   a claim about the production code the test is supposed to hold, so break that
   instead and watch '$filter' go red. No receipt written."
+        fi
+        # Production code, but not the code this pull request touched. A mutation
+        # of any other production file proves that a test notices a break
+        # somewhere in the repository, and the receipt would then speak for a
+        # change nothing here broke. Found by an automated review of the commit
+        # that added the check above; the check asked only whether the mutation
+        # hit production, never whether it hit the diff.
+        if [ "$diff_has_prod" = 1 ] && [ "$mutation_hit_changed" = 0 ]; then
+            die "the mutation landed on production code this pull request did not change, so this
+  run says nothing about the change.
+
+  changed by the mutation:
+$(printf '    %s\n' "${mutated[@]}")
+  production files this pull request changed:
+$(printf '    %s\n' ${changed_prod[@]+"${changed_prod[@]}"})
+
+  Break one of the files the pull request changed and watch '$filter' go red.
+  No receipt written."
         fi
     fi
     run_in_container "$mut_log"; local mut_rc=$?
@@ -1730,7 +1753,16 @@ cmd_merge() {
     local receipt="$RECEIPT_PATH"
     receipt_covers "$pr"
     local head state review
-    head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
+    # The head is what `gh pr merge --match-head-commit` is pinned to. A read that
+    # failed left it empty, an empty pin matches nothing to check, and the merge
+    # went ahead with no fence at all: the guard answered when it could not ask.
+    # So an unreadable or malformed head refuses here, before any other fact is
+    # read and before anything is merged.
+    head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)" \
+        || die "could not read the head commit of #$pr; refusing to merge without a head to pin it to"
+    case "$head" in
+        ''|*[!0-9a-f]*) die "the head commit of #$pr came back as '$head', which is not a commit id; refusing to merge without a head to pin it to" ;;
+    esac
     state="$(gh pr view "$pr" --repo "$REPO_SLUG" --json mergeStateStatus --jq .mergeStateStatus)"
     review="$(gh pr view "$pr" --repo "$REPO_SLUG" --json reviewDecision --jq .reviewDecision)"
 
