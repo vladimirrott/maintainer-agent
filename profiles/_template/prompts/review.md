@@ -66,10 +66,22 @@ without a receipt that somebody watched a guard go red at this head.
 
 ```sh
 maintainer-merge verify <pr> <head-sha> "<test filter>" "<sed mutation>"
-maintainer-merge merge  <pr>
+gh pr review <pr> --approve
+maintainer-merge update <pr>     # only when merge says BEHIND
+maintainer-merge merge  <pr>     # once the checks are green again
 ```
 
-If it refuses, report the refusal. Do not work around it.
+The order is verify, approve, update if BEHIND, wait for green, merge.
+
+An approved pull request that is only BEHIND its base is brought up to date with
+`maintainer-merge update <pr>`, never with `gh pr update-branch` or the "Update
+branch" button, and the next run, or this one once the checks are green, merges
+it. `update` refuses a Dependabot pull request (use `maintainer deps rebase`), a
+conflict, a head with no receipt and a fork whose author has not allowed
+maintainer edits (exit 3: say in the report that the author must press Update
+branch), and it never approves.
+
+If a command refuses, report the refusal. Do not work around it.
 
 ## Dependabot pull requests
 
@@ -88,7 +100,8 @@ It prints one block per open Dependabot pull request and ends each with one
 - `rebase`: run `maintainer deps rebase <pr>`. It posts `@dependabot rebase` once
   per head and reads it back. Never `gh pr update-branch`: a commit of ours on
   Dependabot's branch stops it rebasing that pull request for good, and the wall
-  denies the verb.
+  denies the verb. `maintainer-merge update` refuses a Dependabot pull request
+  for the same reason.
 - `wait`: CI is still running, or a rebase is asked for and Dependabot has not
   pushed. One line in the report.
 - `investigate <check>`: read that check's log (`gh run view <run> --log-failed`)

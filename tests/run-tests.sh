@@ -1541,6 +1541,441 @@ ms_case DIRTY   "conflicts"
 ms_case BLOCKED "BLOCKED"
 ms_case UNKNOWN "only CLEAN and HAS_HOOKS"
 ms_case CLEAN   "receipt valid"
+ms_case BEHIND  "maintainer-merge update 9"
+
+echo "== maintainer-merge update brings an approved BEHIND pull request up to date, and nothing else =="
+# The rule (maintainer decision, 2026-11-09): an approved pull request whose only
+# missing step is "Update branch" is updated by the agent. Until then `merge`
+# died on BEHIND, the deny wall denies `gh pr update-branch`, and the pull
+# request waited for a human click the agent was able to make. The command is
+# the GitHub API and nothing else: no checkout, no push, no hook. Every refusal
+# below is a case where the answer is "do not touch the branch", and a fact the
+# command cannot read refuses instead of passing.
+real_git="$(command -v git)"
+ut="$stub_dir/ut"; ut_bin="$ut/bin"
+ut_head="a1b2c3d4e5f60718293a4b5c6d7e8f9012345678"   # what the head becomes after the update
+mkdir -p "$ut_bin"
+cat > "$ut_bin/gh" <<'GHEOF'
+#!/usr/bin/env bash
+# A data-driven gh: every answer is a file under $UT_DIR. Anything it has no
+# file for exits 99, loudly, so a call the code makes that nobody planned for
+# fails the case instead of returning an empty string.
+D="${UT_DIR:?}"
+printf '%s\n' "$*" >> "$D/calls"
+case "$*" in
+  *"auth switch"*) exit 0 ;;
+  *"api user"*) echo "${UT_WHO:-testuser}"; exit 0 ;;
+  *update-branch*)
+      case "$*" in *"-X PUT"*) ;; *) echo "stub: update-branch without -X PUT: $*" >&2; exit 99 ;; esac
+      if [ -f "$D/put-rc" ]; then cat "$D/put-out"; exit "$(cat "$D/put-rc")"; fi
+      : > "$D/put-done"; echo '{"message":"Updating pull request branch."}'; exit 0 ;;
+  *"/reviews"*)
+      if [ -f "$D/reviews-rc" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+      cat "$D/reviews"; exit 0 ;;
+  *"--json files"*) cat "$D/files" 2>/dev/null || echo "docs/a.md"; exit 0 ;;
+  *"pr view"*)
+      if [ -f "$D/put-done" ]; then
+          if [ -f "$D/view-fail-after" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+          n=$(( $(cat "$D/n" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$D/n"
+          f="$D/after.$n"; [ -f "$f" ] || f="$(find "$D" -name 'after.*' | sort -V | tail -1)"
+          cat "$f"
+      else
+          if [ -f "$D/view-fail" ]; then echo "gh: HTTP 502" >&2; exit 1; fi
+          cat "$D/pr.json"
+      fi
+      exit 0 ;;
+  *) echo "stub gh: unplanned call: $*" >&2; exit 99 ;;
+esac
+GHEOF
+cat > "$ut_bin/git" <<GITEOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "\${UT_DIR:?}/git.log"
+exec "$real_git" "\$@"
+GITEOF
+chmod +x "$ut_bin/gh" "$ut_bin/git"
+
+# pr.json: state decision login is_bot cross can_modify head
+ut_pr() {
+    printf '{"headRefOid":"%s","mergeStateStatus":"%s","reviewDecision":"%s","author":{"login":"%s","is_bot":%s},"isCrossRepository":%s,"maintainerCanModify":%s,"state":"OPEN"}\n' \
+        "$7" "$1" "$2" "$3" "$4" "$5" "$6"
+}
+ut_reset() {  # $1 = pr number, $2 = the head the receipt is for and the PR is at
+    local pr="$1" h="${2:-$verified}"
+    rm -rf "$ut/d"; mkdir -p "$ut/d"; export UT_DIR="$ut/d"
+    ut_pr BEHIND APPROVED contrib false false false "$h" > "$ut/d/pr.json"
+    printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$h" > "$ut/d/reviews"
+    ut_pr BLOCKED APPROVED contrib false false false "$ut_head" > "$ut/d/after.1"
+    git -C "$gr" update-ref "refs/pull/$pr/head" "$h"
+    rm -rf "$MAINTAINER_STATE/leases" "$MAINTAINER_STATE/receipts/$pr.json"
+    PATH="$ut_bin:$stub_dir:$PATH" bash "$mg" receipt "$pr" "$h" "mutation proved" >/dev/null 2>&1
+    : > "$ut/d/calls"; : > "$ut/d/git.log"
+}
+ut_run() {  # $1 = pr number; extra env goes in front of the call
+    PATH="$ut_bin:$stub_dir:$PATH" MAINTAINER_UPDATE_READBACK_WAIT=0 \
+        MAINTAINER_UPDATE_READBACK_READS=4 timeout 60 bash "$mg" update "$1" 2>&1
+}
+ut_put_calls() { grep -c 'update-branch' "$ut/d/calls" || true; }
+ut_expect() {  # $1 label, $2 expected rc, $3 grep pattern in the output ('' for none), $4 puts expected
+    local label="$1" want="$2" pat="$3" puts="$4"
+    [ "$rc" = "$want" ] || { bad "$label: exit $rc, wanted $want: $(tr '\n' ' ' <<<"$out" | cut -c1-200)"; return; }
+    if [ -n "$pat" ] && ! grep -qE -- "$pat" <<<"$out"; then
+        bad "$label: output lacks '$pat': $(tr '\n' ' ' <<<"$out" | cut -c1-200)"; return
+    fi
+    [ "$(ut_put_calls)" = "$puts" ] || { bad "$label: $(ut_put_calls) update-branch call(s), wanted $puts"; return; }
+    ok "$label"
+}
+ut_run_rc() { out="$(ut_run "$1")"; rc=$?; }
+
+# --- the happy path, and every fact it must report -------------------------------
+ut_reset 31
+ut_run_rc 31
+ut_expect "an approved BEHIND PR with a receipt and no lease is updated" 0 "new head ${ut_head:0:8}" 1
+grep -qF "expected_head_sha=$verified" "$ut/d/calls" \
+    && ok "the PUT carries expected_head_sha, so a head that moved refuses at GitHub" \
+    || bad "the PUT has no expected_head_sha of the head that was checked: $(cat "$ut/d/calls")"
+grep -qF -- "-X PUT repos/o/r/pulls/31/update-branch" "$ut/d/calls" \
+    && ok "it is the REST update-branch call on this repository's pull request" \
+    || bad "wrong endpoint: $(cat "$ut/d/calls")"
+grep -qiE 'required checks.*re-?run|re-?run' <<<"$out" && grep -qiE 'merge.*refuse.*green|until.*green' <<<"$out" \
+    && ok "it says the required checks must re-run and that merge refuses until they are green" \
+    || bad "the report does not say checks must re-run: $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+grep -qiE 'still APPROVED|approval stands' <<<"$out" \
+    && ok "it prints that reviewDecision is still APPROVED after the update" \
+    || bad "no word on the approval after the update: $(tr '\n' ' ' <<<"$out" | cut -c1-200)"
+grep -q "${verified:0:8}" <<<"$out" && grep -q "${ut_head:0:8}" <<<"$out" \
+    && ok "and it prints the old and the new head, read back from GitHub" \
+    || bad "old/new head not both printed"
+# The shim logs "-C <path> <subcommand> ...", so strip the -C pair first.
+git_subs="$(sed -E 's/^(-C [^ ]+ )?([^ ]+).*/\2/' "$ut/d/git.log" | sort -u)"
+subs="$(tr '\n' ' ' <<<"$git_subs")"
+[ -n "$git_subs" ] || bad "the git shim saw nothing, so the no-write check below is vacuous"
+bad_git="$(grep -xE 'push|checkout|switch|commit|clone|worktree|reset|rebase|pull|merge|cherry-pick|apply|am|add|restore|stash|branch-write' <<<"$git_subs" || true)"
+[ -z "$bad_git" ] && ok "update runs no git that writes or checks out ($subs)" \
+    || bad "update ran git write verbs: $bad_git"
+grep -qE 'pr merge|pr update-branch' "$ut/d/calls" \
+    && bad "update called gh pr merge or gh pr update-branch" \
+    || ok "and it never calls gh pr merge or gh pr update-branch"
+
+# --- 1. mergeStateStatus is exactly BEHIND --------------------------------------
+for st in CLEAN HAS_HOOKS; do
+    ut_reset 32; ut_pr "$st" APPROVED contrib false false false "$verified" > "$ut/d/pr.json"
+    ut_run_rc 32; ut_expect "$st is a no-op success: nothing to update" 0 "nothing to update" 0
+done
+for st in DIRTY BLOCKED UNKNOWN UNSTABLE DRAFT ""; do
+    ut_reset 32; ut_pr "$st" APPROVED contrib false false false "$verified" > "$ut/d/pr.json"
+    ut_run_rc 32
+    ut_expect "mergeStateStatus '$st' refuses and updates nothing" 1 "mergeStateStatus|conflict" 0
+done
+ut_reset 32; ut_pr DIRTY APPROVED contrib false false false "$verified" > "$ut/d/pr.json"
+ut_run_rc 32; ut_expect "DIRTY names the conflicts, which are never resolved by us" 1 "conflicts" 0
+
+# --- 2. Dependabot's pull requests are rebased by Dependabot --------------------
+for who in "app/dependabot" "dependabot[bot]" "Dependabot"; do
+    ut_reset 33; ut_pr BEHIND APPROVED "$who" true false false "$verified" > "$ut/d/pr.json"
+    ut_run_rc 33
+    ut_expect "a $who pull request is refused, naming maintainer deps rebase" 1 "maintainer deps rebase 33" 0
+done
+ut_reset 33; ut_pr BEHIND APPROVED "dependabot[bot]" false false false "$verified" > "$ut/d/pr.json"
+ut_run_rc 33; ut_expect "the bot login is enough even when is_bot is not reported" 1 "maintainer deps rebase 33" 0
+
+# --- 3. this account approved this head, and the overall decision is APPROVED ---
+for d in REVIEW_REQUIRED CHANGES_REQUESTED ""; do
+    ut_reset 34; ut_pr BEHIND "$d" contrib false false false "$verified" > "$ut/d/pr.json"
+    ut_run_rc 34; ut_expect "reviewDecision '$d' is not APPROVED: refused" 1 "reviewDecision" 0
+done
+ut_reset 34
+printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$docs_head" > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "an approval of an older head does not count" 1 "approv" 0
+ut_reset 34
+printf '{"user":{"login":"somebody"},"state":"APPROVED","commit_id":"%s"}\n' "$verified" > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "an approval by another account does not count" 1 "testuser" 0
+ut_reset 34; : > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "no review at all from this account refuses" 1 "approv" 0
+ut_reset 34
+{ printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$verified"
+  printf '{"user":{"login":"testuser"},"state":"CHANGES_REQUESTED","commit_id":"%s"}\n' "$verified"; } > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "this account's latest verdict being CHANGES_REQUESTED refuses" 1 "approv" 0
+ut_reset 34
+{ printf '{"user":{"login":"testuser"},"state":"CHANGES_REQUESTED","commit_id":"%s"}\n' "$verified"
+  printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$verified"; } > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "a later APPROVED over an earlier CHANGES_REQUESTED stands" 0 "new head" 1
+ut_reset 34
+printf '{"user":{"login":"TestUser"},"state":"APPROVED","commit_id":"%s"}\n' "$verified" > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "GitHub logins compare without case" 0 "new head" 1
+ut_reset 34; : > "$ut/d/reviews-rc"; touch "$ut/d/reviews-rc"
+ut_run_rc 34; ut_expect "reviews that cannot be read refuse instead of passing" 1 "review" 0
+ut_reset 34; printf 'this is not json\n' > "$ut/d/reviews"
+ut_run_rc 34; ut_expect "reviews that do not parse refuse instead of passing" 1 "review" 0
+ut_reset 34; printf 'not json at all' > "$ut/d/pr.json"
+ut_run_rc 34; ut_expect "a pull request that does not parse refuses" 1 "from GitHub, so I will not touch its branch" 0
+ut_reset 34; touch "$ut/d/view-fail"
+ut_run_rc 34; ut_expect "a gh that fails on the pull request view refuses" 1 "from GitHub, so I will not touch its branch" 0
+ut_reset 34; ut_pr BEHIND APPROVED contrib false false false "not-a-sha" > "$ut/d/pr.json"
+ut_run_rc 34; ut_expect "a head that is not 40 hex refuses, so expected_head_sha is never a guess" 1 "not a 40-hex" 0
+ut_reset 34
+out="$(UT_WHO=someone-else PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update 34 2>&1)"; rc=$?
+ut_expect "the wrong gh account refuses" 1 "not testuser" 0
+
+# --- 4. a receipt for this head, through the same check merge uses -------------
+ut_reset 35; rm -f "$MAINTAINER_STATE/receipts/35.json"
+ut_run_rc 35; ut_expect "no receipt: refused, since nobody verified this branch" 1 "no verification receipt" 0
+ut_reset 35; sed -i 's/mutation proved/edited by hand/' "$MAINTAINER_STATE/receipts/35.json"
+ut_run_rc 35; ut_expect "a receipt edited after it was signed is refused" 1 "signature" 0
+ut_reset 35
+out="$(MAINTAINER_IN_RUN=x/review PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update 35 2>&1)"; rc=$?
+ut_expect "inside a run an asserted receipt is refused, as merge refuses it" 1 "not 'observed'" 0
+# The receipt was earned at $verified. The pull request now sits at a head whose
+# production code moved: updating a branch whose code nobody verified helps nobody.
+ut_reset 35 "$verified"; ut_pr BEHIND APPROVED contrib false false false "$prod_head" > "$ut/d/pr.json"
+printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$prod_head" > "$ut/d/reviews"
+git -C "$gr" update-ref "refs/pull/35/head" "$prod_head"
+ut_run_rc 35; ut_expect "production code moved since the receipt: refused" 1 "production code changed" 0
+ut_reset 35 "$verified"; ut_pr BEHIND APPROVED contrib false false false "$docs_head" > "$ut/d/pr.json"
+printf '{"user":{"login":"testuser"},"state":"APPROVED","commit_id":"%s"}\n' "$docs_head" > "$ut/d/reviews"
+git -C "$gr" update-ref "refs/pull/35/head" "$docs_head"
+ut_run_rc 35; ut_expect "a docs-only head move keeps the receipt valid, as it does for merge" 0 "receipt still applies" 1
+
+# The receipt must reach every production path the pull request changes. This
+# receipt was written by hand, so it names no suite, and a diff that touches
+# production is then covered by nothing.
+# Only a part-receipt (verify-part) can fall short of the whole diff; a whole
+# receipt is covered by construction. This one names no suite.
+ut_reset 35; printf 'crates/x/src/lib.rs\n' > "$ut/d/files"
+python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("signature", None); d["partial"] = True
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PYEOF2
+bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
+ut_run_rc 35; ut_expect "a part-receipt that does not reach the production paths is refused" 1 "was earned by" 0
+ut_reset 35; printf 'docs/a.md\n' > "$ut/d/files"
+python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("signature", None); d["partial"] = True
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PYEOF2
+bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
+ut_run_rc 35; ut_expect "and a part-receipt that names no suite speaks for nothing, whatever the diff" 1 "names no suite" 0
+# `merge` asks the same question through the same function.
+ut_reset 35; printf 'crates/x/src/lib.rs\n' > "$ut/d/files"
+python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
+import json, sys
+d = json.load(open(sys.argv[1])); d.pop("signature", None); d["partial"] = True
+json.dump(d, open(sys.argv[1], "w"), indent=2)
+PYEOF2
+bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
+out="$(PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" merge 35 2>&1)"; rc=$?
+ut_expect "merge refuses the same part-receipt for the same reason" 1 "was earned by" 0
+
+# --- 5. another actor's lease ----------------------------------------------------
+mkdir_leases() { mkdir -p "$MAINTAINER_STATE/leases"; }
+ut_reset 36; mkdir_leases
+printf '{"holder":"run:o/review","kind":"run","note":"reviewing","acquired":%s,"renewed":%s,"ttl_seconds":3600}\n' \
+    "$(date +%s)" "$(date +%s)" > "$MAINTAINER_STATE/leases/pr-36.json"
+ut_run_rc 36; ut_expect "a live lease held by another actor (lease check exit 1) refuses" 1 "leased" 0
+ut_reset 36; mkdir_leases; printf '{not json' > "$MAINTAINER_STATE/leases/pr-36.json"
+ut_run_rc 36; ut_expect "an unreadable lease (lease check exit 2) refuses, never read as free" 1 "lease" 0
+ut_reset 36; mkdir_leases
+printf '{"holder":"run:o/review","kind":"run","note":"old","acquired":1,"renewed":%s,"ttl_seconds":100}\n' \
+    "$(( $(date +%s) - 5000 ))" > "$MAINTAINER_STATE/leases/pr-36.json"
+ut_run_rc 36; ut_expect "an expired lease does not block" 0 "new head" 1
+rm -rf "$MAINTAINER_STATE/leases"
+
+# --- 6. can GitHub let us push to the head? --------------------------------------
+ut_reset 37; ut_pr BEHIND APPROVED contrib false true false "$verified" > "$ut/d/pr.json"
+ut_run_rc 37
+ut_expect "a fork PR that forbids maintainer edits exits 3, and never tries the API" 3 "the author must press Update branch; they have not allowed maintainer edits" 0
+ut_reset 37; ut_pr BEHIND APPROVED contrib false true true "$verified" > "$ut/d/pr.json"
+ut_run_rc 37; ut_expect "a fork PR that allows maintainer edits is updated" 0 "new head" 1
+ut_reset 37; ut_pr BEHIND APPROVED contrib false false false "$verified" > "$ut/d/pr.json"
+ut_run_rc 37; ut_expect "a same-repo branch needs no maintainerCanModify" 0 "new head" 1
+ut_reset 37; ut_pr BEHIND APPROVED contrib false true null "$verified" > "$ut/d/pr.json"
+ut_run_rc 37; ut_expect "maintainerCanModify null on a fork is not true: exit 3" 3 "the author must press Update branch" 0
+# Runtime refusal by the API itself: the same answer, the same distinct code.
+ut_reset 38
+echo 1 > "$ut/d/put-rc"; printf '%s\n' '{"message":"Validation Failed: user doesn'"'"'t have permission to update head repository"}' 'gh: Validation Failed (HTTP 422)' > "$ut/d/put-out"
+ut_run_rc 38; ut_expect "the API refusing for want of permission on the head repository exits 3" 3 "the author must press Update branch" 1
+ut_reset 38
+echo 1 > "$ut/d/put-rc"; printf '%s\n' '{"message":"Resource not accessible by integration"}' 'gh: Resource not accessible by integration (HTTP 403)' > "$ut/d/put-out"
+ut_run_rc 38; ut_expect "an HTTP 403 from the update call exits 3" 3 "the author must press Update branch" 1
+ut_reset 38
+echo 1 > "$ut/d/put-rc"; printf '%s\n' '{"message":"Validation Failed: expected head sha didn'"'"'t match current head ref."}' 'gh: Validation Failed (HTTP 422)' > "$ut/d/put-out"
+ut_run_rc 38; ut_expect "a head that moved (422 on expected_head_sha) is exit 1, not a permission refusal" 1 "moved after I read it" 1
+ut_reset 38
+echo 1 > "$ut/d/put-rc"; printf '%s\n' 'gh: Server Error (HTTP 500)' > "$ut/d/put-out"
+ut_run_rc 38; ut_expect "any other failure of the update call is exit 1 and says the update did not happen" 1 "HTTP 500" 1
+
+# --- read-back: the PUT's 202 is not the update --------------------------------
+ut_reset 39
+ut_pr BEHIND APPROVED contrib false false false "$verified" > "$ut/d/after.1"
+ut_pr BEHIND APPROVED contrib false false false "$verified" > "$ut/d/after.2"
+ut_run_rc 39; ut_expect "a head that never changes is never reported as updated" 1 "not confirmed|could not confirm|never" 1
+grep -qiE '^ *updated|brought up to date|new head' <<<"$out" \
+    && bad "reported success from the PUT's own answer: $(tr '\n' ' ' <<<"$out" | cut -c1-160)"
+ut_reset 39
+ut_pr CLEAN APPROVED contrib false false false "$verified" > "$ut/d/after.1"
+ut_run_rc 39; ut_expect "a CLEAN state on the OLD head is not an update either: the head must move" 1 "not confirmed" 1
+ut_reset 39
+ut_pr BEHIND APPROVED contrib false false false "$ut_head" > "$ut/d/after.1"
+ut_run_rc 39; ut_expect "a new head that GitHub still calls BEHIND is not success" 1 "BEHIND|not confirmed|could not confirm" 1
+ut_reset 39
+ut_pr UNKNOWN APPROVED contrib false false false "$ut_head" > "$ut/d/after.1"
+ut_run_rc 39; ut_expect "UNKNOWN after the update means not yet, and never settles into success" 1 "UNKNOWN|not confirmed|could not confirm" 1
+ut_reset 39
+ut_pr UNKNOWN APPROVED contrib false false false "$ut_head" > "$ut/d/after.1"
+ut_pr BEHIND APPROVED contrib false false false "$ut_head" > "$ut/d/after.2"
+ut_pr CLEAN APPROVED contrib false false false "$ut_head" > "$ut/d/after.3"
+ut_run_rc 39; ut_expect "the read-back is retried: UNKNOWN, then BEHIND, then CLEAN is success" 0 "new head ${ut_head:0:8}" 1
+[ "$(cat "$ut/d/n")" = 3 ] && ok "it read GitHub three times to get there" || bad "read count $(cat "$ut/d/n"), wanted 3"
+ut_reset 39
+ut_pr "" APPROVED contrib false false false "$ut_head" > "$ut/d/after.1"
+ut_run_rc 39; ut_expect "a new head with an empty merge state is not success either" 1 "not confirmed" 1
+ut_reset 39; touch "$ut/d/view-fail-after"
+ut_run_rc 39; ut_expect "a read-back that cannot be read is unconfirmed, not success" 1 "not confirmed|could not confirm|could not read" 1
+ut_reset 39
+for i in 1 2 3 4 5 6; do ut_pr UNKNOWN APPROVED contrib false false false "$ut_head" > "$ut/d/after.$i"; done
+ut_pr CLEAN APPROVED contrib false false false "$ut_head" > "$ut/d/after.7"
+ut_run_rc 39; ut_expect "the retries are bounded: a seventh read is never made" 1 "not confirmed|could not confirm" 1
+[ "$(cat "$ut/d/n")" = 4 ] && ok "it stopped after MAINTAINER_UPDATE_READBACK_READS reads" || bad "read $(cat "$ut/d/n") times, wanted 4"
+
+# The bound comes from lib/defaults.env when nothing overrides it.
+ut_reset 39
+for i in 1 2 3 4 5 6 7 8; do ut_pr UNKNOWN APPROVED contrib false false false "$ut_head" > "$ut/d/after.$i"; done
+out="$(PATH="$ut_bin:$stub_dir:$PATH" MAINTAINER_UPDATE_READBACK_WAIT=0 timeout 60 bash "$mg" update 39 2>&1)"; rc=$?
+want_reads="$(sed -n 's/^UPDATE_READBACK_READS=//p' "$root/lib/defaults.env")"
+case "$want_reads" in ''|*[!0-9]*) bad "lib/defaults.env has no numeric UPDATE_READBACK_READS ('$want_reads')" ;; esac
+[ "$rc" = 1 ] && [ -n "$want_reads" ] && [ "$(cat "$ut/d/n" 2>/dev/null)" = "$want_reads" ] \
+    && ok "without an override it reads UPDATE_READBACK_READS times from lib/defaults.env, then refuses" \
+    || bad "the default read count is not honoured (rc=$rc, reads $(cat "$ut/d/n"))"
+
+# --- an update can dismiss the approval; say so, and approve nothing ------------
+ut_reset 40
+ut_pr BLOCKED REVIEW_REQUIRED contrib false false false "$ut_head" > "$ut/d/after.1"
+ut_run_rc 40
+ut_expect "a dismissed approval after the update is reported, and the update still counts" 0 "re-?post" 1
+grep -qiE 'three-dot|tree-merge|git diff' <<<"$out" && grep -qiE 'production|workflow' <<<"$out" \
+    && ok "it says the review may be re-posted only if git diff of the verified head shows no production or workflow change" \
+    || bad "no condition on re-posting the review: $(tr '\n' ' ' <<<"$out" | cut -c1-240)"
+grep -qE 'review.*--approve|pr review' "$ut/d/calls" \
+    && bad "update approved on its own" || ok "and it never approves"
+
+# --- POST=off rehearses ---------------------------------------------------------
+ut_reset 41
+out="$(MAINTAINER_POST=off PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update 41 2>&1)"; rc=$?
+ut_expect "POST=off rehearses: every condition holds, and nothing is changed" 0 "POST=off" 0
+grep -q 'update-branch' <<<"$out" && ok "the rehearsal prints what it would do" || bad "the rehearsal says nothing of the call"
+ut_reset 41; ut_pr DIRTY APPROVED contrib false false false "$verified" > "$ut/d/pr.json"
+out="$(MAINTAINER_POST=off PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update 41 2>&1)"; rc=$?
+ut_expect "a rehearsal still refuses what a live run would refuse" 1 "conflicts" 0
+
+# --- the argument, the dispatcher and the pointer from merge ---------------------
+for badpr in "1;rm -rf x" "../x" "x" ""; do
+    out="$(PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update "$badpr" 2>&1)"; rc=$?
+    if [ -z "$badpr" ]; then
+        [ "$rc" != 0 ] && ok "update rejects an empty pull request argument" || bad "update ran with no pull request"
+    elif [ "$rc" != 0 ] && grep -q 'must be a positive integer' <<<"$out"; then
+        ok "update rejects the pull request argument '$badpr'"
+    else bad "update did not reject '$badpr' by name (rc=$rc): $(tr '\n' ' ' <<<"$out" | cut -c1-100)"; fi
+done
+out="$(PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" 2>&1)"; rc=$?
+grep -q 'update <pr>' <<<"$out" && [ "$rc" = 64 ] \
+    && ok "the usage line lists update" || bad "usage does not list update (rc=$rc)"
+rm -rf "$ut" "$MAINTAINER_STATE/receipts/3"[1-9].json "$MAINTAINER_STATE/receipts/4"[01].json
+ut_reset 42
+out="$(PROD_GLOBS="" PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" merge 42 2>&1)"; rc=$?
+ut_expect "and merge refuses the same way (the check is shared)" 1 "PROD_GLOBS" 0
+out="$(PROD_GLOBS="" PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" update 42 2>&1)"; rc=$?
+ut_expect "a profile that declares no PROD_GLOBS gets no update, as it gets no merge" 1 "PROD_GLOBS" 0
+rm -rf "$ut" "$MAINTAINER_STATE/receipts/42.json" "$MAINTAINER_STATE/leases"
+# Later sections count on `refs/pull/31/head` not existing ("cannot fetch #31"),
+# so leave the scratch repository as this section found it.
+for n in 31 32 33 34 35 36 37 38 39 40 41 42; do git -C "$gr" update-ref -d "refs/pull/$n/head" 2>/dev/null; done
+unset UT_DIR
+
+echo "== the deny wall lets maintainer-merge update through and keeps every raw spelling of update-branch out =="
+# `update` is the only path to an Update branch. The wall must therefore match
+# nothing the wrapper is called with, and must still match the raw verb in every
+# flag order, because a deny rule keyed to `gh api -X PUT` alone is walked past
+# by `gh api <path> -X PUT`. Rule COUNTS are machine-dependent (they follow where
+# `which` finds binaries), so this pins verbs and decisions, never a total.
+wallchk() {  # $1 = settings json -> prints one verdict line per probe
+    python3 - "$1" <<'PYEOF2'
+import json, re, sys
+rules = json.load(open(sys.argv[1]))["permissions"]["deny"]
+def hit(cmd):
+    for r in rules:
+        m = re.fullmatch(r"Bash\((.*)\)", r)
+        if not m:
+            continue
+        body = m.group(1)
+        prefix = body.endswith(":*")
+        pat = re.escape(body[:-2] if prefix else body).replace(r"\*", ".*")
+        if (re.match(pat, cmd) if prefix else re.fullmatch(pat, cmd)):
+            return True
+    return False
+for tag, want, cmd in (
+    ("allow", False, "maintainer-merge update 31"),
+    ("allow", False, "/home/fakeuser/.local/bin/maintainer-merge update 31"),
+    ("allow", False, "~/.local/bin/maintainer-merge update 31"),
+    ("allow", False, "./bin/maintainer-merge update 31"),
+    ("deny", True, "gh pr update-branch 31"),
+    ("deny", True, "/usr/bin/gh pr update-branch 31"),
+    ("deny", True, "gh api -X PUT repos/o/r/pulls/31/update-branch -f expected_head_sha=abc"),
+    ("deny", True, "gh api --method PUT repos/o/r/pulls/31/update-branch"),
+    ("deny", True, "gh api repos/o/r/pulls/31/update-branch -X PUT"),
+    ("deny", True, "gh api repos/o/r/pulls/31/update-branch --method PUT -f x=y"),
+    ("deny", True, "maintainer-merge receipt 31 abc proof"),
+):
+    print(("ok " if hit(cmd) == want else "BAD ") + f"{tag} {cmd}")
+PYEOF2
+}
+for wp in _template magent sysknife; do
+    wd="$stub_dir/updwall-$wp"; rm -rf "$wd"; mkdir -p "$wd"; cp "$root/profiles/$wp/deny.json" "$wd/"
+    python3 "$root/scripts/render-settings.py" "$wd" /home/fakeuser >/dev/null 2>&1 \
+        && ok "$wp: the deny wall renders" || bad "$wp: render-settings failed on its deny.json"
+    verdicts="$(wallchk "$wd/settings.json")"
+    badv="$(grep '^BAD ' <<<"$verdicts" || true)"
+    [ -z "$badv" ] && [ "$(grep -c '^ok ' <<<"$verdicts")" = 11 ] \
+        && ok "$wp: update is matched by no deny rule, and every raw update-branch spelling is denied (11 probes)" \
+        || bad "$wp: wall verdicts wrong: $(tr '\n' ';' <<<"${badv:-$verdicts}")"
+    python3 - "$wd/settings.json" "$wd/settings-rehearsal.json" <<'PYEOF2' && ok "$wp: a rehearsal denies maintainer-merge update, the live wall does not" || bad "$wp: the rehearsal wall does not deny maintainer-merge update"
+import json, sys
+live = set(json.load(open(sys.argv[1]))["permissions"]["deny"])
+reh = set(json.load(open(sys.argv[2]))["permissions"]["deny"])
+want = "Bash(maintainer-merge update:*)"
+sys.exit(0 if want in reh and want not in live else 1)
+PYEOF2
+    rm -rf "$wd"
+done
+
+for wp in _template magent sysknife; do
+    python3 - "$root/profiles/$wp/opencode.json" <<'PYEOF2' && ok "$wp: opencode allows maintainer-merge update and denies both raw update-branch spellings" || bad "$wp: opencode.json decides update-branch wrongly"
+import fnmatch, json, sys
+b = json.load(open(sys.argv[1]))["permission"]["bash"]
+def decide(c):
+    v = b.get("*", "deny")
+    for pat, val in b.items():
+        if pat != "*" and fnmatch.fnmatch(c, pat): v = val
+    return v
+want = {"maintainer-merge update 5": "allow",
+        "gh pr update-branch 5": "deny",
+        "gh api repos/o/r/pulls/5/update-branch -X PUT": "deny",
+        "gh api -X PUT repos/o/r/pulls/5/update-branch": "deny"}
+bad = {c: decide(c) for c, w in want.items() if decide(c) != w}
+sys.exit(1 if bad else 0)
+PYEOF2
+done
+
+echo "== the review prompts send an approved BEHIND pull request to maintainer-merge update =="
+for wp in _template magent sysknife; do
+    f="$root/profiles/$wp/prompts/review.md"
+    grep -q 'maintainer-merge update <pr>' "$f" && grep -q 'Never `gh pr update-branch`' "$f" \
+        && ok "$wp: the prompt names maintainer-merge update and still forbids the raw gh pr update-branch" \
+        || bad "$wp: review.md lost the update instruction or the raw-command prohibition"
+    grep -qi 'verify, approve, update if BEHIND, wait for green, merge' "$f" \
+        && ok "$wp: the prompt states the order verify, approve, update if BEHIND, wait for green, merge" \
+        || bad "$wp: review.md does not state the order of the merge steps"
+done
 
 echo "== the doctrine reaches a run, not just a reader =="
 # Assembled, not inspected. The doctrine lives in lib/preamble-core.md and the
@@ -1750,7 +2185,7 @@ src = (root / "bin/maintainer").read_text()
 table = [ln.split() for ln in os.environ["CLI_TABLE"].splitlines()]
 internal = {v for v, i in table if i == "1"}
 cmds = {v for v, _ in table}
-for f, pat in (("bin/maintainer-merge", r'^\s+(receipt|verify|merge|show)\)'),
+for f, pat in (("bin/maintainer-merge", r'^\s+(receipt|verify|merge|update|show)\)'),
                ("bin/maintainer-repo", r'^\s+(prune|release-check)\)')):
     tool = f.split("/")[-1]
     for m in re.findall(pat, (root / f).read_text(), re.M):
@@ -1902,7 +2337,7 @@ done
 
 echo "== opencode: default-deny closes the spelling hole a denylist cannot =="
 oc="$root/profiles/sysknife/opencode.json"
-python3 - "$oc" <<'PYEOF' && ok "opencode config decides all 14 probe commands correctly" || bad "opencode permission config lets something through"
+python3 - "$oc" <<'PYEOF' && ok "opencode config decides all 17 probe commands correctly" || bad "opencode permission config lets something through"
 import json, fnmatch, collections, sys
 b = json.load(open(sys.argv[1]), object_pairs_hook=collections.OrderedDict)["permission"]["bash"]
 def decide(c):
@@ -1912,8 +2347,10 @@ def decide(c):
     return v
 must_deny = ["cargo publish", "cd /x && cargo publish", "/usr/bin/cargo publish",
              "git push origin main", "/usr/bin/git push origin main", "gh pr merge 1",
-             "curl http://x", "cat ~/.ssh/id_ed25519", "maintainer-merge receipt 1 a b"]
+             "curl http://x", "cat ~/.ssh/id_ed25519", "maintainer-merge receipt 1 a b",
+             "gh pr update-branch 5", "gh api repos/o/r/pulls/5/update-branch -X PUT"]
 must_allow = ["git status", "cargo test -p x", "maintainer-merge verify 1 a b c",
+              "maintainer-merge update 5",
               "gh pr review 1 --approve", "podman run --rm x"]
 bad = [c for c in must_deny if decide(c) != "deny"] + [c for c in must_allow if decide(c) != "allow"]
 if bad: print("  wrong verdicts:", bad); sys.exit(1)

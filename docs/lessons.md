@@ -3530,3 +3530,40 @@ a test from the review's own input, and a mutant.
 and only versions and digests move. Every arm now states that as a comparison
 between the removed and the added side, not as a grammar for one line.
 
+## 120. Approved pull requests waited for a click the agent could make
+
+On 2026-11-09 the maintainer found an approved pull request whose only missing
+step was "Update branch". `maintainer-merge merge` had refused it correctly,
+because a `BEHIND` branch's green checks describe a tree that is not the one
+being merged, and its message ended at "Update the branch and let it re-run".
+The agent could not do that: the deny wall denies `gh pr update-branch`, for a
+reason that holds for Dependabot's branches (a commit of ours stops Dependabot
+rebasing them for good) and for a contributor's (a push the doctrine forbids).
+So the refusal named a step, the wall forbade the agent that step, and the pull
+request sat until a person pressed a button.
+
+Both halves were right. The defect was that no path existed between them: the
+gate said what was missing, and nothing the agent was allowed to run supplied
+it. A refusal that names a step the refused party may not take is a queue for a
+human, and nobody had written that queue down as a decision.
+
+The maintainer decided it: when a pull request is approved and Update branch is
+the only thing missing, the agent does it. `maintainer-merge update <pr>` is that
+path, and it exists as a command and not as a loosened wall because the
+conditions are the point. It acts only on `BEHIND` (never `DIRTY`, `UNKNOWN` or
+`BLOCKED`), never on Dependabot's, only with this account's approval of the
+current head, a receipt checked by the same functions `merge` uses, no other
+actor's lease and a head GitHub lets us update. It pins `expected_head_sha`,
+never runs git, and reports success only from a read of the new head. GitHub
+answers 202 before the head moves and computes the merge state afterwards, so a
+`202` and a first read of `UNKNOWN` are both "not yet", and running out of reads
+is a refusal to say it worked. A fork whose author has not allowed maintainer
+edits exits 3 and tells the author what to press.
+
+**Guard:** `tests/run-tests.sh` drives the command against a stub `gh` and a real
+git repository, with a case for each condition, the exit-3 paths, the read-back
+and `POST=off`, and a mutant for each guard. The wall test renders every
+profile's deny wall and asserts that `gh pr update-branch` and any flag order of
+`gh api ... update-branch` are denied while `maintainer-merge update` matches no
+deny rule. **For the class:** when a gate's refusal names a step, check that
+some path lets the refused party take it, or write down that a human does.

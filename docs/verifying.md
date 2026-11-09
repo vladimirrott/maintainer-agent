@@ -68,3 +68,20 @@ tests ran gets no receipt, because a filter that matches nothing passes.
 
 A profile with no `verify.d/` gets no merge. Copy
 `profiles/_template/verify.d/shell.sh` and change the five required functions.
+
+## After the receipt: bringing a BEHIND branch up to date
+
+`merge` refuses a pull request that is `BEHIND` its base, because its checks
+describe a tree that is not the one being merged. When the pull request is
+approved and that is the only thing missing, the agent runs
+`maintainer-merge update <pr>`. The order is: verify, approve, update if BEHIND,
+wait for green, merge.
+
+`update` applies the same receipt checks `merge` does (signature, the pull
+request the receipt names, its kind, coverage of the production paths, and the
+tree-merge comparison that lets GitHub's own merge commit pass), so a branch
+nobody verified is not updated. It asks GitHub to update the branch pinned to the
+head it checked, then reads the pull request back until the head has moved and the
+state is neither `BEHIND` nor `UNKNOWN`. The update starts the required checks
+again; `merge` refuses until they pass. A fork whose author has not allowed
+maintainer edits exits 3, and the author presses the button.

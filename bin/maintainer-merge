@@ -6,6 +6,7 @@
 #   maintainer-merge verify-part <pr> <head-sha> <test-filter> <sed-mutation> <suite>
 #   maintainer-merge receipt     <pr> <head-sha> <what-was-proved>
 #   maintainer-merge merge       <pr>
+#   maintainer-merge update      <pr>
 #   maintainer-merge show        [pr]
 #
 # The point is not to merge. The point is that a merge is impossible unless
@@ -217,6 +218,169 @@ identity() {
     # same account, and no two accounts differ only in case, so this refuses
     # exactly the accounts it refused before and no longer refuses the right one.
     [ "${who,,}" = "${ACCOUNT,,}" ] || die "gh is authenticated as '${who:-unknown}', not $ACCOUNT"
+}
+
+# The receipt checks, as three functions so that `merge` and `update` ask the
+# same questions in the same words. A second copy of a security check is a copy
+# that goes stale (see receipt_signature_ok), and `update` has to decide whether
+# a branch is worth bringing up to date by the rule `merge` will apply to it
+# afterwards. Each one dies on a refusal; none of them prints a success line
+# except the ones `merge` always printed.
+#
+# A profile that declares no production paths gets no merge and no update: with
+# nothing to compare, "production code did not move" is not an answer.
+require_prod_globs() {
+    [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
+  whether production code moved since the receipt. Set it in profile.env, for example:
+    PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
+}
+
+# Is there a signed receipt for #$1, earned for #$1, of a kind this caller may
+# spend? Sets RECEIPT_PATH and RECEIPT_HEAD for the other two.
+receipt_check() {  # $1 = pr
+    local pr="$1"
+    local receipt="$RECEIPTS/$pr.json"
+    [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
+    # Recompute the signature over the payload with the signature removed. An
+    # unsigned or hand-edited receipt is refused here, which is the whole point.
+    local sig_rc=0
+    receipt_signature_ok "$receipt" || sig_rc=$?
+    case "$sig_rc" in
+        1) die "receipt for #$pr is not readable JSON" ;;
+        2) die "the receipt for #$pr carries no signature, so it was not written by
+  \`maintainer-merge verify\`. A receipt that anything can write proves nothing.
+  Run: maintainer-merge verify $pr <head> <test> <mutation>" ;;
+        3) die "the receipt for #$pr does not match its signature: it was edited
+  after it was written, or written by something other than the gate." ;;
+    esac
+    local verified_head kind receipt_pr
+    verified_head="$(receipt_field "$receipt" head '')"
+    kind="$(receipt_field "$receipt" kind '')"
+    receipt_pr="$(receipt_field "$receipt" pr '')"
+    # The signature covers the receipt's bytes, and the bytes name the pull
+    # request it was earned for. Nothing covers the FILENAME. Selecting the
+    # receipt by name and never reading its `pr` back meant `cp 1.json 2.json`
+    # produced a receipt that verifies perfectly and proves a guard bites on a
+    # different pull request. The head check does not save you: two docs pull
+    # requests touch no PROD_GLOBS, so the "head moved, no production diff"
+    # branch waves the copy through.
+    #
+    # Found by the magent review of 2026-09-04 and rated BLOCKING.
+    if [ "$receipt_pr" != "$pr" ]; then
+        die "the receipt at $receipt was earned for #${receipt_pr:-<none>}, not #$pr.
+  It carries a valid signature because the signature covers the receipt's
+  bytes and those bytes are unchanged; the filename is not signed. Run
+  \`maintainer-merge verify $pr <head> <test> <mutation>\` and earn one for
+  this pull request."
+    fi
+    # The layer that is not evadable. An asserted receipt is a human's claim
+    # that a guard bites; nothing checked it. A human may merge on one. An
+    # unattended run may not, whatever it managed to write.
+    # `dependency` sits beside `observed` because the gate performed its checks
+    # itself: the classifier read every changed line and every action pin was
+    # compared against GitHub. `asserted` is the one an unattended run may not
+    # spend, because nothing checked it.
+    case "$kind" in
+        observed|dependency) ;;
+        *) if [ -n "${MAINTAINER_IN_RUN:-}" ]; then
+               die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
+  only on a receipt \`maintainer-merge verify\` produced by watching the
+  mutation fail, or \`verify-deps\` for a pure dependency bump."
+           fi ;;
+    esac
+    case "$kind" in
+        observed) ;;
+        dependency) say "the receipt is a DEPENDENCY receipt: nothing but dependency metadata
+     changed, and every action pin was checked against its tag" ;;
+        *) say "the receipt is ASSERTED, not observed: it records a claim a
+     human made, and nothing here checked it" ;;
+    esac
+    RECEIPT_PATH="$receipt"; RECEIPT_HEAD="$verified_head"
+}
+
+# Does what the receipt was earned by reach every production path of #$1?
+receipt_covers() {  # $1 = pr; reads RECEIPT_PATH and RECEIPT_HEAD
+    local pr="$1" receipt="$RECEIPT_PATH" verified_head="$RECEIPT_HEAD"
+    # Does what the receipt was earned by reach every production path being
+    # merged? Until sysknife#429 nothing asked here, because cmd_verify refused
+    # to write a receipt at all unless one suite covered everything, so the
+    # answer was yes by construction. Proving the union in parts removes that
+    # guarantee, so the question moves to where the receipt is spent.
+    #
+    # A single-suite receipt, and every receipt written before this existed,
+    # passes exactly as it did: receipt_suites reads one name out of `suite`
+    # when there are no `proofs`, and one suite covering everything is a union
+    # of one.
+    local rec_paths rec_suites rec_partial=
+    case "$(receipt_field "$receipt" partial false)" in True|true) ;; *) rec_partial=0 ;; esac
+    if [ "${rec_partial:-1}" = 1 ]; then
+    rec_paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')" \
+        || die "#$pr: I could not read the changed files, so I cannot tell whether the
+  receipt covers them. Refusing rather than merging on a question I did not ask."
+    [ -n "$rec_paths" ] || die "#$pr: the changed file list came back empty, which is not an answer."
+    rec_suites="$(receipt_suites "$receipt")"
+    local -a rec_path_list; mapfile -t rec_path_list <<< "$rec_paths"
+    suites_cover_production "$rec_suites" "${rec_path_list[@]}" \
+        || die "the receipt for #$pr was earned by: ${rec_suites:-<none>}
+  Those suites do not run all of the production code this merge would land, so
+  the receipt proves less than the merge claims. Prove the rest:
+    maintainer-merge verify-part $pr $verified_head <test> <mutation> <suite>"
+    fi
+}
+
+# Has production code moved between the verified head and head $2 of #$1? The
+# tree-merge comparison that survives GitHub's own "Update branch" lives here.
+receipt_fresh() {  # $1 = pr, $2 = the head being acted on; reads RECEIPT_HEAD
+    local pr="$1" head="$2" verified_head="$RECEIPT_HEAD"
+    # The condition that carries the weight. A rebase may move tests, docs and
+    # the evidence artifact; if it moved production code, the receipt describes
+    # a tree that no longer exists.
+    git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:mm-$pr" --force || die "cannot fetch #$pr"
+    if [ "$head" != "$verified_head" ]; then
+        local diff merged base how
+        # `git diff verified_head..mm-$pr` is the two-dot trap. The range holds
+        # everything MAIN gained since the receipt as well, so GitHub's "Update
+        # branch" — which sysknife's branch protection REQUIRES before a merge —
+        # made every receipt look stale and named main's own merged commits as
+        # the pull request changing. The way around it was `gh pr merge --admin`,
+        # which spends no receipt at all: a gate invalidated by a mandatory step
+        # is a gate people stop using.
+        #
+        # The receipt is a claim about the pull request's contribution, so
+        # compare that: merge the verified head with the main commit this branch
+        # actually contains, and diff the result against the tree being merged.
+        # Equal means the author changed nothing since the receipt, including
+        # inside a conflict resolution, which comparing commit lists would miss.
+        git -C "$REPO_PATH" fetch -q origin main 2>/dev/null || true
+        base="$(git -C "$REPO_PATH" merge-base "mm-$pr" origin/main 2>/dev/null)"
+        # Only when the verified head is the pull request's own work. If main
+        # already contains it, this is not a branch update and the merge below
+        # would fold the later commits in as "main's", which is how a real push
+        # would slip through.
+        if [ -n "$base" ] \
+           && ! git -C "$REPO_PATH" merge-base --is-ancestor "$verified_head" "$base" 2>/dev/null \
+           && merged="$(git -C "$REPO_PATH" merge-tree --write-tree \
+                "$base" "$verified_head" 2>/dev/null)"; then
+            how="the tree is the clean merge of the verified head with main"
+            diff="$(git -C "$REPO_PATH" diff --name-only "$merged" "mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        else
+            # merge-tree exits non-zero on a conflict, and a conflict resolution
+            # is a human edit this receipt never saw. Same for a git too old to
+            # have --write-tree. Fall back to the strict range: refusing a
+            # receipt that might still hold costs a re-verify, and the other
+            # error costs a merge nobody proved.
+            how="no production diff"
+            diff="$(git -C "$REPO_PATH" diff --name-only "${verified_head}..mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
+        fi
+        if [ -n "$diff" ]; then
+            git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
+            die "production code changed since the verified head $verified_head:
+$(printf '%s' "$diff" | sed 's/^/    /')
+  The receipt no longer describes this tree. Re-verify and record a new one."
+        fi
+        say "head moved $verified_head -> ${head:0:8}, $how; receipt still applies"
+    fi
+    git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
 }
 
 # `receipt` records a claim. `verify` produces one by running the mutation and
@@ -1549,9 +1713,7 @@ cmd_merge() {
     local pr="${1:?pr}"
     pr="$(pr_or_die "$pr")" || exit 1
     lease_gate "$pr" merge
-    [ "${#PROD_GLOBS[@]}" -gt 0 ] || die "this profile declares no PROD_GLOBS, so nothing can say
-  whether production code moved since the receipt. Set it in profile.env, for example:
-    PROD_GLOBS=\"bin/* lib/* scripts/* .github/*\""
+    require_prod_globs
     identity
 
     # One merge per pull request, enforced rather than remembered. On
@@ -1564,89 +1726,9 @@ cmd_merge() {
   One watcher per action. If you are sure nothing else is merging, remove
   $RECEIPTS/.merge-$pr.lock and try again."
 
-    local receipt="$RECEIPTS/$pr.json"
-    [ -f "$receipt" ] || die "no verification receipt for #$pr. Prove the guard bites, then: maintainer-merge receipt $pr <sha> '<proof>'"
-    # Recompute the signature over the payload with the signature removed. An
-    # unsigned or hand-edited receipt is refused here, which is the whole point.
-    local sig_rc=0
-    receipt_signature_ok "$receipt" || sig_rc=$?
-    case "$sig_rc" in
-        1) die "receipt for #$pr is not readable JSON" ;;
-        2) die "the receipt for #$pr carries no signature, so it was not written by
-  \`maintainer-merge verify\`. A receipt that anything can write proves nothing.
-  Run: maintainer-merge verify $pr <head> <test> <mutation>" ;;
-        3) die "the receipt for #$pr does not match its signature: it was edited
-  after it was written, or written by something other than the gate." ;;
-    esac
-    local verified_head kind receipt_pr
-    verified_head="$(receipt_field "$receipt" head '')"
-    kind="$(receipt_field "$receipt" kind '')"
-    receipt_pr="$(receipt_field "$receipt" pr '')"
-    # The signature covers the receipt's bytes, and the bytes name the pull
-    # request it was earned for. Nothing covers the FILENAME. Selecting the
-    # receipt by name and never reading its `pr` back meant `cp 1.json 2.json`
-    # produced a receipt that verifies perfectly and proves a guard bites on a
-    # different pull request. The head check does not save you: two docs pull
-    # requests touch no PROD_GLOBS, so the "head moved, no production diff"
-    # branch waves the copy through.
-    #
-    # Found by the magent review of 2026-09-04 and rated BLOCKING.
-    if [ "$receipt_pr" != "$pr" ]; then
-        die "the receipt at $receipt was earned for #${receipt_pr:-<none>}, not #$pr.
-  It carries a valid signature because the signature covers the receipt's
-  bytes and those bytes are unchanged; the filename is not signed. Run
-  \`maintainer-merge verify $pr <head> <test> <mutation>\` and earn one for
-  this pull request."
-    fi
-    # The layer that is not evadable. An asserted receipt is a human's claim
-    # that a guard bites; nothing checked it. A human may merge on one. An
-    # unattended run may not, whatever it managed to write.
-    # `dependency` sits beside `observed` because the gate performed its checks
-    # itself: the classifier read every changed line and every action pin was
-    # compared against GitHub. `asserted` is the one an unattended run may not
-    # spend, because nothing checked it.
-    case "$kind" in
-        observed|dependency) ;;
-        *) if [ -n "${MAINTAINER_IN_RUN:-}" ]; then
-               die "the receipt for #$pr is '$kind', not 'observed'. An unattended run merges
-  only on a receipt \`maintainer-merge verify\` produced by watching the
-  mutation fail, or \`verify-deps\` for a pure dependency bump."
-           fi ;;
-    esac
-    case "$kind" in
-        observed) ;;
-        dependency) say "the receipt is a DEPENDENCY receipt: nothing but dependency metadata
-     changed, and every action pin was checked against its tag" ;;
-        *) say "the receipt is ASSERTED, not observed: it records a claim a
-     human made, and nothing here checked it" ;;
-    esac
-
-    # Does what the receipt was earned by reach every production path being
-    # merged? Until sysknife#429 nothing asked here, because cmd_verify refused
-    # to write a receipt at all unless one suite covered everything, so the
-    # answer was yes by construction. Proving the union in parts removes that
-    # guarantee, so the question moves to where the receipt is spent.
-    #
-    # A single-suite receipt, and every receipt written before this existed,
-    # passes exactly as it did: receipt_suites reads one name out of `suite`
-    # when there are no `proofs`, and one suite covering everything is a union
-    # of one.
-    local rec_paths rec_suites rec_partial=
-    case "$(receipt_field "$receipt" partial false)" in True|true) ;; *) rec_partial=0 ;; esac
-    if [ "${rec_partial:-1}" = 1 ]; then
-    rec_paths="$(gh pr view "$pr" --repo "$REPO_SLUG" --json files --jq '.files[].path')" \
-        || die "#$pr: I could not read the changed files, so I cannot tell whether the
-  receipt covers them. Refusing rather than merging on a question I did not ask."
-    [ -n "$rec_paths" ] || die "#$pr: the changed file list came back empty, which is not an answer."
-    rec_suites="$(receipt_suites "$receipt")"
-    local -a rec_path_list; mapfile -t rec_path_list <<< "$rec_paths"
-    suites_cover_production "$rec_suites" "${rec_path_list[@]}" \
-        || die "the receipt for #$pr was earned by: ${rec_suites:-<none>}
-  Those suites do not run all of the production code this merge would land, so
-  the receipt proves less than the merge claims. Prove the rest:
-    maintainer-merge verify-part $pr $verified_head <test> <mutation> <suite>"
-    fi
-
+    receipt_check "$pr"
+    local receipt="$RECEIPT_PATH"
+    receipt_covers "$pr"
     local head state review
     head="$(gh pr view "$pr" --repo "$REPO_SLUG" --json headRefOid --jq .headRefOid)"
     state="$(gh pr view "$pr" --repo "$REPO_SLUG" --json mergeStateStatus --jq .mergeStateStatus)"
@@ -1856,7 +1938,7 @@ cmd_merge() {
     # conflict, BLOCKED means a required review or check is missing.
     case "$state" in
         CLEAN|HAS_HOOKS) ;;
-        BEHIND)  die "#$pr is BEHIND its base; its checks describe a different tree. Update the branch and let it re-run." ;;
+        BEHIND)  die "#$pr is BEHIND its base; its checks describe a different tree. Update the branch and let it re-run. When it is approved and only that is missing: maintainer-merge update $pr" ;;
         DIRTY)   die "#$pr has conflicts (mergeStateStatus DIRTY)" ;;
         BLOCKED) die "#$pr is BLOCKED: a required review or check is missing" ;;
         *)       die "#$pr mergeStateStatus is '$state'; only CLEAN and HAS_HOOKS may merge" ;;
@@ -1893,55 +1975,7 @@ $(printf '%s' "$checks" | head -c 300)"
     [ $((pass_n + skip_n)) = "$total" ] || die "#$pr: $((pass_n + skip_n)) of $total checks are pass or skipping; the rest are in a bucket this gate does not accept"
     [ "$pass_n" -gt 0 ] || die "#$pr: all $total checks were skipped, so nothing ran"
 
-    # The condition that carries the weight. A rebase may move tests, docs and
-    # the evidence artifact; if it moved production code, the receipt describes
-    # a tree that no longer exists.
-    git -C "$REPO_PATH" fetch -q origin "refs/pull/$pr/head:mm-$pr" --force || die "cannot fetch #$pr"
-    if [ "$head" != "$verified_head" ]; then
-        local diff merged base how
-        # `git diff verified_head..mm-$pr` is the two-dot trap. The range holds
-        # everything MAIN gained since the receipt as well, so GitHub's "Update
-        # branch" — which sysknife's branch protection REQUIRES before a merge —
-        # made every receipt look stale and named main's own merged commits as
-        # the pull request changing. The way around it was `gh pr merge --admin`,
-        # which spends no receipt at all: a gate invalidated by a mandatory step
-        # is a gate people stop using.
-        #
-        # The receipt is a claim about the pull request's contribution, so
-        # compare that: merge the verified head with the main commit this branch
-        # actually contains, and diff the result against the tree being merged.
-        # Equal means the author changed nothing since the receipt, including
-        # inside a conflict resolution, which comparing commit lists would miss.
-        git -C "$REPO_PATH" fetch -q origin main 2>/dev/null || true
-        base="$(git -C "$REPO_PATH" merge-base "mm-$pr" origin/main 2>/dev/null)"
-        # Only when the verified head is the pull request's own work. If main
-        # already contains it, this is not a branch update and the merge below
-        # would fold the later commits in as "main's", which is how a real push
-        # would slip through.
-        if [ -n "$base" ] \
-           && ! git -C "$REPO_PATH" merge-base --is-ancestor "$verified_head" "$base" 2>/dev/null \
-           && merged="$(git -C "$REPO_PATH" merge-tree --write-tree \
-                "$base" "$verified_head" 2>/dev/null)"; then
-            how="the tree is the clean merge of the verified head with main"
-            diff="$(git -C "$REPO_PATH" diff --name-only "$merged" "mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
-        else
-            # merge-tree exits non-zero on a conflict, and a conflict resolution
-            # is a human edit this receipt never saw. Same for a git too old to
-            # have --write-tree. Fall back to the strict range: refusing a
-            # receipt that might still hold costs a re-verify, and the other
-            # error costs a merge nobody proved.
-            how="no production diff"
-            diff="$(git -C "$REPO_PATH" diff --name-only "${verified_head}..mm-$pr" -- "${PROD_GLOBS[@]}" 2>/dev/null)"
-        fi
-        if [ -n "$diff" ]; then
-            git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
-            die "production code changed since the verified head $verified_head:
-$(printf '%s' "$diff" | sed 's/^/    /')
-  The receipt no longer describes this tree. Re-verify and record a new one."
-        fi
-        say "head moved $verified_head -> ${head:0:8}, $how; receipt still applies"
-    fi
-    git -C "$REPO_PATH" branch -D "mm-$pr" >/dev/null 2>&1
+    receipt_fresh "$pr" "$head"
 
     say "#$pr: approved, $pass_n checks pass, $skip_n skipped, 0 fail, 0 pending, 0 cancelled, receipt valid"
     if [ "$POST" = off ]; then
@@ -1965,6 +1999,190 @@ $(printf '%s' "$diff" | sed 's/^/    /')
     rm -f "$receipt"
 }
 
+# maintainer-merge update <pr>
+#
+# The rule (maintainer decision, 2026-11-09): when a pull request is approved and
+# the only thing missing for the merge is "Update branch", the agent does it.
+# Until then `merge` refused BEHIND, the deny wall denies `gh pr update-branch`,
+# and an approved pull request sat waiting for a human to press a button the
+# agent was able to press (docs/lessons.md 120).
+#
+# It is the GitHub API and nothing else. It never runs git on the contributor's
+# tree and never pushes from this host: GitHub creates the merge commit. The
+# fetch inside receipt_fresh only reads the pull request's ref into the
+# maintainer's own checkout, which is what `merge` does a minute later anyway.
+#
+# Every condition below is a refusal that names itself, and a fact it could not
+# read refuses, because a guard that cannot ask has not said yes:
+#   1. mergeStateStatus is exactly BEHIND (CLEAN is "nothing to update")
+#   2. not Dependabot's: a commit of ours stops Dependabot rebasing its own
+#   3. this account approved THIS head, and the overall decision is APPROVED
+#   4. a valid receipt for it, through the same checks `merge` applies
+#   5. nobody else holds a live lease on it
+#   6. GitHub will let us push to its head (a fork needs maintainerCanModify)
+#   7. POST=off rehearses
+# Exit 3 is its own answer: "this needs the author, not a retry".
+update_refuse3() {  # $1 = pr, $2 = why
+    printf 'maintainer-merge: will not update #%s: %s\n' "$1" "$2" >&2
+    exit 3
+}
+
+# Prints key=value lines for what update must know about one pull request, or
+# fails. python3, not jq: see the note in cmd_merge.
+update_facts() {  # $1 = pr
+    local json
+    json="$(gh pr view "$1" --repo "$REPO_SLUG" --json headRefOid,mergeStateStatus,reviewDecision,author,isCrossRepository,maintainerCanModify 2>/dev/null)" \
+        || return 1
+    python3 -c '
+import json, sys
+d = json.loads(sys.stdin.read())
+a = d.get("author") or {}
+for k, v in (("head", d["headRefOid"]), ("state", d["mergeStateStatus"]),
+             ("decision", d["reviewDecision"]), ("author", a.get("login") or ""),
+             ("cross", "1" if d["isCrossRepository"] else "0"),
+             ("modify", "1" if d.get("maintainerCanModify") is True else "0")):
+    if not isinstance(v, str) or "\n" in v:
+        sys.exit(1)
+    print(f"{k}={v}")
+' <<<"$json" 2>/dev/null
+}
+
+# Did this account's latest standing verdict approve exactly head $2? Reads the
+# reviews over REST, because `reviewDecision` is the overall answer and says
+# nothing about whose review it was or which commit it was for.
+update_approved_by_me() {  # $1 = pr, $2 = head -> 0 yes, 1 no, 2 could not read
+    local rows
+    rows="$(gh api --paginate "repos/$REPO_SLUG/pulls/$1/reviews" --jq '.[]' 2>/dev/null)" || return 2
+    python3 -c '
+import json, sys
+try:
+    me, head = sys.argv[1].lower(), sys.argv[2]
+    verdict = None
+    for ln in sys.stdin.read().splitlines():
+        if not ln.strip():
+            continue
+        r = json.loads(ln)
+        if str((r.get("user") or {}).get("login", "")).lower() != me:
+            continue
+        if r.get("state") in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            verdict = (r["state"], r.get("commit_id"))
+except Exception:
+    sys.exit(2)
+sys.exit(0 if verdict == ("APPROVED", head) else 1)
+' "$ACCOUNT" "$2" <<<"$rows"
+}
+
+cmd_update() {
+    local pr="${1:?pr}"
+    pr="$(pr_or_die "$pr")" || exit 1
+    lease_gate "$pr" update
+    require_prod_globs
+    identity
+
+    local facts head state decision author cross modify k v
+    # No `|| die` on the call: an unreadable pull request leaves $facts empty, and
+    # the loop refuses on the first key it cannot find, so there is one refusal
+    # for "could not ask" and its message names what was missing.
+    facts="$(update_facts "$pr")"
+    for k in head state decision author cross modify; do
+        v="$(grep -m1 "^$k=" <<<"$facts")" || die "could not read '$k' of #$pr from GitHub, so I will not touch its branch"
+        printf -v "$k" '%s' "${v#*=}"
+    done
+    [[ "$head" =~ ^[0-9a-f]{40}$ ]] \
+        || die "the head of #$pr read as '$head', which is not a 40-hex commit; refusing to name it to GitHub"
+
+    # 1. Exactly BEHIND. CLEAN needs nothing; every other state is not ours to fix.
+    case "$state" in
+        BEHIND) ;;
+        CLEAN|HAS_HOOKS) say "#$pr is $state: nothing to update"; return 0 ;;
+        DIRTY) die "#$pr has conflicts (mergeStateStatus DIRTY). Conflicts are never resolved by this agent; the author resolves them." ;;
+        *) die "#$pr mergeStateStatus is '$state', not BEHIND, so Update branch is not what is missing. Refusing." ;;
+    esac
+
+    # 2. Dependabot rebases its own branches; a commit of ours stops that for good.
+    case "${author,,}" in
+        app/dependabot|dependabot|dependabot\[bot\]|app/dependabot\[bot\])
+            die "#$pr is Dependabot's. A commit of ours on its branch stops it rebasing, so use: maintainer deps rebase $pr" ;;
+    esac
+
+    # 3. Approved: by the overall decision, and by this account at this head.
+    [ "$decision" = "APPROVED" ] || die "#$pr reviewDecision is '$decision', not APPROVED. An unapproved pull request is not waiting only for Update branch."
+    local arc=0
+    update_approved_by_me "$pr" "$head" || arc=$?
+    case "$arc" in
+        0) ;;
+        1) die "$ACCOUNT has no standing approval of #$pr at ${head:0:8}. An approval of an older head, somebody else's approval, or a later change request does not count." ;;
+        *) die "could not read the reviews of #$pr, so I cannot say $ACCOUNT approved ${head:0:8}. Refusing." ;;
+    esac
+
+    # 4. The receipt, through the questions merge asks of it.
+    receipt_check "$pr"
+    receipt_covers "$pr"
+    receipt_fresh "$pr" "$head"
+
+    # 6. Can GitHub let us push to the head? A fork is the author's branch.
+    if [ "$cross" = 1 ] && [ "$modify" != 1 ]; then
+        update_refuse3 "$pr" "the author must press Update branch; they have not allowed maintainer edits"
+    fi
+
+    say "#$pr: BEHIND, approved by $ACCOUNT at ${head:0:8}, receipt valid, no other lease"
+    # 7. A rehearsal reaches nobody.
+    if [ "$POST" = off ]; then
+        say "POST=off: every condition holds and the branch is NOT being updated"
+        say "         it would run: gh api -X PUT repos/$REPO_SLUG/pulls/$pr/update-branch -f expected_head_sha=$head"
+        return 0
+    fi
+
+    # expected_head_sha: GitHub refuses with 422 if the head moved since the
+    # checks above, so the update lands on the head that was verified.
+    local put put_rc=0
+    put="$(gh api -X PUT "repos/$REPO_SLUG/pulls/$pr/update-branch" -f "expected_head_sha=$head" 2>&1)" || put_rc=$?
+    if [ "$put_rc" -ne 0 ]; then
+        # A fork that did not allow edits, or a token GitHub will not let write
+        # there, is the author's to press. A head that moved is a different
+        # answer: say so, so nobody reads it as a refusal of permission.
+        case "$put" in
+            *"expected head sha"*) die "the head of #$pr moved after I read it (GitHub: expected_head_sha did not match). Nothing was updated. Read it again:
+$(sed 's/^/    /' <<<"$put")" ;;
+            *"(HTTP 403)"*|*"permission to update"*)
+                update_refuse3 "$pr" "the author must press Update branch; GitHub did not let this account push to the head repository:
+$(sed 's/^/    /' <<<"$put")" ;;
+        esac
+        die "GitHub refused the update of #$pr, so nothing was updated:
+$(sed 's/^/    /' <<<"$put")"
+    fi
+
+    # The 202 above means "accepted". It does not mean the head moved. Read it back.
+    local reads="${UPDATE_READBACK_READS:?lib/defaults.env was not loaded}"
+    local wait_s="${UPDATE_READBACK_WAIT:?lib/defaults.env was not loaded}"
+    local i nfacts nhead="" nstate="" ndecision="" confirmed=0
+    for ((i = 1; i <= reads; i++)); do
+        [ "$i" -eq 1 ] || sleep "$wait_s"
+        nfacts="$(update_facts "$pr")" || { nhead=""; continue; }
+        nhead="$(sed -n 's/^head=//p' <<<"$nfacts")"
+        nstate="$(sed -n 's/^state=//p' <<<"$nfacts")"
+        ndecision="$(sed -n 's/^decision=//p' <<<"$nfacts")"
+        [ -n "$nhead" ] && [ "$nhead" != "$head" ] || continue
+        case "$nstate" in BEHIND|UNKNOWN|'') continue ;; esac
+        confirmed=1
+        break
+    done
+    if [ "$confirmed" != 1 ]; then
+        die "GitHub accepted the update of #$pr, but $reads reads did not show it done (head ${nhead:0:8}, state ${nstate:-unread}): not confirmed.
+  Do not assume it worked. Read the pull request again before acting on it."
+    fi
+    say "#$pr updated: new head ${nhead:0:8} (was ${head:0:8}), mergeStateStatus $nstate"
+    say "the required checks must re-run on the new head, and \`maintainer-merge merge $pr\` refuses until they are green"
+    if [ "$ndecision" = APPROVED ]; then
+        say "reviewDecision is still APPROVED after the update"
+    else
+        say "reviewDecision is now '${ndecision:-empty}': the update dismissed the approval."
+        say "The review must be re-posted at ${nhead:0:8}. That is allowed only if \`git diff\`, three-dot / tree-merge,"
+        say "of the verified head ${RECEIPT_HEAD:0:8} against ${nhead:0:8} shows no production or workflow change;"
+        say "this command approves nothing. Read the diff, then decide."
+    fi
+}
+
 _executed || return 0
 case "${1:-}" in
     receipt) shift; cmd_receipt "$@" ;;
@@ -1975,6 +2193,7 @@ case "${1:-}" in
     # way a whole verify is; merge is what checks the parts add up.
     verify-part) shift; VERIFY_PART=1 cmd_verify "$@" ;;
     merge)   shift; cmd_merge "$@" ;;
+    update)  shift; cmd_update "$@" ;;
     show)    shift; cmd_show "$@" ;;
-    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [suite]|verify-deps <pr> <sha>|verify-part <pr> <sha> <test-filter> <sed-mutation> <suite>|receipt <pr> <sha> <proof>|merge <pr>|show [pr]}\n' >&2; exit 64 ;;
+    *) printf 'usage: maintainer-merge {verify <pr> <sha> <test-filter> <sed-mutation> [suite]|verify-deps <pr> <sha>|verify-part <pr> <sha> <test-filter> <sed-mutation> <suite>|receipt <pr> <sha> <proof>|merge <pr>|update <pr>|show [pr]}\n' >&2; exit 64 ;;
 esac

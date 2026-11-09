@@ -38,7 +38,7 @@ on. Defaults and the environment variables are in [Configuration](configuration.
 
 ## `maintainer-merge`
 
-The only path to a merge. `verify`, `verify-deps` and `merge` refuse a pull request
+The only path to a merge. `verify`, `verify-deps`, `update` and `merge` refuse a pull request
 another actor has leased (`maintainer lease check` exits non-zero), naming the holder,
 and refuse when they cannot ask. See [the doctrine](maintainer-doctrine.md).
 
@@ -48,6 +48,7 @@ and refuse when they cannot ask. See [the doctrine](maintainer-doctrine.md).
 | `maintainer-merge verify-deps <pr> <sha>` | the receipt for a pull request that only bumps dependencies or pins: there is no guard to mutate, so the diff is classified and its pins, image digests and pip hashes are checked |
 | `maintainer-merge verify-part <pr> <sha> <filter> <sed> <suite>` | one suite's share of a diff no single suite covers. `merge` checks that the parts add up to every production path |
 | `maintainer-merge merge <pr>` | merge, if every condition holds. See the table in the README |
+| `maintainer-merge update <pr>` | bring an approved pull request whose only missing step is "Update branch" up to date, through the REST update-branch call and nothing else: no git on the contributor's tree, no push from this host. It refuses unless `mergeStateStatus` is exactly `BEHIND` (`CLEAN` is "nothing to update", `DIRTY` is a conflict no agent resolves), the author is not Dependabot (`maintainer deps rebase` is that path, since a commit of ours stops Dependabot rebasing), this account has an `APPROVED` review at the current head and `reviewDecision` is `APPROVED`, the pull request has a valid receipt by the same checks `merge` applies (tree-merge staleness included), and nobody else holds a live lease (an unreadable lease refuses). A fork whose author has not allowed maintainer edits, or an API answer of 403 or "permission to update head repository", exits **3** and prints what the author must do. The call pins `expected_head_sha`, then the command reads the pull request back from GitHub, a bounded number of times (`UPDATE_READBACK_READS`), and reports the new head only when it differs from the old one and the state has left `BEHIND` and `UNKNOWN`; a `202` alone is never reported as success. It then says the required checks must re-run and that `merge` refuses until they are green, and whether `reviewDecision` is still `APPROVED`: when the update dismissed the approval it only reports that, and approves nothing. At `POST=off` it rehearses |
 | `maintainer-merge show [pr]` | print a recorded receipt |
 | `maintainer-merge receipt <pr> <sha> <proof>` | record a human's claim. Refused inside an unattended run, and a run may not merge on one |
 

@@ -10,6 +10,27 @@ middle digit.
 
 ## [Unreleased]
 
+### Added
+
+- **`maintainer-merge update <pr>` brings an approved `BEHIND` pull request up to
+  date** (maintainer decision, 2026-11-09: when Update branch is the only thing
+  missing, the agent does it). `merge` died on `BEHIND` and the wall denies
+  `gh pr update-branch`, so approved pull requests waited for a human click. The
+  command acts only when `mergeStateStatus` is exactly `BEHIND`, the author is not
+  Dependabot (`maintainer deps rebase` is that path), this account approved the
+  current head and `reviewDecision` is `APPROVED`, a valid receipt exists (the
+  checks `merge` applies, now shared functions), nobody else holds a live lease,
+  and GitHub lets us push to the head. A fork whose author has not allowed
+  maintainer edits, or a 403 from the API, exits 3 and says the author must press
+  Update branch. It calls the REST endpoint with `expected_head_sha`, never runs
+  git on the contributor's tree and never pushes, reads the new head back (bounded
+  by `UPDATE_READBACK_READS`, `UNKNOWN` counts as not yet) before it reports
+  anything, and reports whether the approval survived without approving. `POST=off`
+  rehearses. The deny wall still denies `gh pr update-branch`, now also
+  `gh api *update-branch` in any flag order, and allows the wrapper; the three
+  review prompts name the order verify, approve, update if BEHIND, wait for green,
+  merge. Lesson 120.
+
 ### Fixed
 
 - **The sysknife node suite can run `setup-contract.test.mjs` unmutated.** The

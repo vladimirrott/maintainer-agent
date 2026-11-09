@@ -91,6 +91,10 @@ The list this repository holds itself to:
 - The merge gate is the only path to a merge, and `maintainer-merge receipt` is
   denied to an agent for a reason: an agent that can write its own receipt
   proves nothing.
+- An approved pull request that is only BEHIND is brought up to date with
+  `maintainer-merge update <pr>`, never with `gh pr update-branch` (denied), and
+  merged once its checks are green again. The order is
+  verify, approve, update if BEHIND, wait for green, merge.
 
 ## Mechanical items: mark them, and finish the quiet ones
 
@@ -190,7 +194,8 @@ It prints one block per open Dependabot pull request and ends each with one
 - `rebase`: run `maintainer deps rebase <pr>`. It posts `@dependabot rebase` once
   per head and reads it back. Never `gh pr update-branch`: a commit of ours on
   Dependabot's branch stops it rebasing that pull request for good, and the wall
-  denies the verb.
+  denies the verb. `maintainer-merge update` refuses a Dependabot pull request
+  for the same reason.
 - `wait`: CI is still running, or a rebase is asked for and Dependabot has not
   pushed. One line in the report.
 - `investigate <check>`: read that check's log (`gh run view <run> --log-failed`)

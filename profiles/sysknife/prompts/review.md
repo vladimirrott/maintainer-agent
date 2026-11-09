@@ -101,7 +101,22 @@ removed.
    test stays green under the mutation it refuses and says
    `THE GUARD DOES NOT BITE`, which is the finding, not an obstacle: report it.
 
-3. **Merge**: `maintainer-merge merge <pr>`.
+3. **Update the branch, only if it is BEHIND.** The order is
+   verify, approve, update if BEHIND, wait for green, merge (the approval is
+   `gh pr review <pr> --approve`). An approved pull request whose only missing step is "Update branch" gets
+   `maintainer-merge update <pr>`. Never `gh pr update-branch` and never the
+   button: the wall denies the verb, and the command checks first that the pull
+   request is `BEHIND` (not conflicted), not Dependabot's, approved by this account
+   at this head, covered by a receipt and not leased by anyone else. It calls the
+   API itself and reads the new head back from GitHub. The update restarts the
+   required checks, so do not merge in the same breath: `merge` refuses until they
+   are green, and the next run merges it. If the approval was dismissed by the
+   update, say so in the report; re-post it only if `git diff` (three-dot) of the
+   verified head against the new head shows no production or workflow change. Exit 3
+   means the pull request is a fork whose author has not allowed maintainer edits:
+   say in the report that the author must press Update branch.
+
+4. **Merge**: `maintainer-merge merge <pr>`, once the checks are green.
 
 It refuses on a missing receipt, a review that is not `APPROVED`, any failing or
 pending check, an empty check list, the wrong GitHub account, and any change to
@@ -134,7 +149,8 @@ It prints one block per open Dependabot pull request and ends each with one
 - `rebase`: run `maintainer deps rebase <pr>`. It posts `@dependabot rebase` once
   per head and reads it back. Never `gh pr update-branch` and never the "Update
   branch" button: a commit of ours on Dependabot's branch stops it rebasing that
-  pull request for good. The wall denies the verb.
+  pull request for good. The wall denies the verb, and `maintainer-merge update`
+  refuses a Dependabot pull request for the same reason.
 - `wait`: CI is still running, or a rebase is asked for and Dependabot has not
   pushed. One line in the report, then move on.
 - `investigate <check>`: read that check's log (`gh run view <run> --log-failed`)

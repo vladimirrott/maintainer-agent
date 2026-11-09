@@ -81,7 +81,7 @@ refuses unless **all** of these hold:
 | **no production or CI diff** since the head the receipt names | a rebase may move tests and docs; if it moved anything the profile calls production, the receipt describes a tree that is gone. The paths come from `PROD_GLOBS` in the profile, and a profile that declares none gets no merge |
 | `reviewDecision` is `APPROVED` | a force-push can dismiss it |
 | every check is **pass or skipping**, and at least one passed | pending, cancelled and any bucket the gate does not know are not green. `gh` cuts a check into pass, fail, pending, skipping and cancel; the gate used to count only fail and pending |
-| `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review |
+| `mergeStateStatus` is `CLEAN` or `HAS_HOOKS` | `BEHIND` means the branch is not up to date with its base, so every green check describes a different tree; `DIRTY` is a conflict, `BLOCKED` is a missing required review. An approved pull request that is only `BEHIND` is brought up to date by `maintainer-merge update <pr>`, which checks its own conditions first, and merges once the checks are green again |
 | the check list is **non-empty** | an empty board is a failure, not a pass; neither is a board where every check skipped |
 | `gh api user` is the owning account | a write under the wrong identity is worse than a 403 |
 
@@ -143,14 +143,14 @@ refusal or anything
 `DEPS_AUTOMERGE` (`none`, `patch` or `minor`; default `minor`) does not allow. A
 commit by anybody else makes it a contributor's pull request. `deps rebase`
 asks Dependabot and never updates the branch itself, since a commit of ours
-there stops Dependabot rebasing it; `gh pr update-branch` is in the deny wall.
+there stops Dependabot rebasing it; `gh pr update-branch` is in the deny wall, and `maintainer-merge update` refuses a Dependabot pull request.
 
 ## Containment, layer by layer
 
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries **<!-- fig:denied_verbs -->38<!-- /fig --> denied verbs**: `git push`, `git tag`,
+backend, `--settings` carries **<!-- fig:denied_verbs -->39<!-- /fig --> denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
 `gh repo delete`, `gh issue create` (issue creation goes through the deduplicating `maintainer file-issue`), `gh pr update-branch` (a Dependabot branch is rebased by asking Dependabot), `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
 `~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.
@@ -602,7 +602,7 @@ aborted run cannot make the next one skip unreviewed changes.
 
 ## Lessons
 
-[`docs/lessons.md`](docs/lessons.md) has <!-- fig:lessons floor=10 -->110+<!-- /fig --> entries that reached
+[`docs/lessons.md`](docs/lessons.md) has <!-- fig:lessons floor=10 -->120+<!-- /fig --> entries that reached
 a working system, each with the measurement that found it and the guard that now stops it.
 The short version follows.
 
@@ -636,7 +636,7 @@ The short version follows.
 ./scripts/check_drift.py    # the docs agree with the code
 ```
 
-<!-- fig:tests floor=100 -->1,600+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
+<!-- fig:tests floor=100 -->1,700+<!-- /fig --> offline tests: no network, no GitHub, no model call. Every case tests a
 *refusal*, because that is where this agent's safety lives. The suite is
 mutation-proved; removing a deny rule turns it red naming that rule, planting a
 home path turns the leak check red, restoring the renamed command in a prompt

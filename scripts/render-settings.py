@@ -72,7 +72,7 @@ POSTING = (
     "gh issue close", "gh issue reopen", "gh issue develop", "gh issue pin",
     "gh issue transfer", "gh label", "gh api --method POST", "gh api -X POST",
     "gh api --method PATCH", "gh api -X PATCH",
-    "maintainer-merge merge", "maintainer-merge verify",
+    "maintainer-merge merge", "maintainer-merge verify", "maintainer-merge update",
 )
 
 

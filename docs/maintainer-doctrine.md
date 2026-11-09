@@ -125,6 +125,18 @@ is refused. Those paths are the profile's, not the tool's: they were hardcoded
 to one project's directories once, which meant that on every other repository
 the rule compared nothing and reported that the receipt still applied.
 
+A pull request that is approved and `BEHIND` its base is missing one thing, and
+the agent supplies it: `maintainer-merge update <pr>` (maintainer decision,
+2026-11-09). It acts only when the pull request is exactly `BEHIND`, is not
+Dependabot's (a commit of ours stops Dependabot rebasing, so `maintainer deps
+rebase` is that path), carries this account's approval at the current head and a
+valid receipt, is not leased by anyone else, and sits on a branch GitHub lets us
+update. It uses the API and never git, reads the new head back before it says it
+worked, and never approves: an update that dismissed the approval is reported, and
+the review is re-posted by a reader of the diff, only when `git diff` from the
+verified head shows no production or workflow change. The checks re-run, and
+`merge` still refuses until they are green.
+
 An empty check list is treated as a failure, not as green. That distinction has
 a repository behind it: this project's recurring defect is a test that passes
 with the fix reverted, which no board can see.

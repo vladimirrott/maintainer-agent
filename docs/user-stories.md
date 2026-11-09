@@ -67,7 +67,9 @@ saying no. **[GAP]** → issue #13.
 
 **11. A green board on a branch behind its base.**
 Refuse. The checks describe a tree that is not the one being merged.
-**[code]** `mergeStateStatus` must be `CLEAN` or `HAS_HOOKS`.
+**[code]** `mergeStateStatus` must be `CLEAN` or `HAS_HOOKS`. When the pull request
+is approved and `BEHIND` is the only thing missing, `maintainer-merge update <pr>`
+brings it up to date and `merge` follows once the checks are green.
 
 **12. A test that passes with the fix reverted.**
 Report it as the finding. **[code]** `maintainer-merge verify`, **[eval]** 04.

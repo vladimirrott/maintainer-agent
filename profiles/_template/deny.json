@@ -11,7 +11,7 @@
   "is only unforgeable while the key is unreadable, so it belongs beside",
   "the SSH keys rather than in a list of its own.",
   "The scheduler verbs are here because a run of the magent profile ran ./install.sh --uninstall against the live machine and turned off every timer, including another project's.",
-  "gh pr update-branch is here because a commit of ours on a Dependabot branch stops Dependabot rebasing it for good, and on a contributor's branch it is a push the doctrine forbids."
+  "gh pr update-branch is here because a commit of ours on a Dependabot branch stops Dependabot rebasing it for good, and on a contributor's branch it is a push the doctrine forbids. An approved pull request that is only BEHIND is updated by `maintainer-merge update`, which checks every condition first and calls the REST endpoint itself, so `gh api *update-branch` is denied in any flag order: the wrapper is the only path."
  ],
  "spelled_everywhere": [
   "cargo publish",
@@ -20,6 +20,7 @@
   "gh api --method PUT",
   "gh api -X DELETE",
   "gh api -X PUT",
+  "gh api *update-branch",
   "gh auth token",
   "gh issue create",
   "gh pr create",

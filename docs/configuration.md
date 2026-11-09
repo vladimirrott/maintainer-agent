@@ -48,6 +48,8 @@ same file, so a number is changed in one place.
 | `DEPS_AUTOMERGE` | minor | which green Dependabot bumps `maintainer deps` sends to `verify`: `none`, `patch` (every member semver-patch) or `minor` (patch or minor). A Docker digest bump that keeps its image and tag has no semver class and passes at `patch` and `minor`. A semver-major member always goes to a person |
 | `DEPS_UNKNOWN_READS` | 3 | reads `maintainer deps` makes of a merge state GitHub answers `UNKNOWN`, before it reports it |
 | `DEPS_UNKNOWN_WAIT` | 5 | seconds between those reads |
+| `UPDATE_READBACK_READS` | 6 | reads `maintainer-merge update` makes of the pull request after asking GitHub to update the branch, waiting for the head to move and the merge state to leave `BEHIND` and `UNKNOWN`. It reports the update only on a read that shows it |
+| `UPDATE_READBACK_WAIT` | 5 | seconds between those reads |
 | `CLASSIFY_TIMEOUT` | 60 | seconds `verify-deps` gives the dependency classifier before refusing |
 
 Adding a key: put it in `lib/defaults.env` with a comment, add a row here, and read
