@@ -10,7 +10,20 @@ publish = false
 
 [workspace.dependencies]
 thiserror = "2"
+# Exact versions: a receipt signature depends on these crates' behaviour, so a
+# silent minor bump must not change a byte. Why each is here:
+# - hmac and sha2 compute the HMAC-SHA256 that signs a receipt, and hmac's
+#   verify_slice is the constant-time comparison.
+# - serde and serde_json read a receipt into an ordered map and into typed
+#   fields (deny_unknown_fields). preserve_order keeps the key order of the
+#   file, which the signature covers. arbitrary_precision keeps a number's text,
+#   so an integer larger than 64 bits writes back as Python writes it.
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149", features = ["preserve_order", "arbitrary_precision"] }
 mx-core = { path = "crates/mx-core" }
+mx-ports = { path = "crates/mx-ports" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

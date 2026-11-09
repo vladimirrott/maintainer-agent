@@ -7,6 +7,8 @@
 #   5. no crate but mx-ports may mention the disallowed_methods lint (an
 #      #[allow] elsewhere would switch the ban off), and every crate inherits
 #      the workspace lints
+#   6. the receipt interop run: the bash gate and mx-receipt write receipts and
+#      each verifies the other's (rust/crates/mx-receipt/tests/interop.sh)
 # Each step prints one `[rust-gate]` line. Exit 0 with `no rust workspace` only
 # when rust/Cargo.toml does not exist: a missing tool or a missing file inside an
 # existing workspace is a failure, never a skip.
@@ -127,3 +129,17 @@ for manifest in "$ws"/crates/*/Cargo.toml; do
     grep -qx 'workspace = true' "$manifest" || fail "allow-scan ($manifest does not inherit the workspace lints)"
 done
 say "allow-scan: ok (disallowed_methods is named only in mx-ports, and every crate inherits the workspace lints)"
+
+# 6. interop. The script builds its own helper, runs the bash gate and the Rust
+# crate against each other's receipts in a scratch directory, and prints
+# `interop: N checks, F failed`. A run that printed no such line, or that ran no
+# checks, did not run.
+interop="$ws/crates/mx-receipt/tests/interop.sh"
+[ -f "$interop" ] || fail "interop ($interop is missing, so nothing was cross-checked)"
+out="$(bash "$interop" 2>&1)"; rc=$?
+[ "$rc" = 0 ] || fail "interop (exited $rc)" "$out"
+summary="$(sed -n 's/^interop: \([0-9][0-9]*\) checks, \([0-9][0-9]*\) failed$/\1 \2/p' <<<"$out")"
+read -r interop_n interop_f <<<"$summary"
+[ "${interop_n:-0}" -gt 0 ] || fail "interop (no summary line, so no check ran)" "$out"
+[ "${interop_f:-1}" = 0 ] || fail "interop ($interop_f failed)" "$out"
+say "interop: ok ($interop_n checks, $interop_f failed; bash and rust verify each other's receipts)"

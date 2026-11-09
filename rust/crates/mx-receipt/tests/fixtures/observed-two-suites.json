@@ -1,0 +1,33 @@
+{
+  "pr": 7,
+  "head": "cc5e01302bbd828fbf516fca54e1a6e12738de7c",
+  "kind": "observed",
+  "partial": true,
+  "suite": "python rust",
+  "units_run": "python:3, rust:12",
+  "proof": "`test_gate` passes clean and fails under `s/a/b/` (rc=1) AND `gate::refuses` passes clean and fails under `s/>=/>/` (rc=101)",
+  "mutation": "s/a/b/",
+  "filter": "test_gate",
+  "observed_failure": "FAILED tests/test_gate.py::test_x",
+  "proofs": [
+    {
+      "suite": "python",
+      "units_run": "3",
+      "filter": "test_gate",
+      "mutation": "s/a/b/",
+      "proof": "`test_gate` passes clean and fails under `s/a/b/` (rc=1)",
+      "observed_failure": "FAILED tests/test_gate.py::test_x"
+    },
+    {
+      "suite": "rust",
+      "units_run": "12",
+      "filter": "gate::refuses",
+      "mutation": "s/>=/>/",
+      "proof": "`gate::refuses` passes clean and fails under `s/>=/>/` (rc=101)",
+      "observed_failure": "assertion failed: left == right \u2192 caf\u00e9"
+    }
+  ],
+  "recorded_at": "2026-01-01T00:00:00+00:00",
+  "recorded_by": "fixture-user",
+  "signature": "8590e80caa60499bbcc6db1bdcb039b14b8a078d8e103511aeec8fd3c1fe8f3c"
+}

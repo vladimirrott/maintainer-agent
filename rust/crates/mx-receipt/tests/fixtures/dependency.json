@@ -1,0 +1,14 @@
+{
+  "pr": 9,
+  "head": "cc5e01302bbd828fbf516fca54e1a6e12738de7c",
+  "kind": "dependency",
+  "proof": "pure dependency bump: 4 changed line(s) in Cargo.lock (2); no source outside crates.io/registry.npmjs.org/PyPI, no new install script, 2 action pin(s) verified against their tags, 1 base image(s) verified against their registry, 0 pip package(s) verified against PyPI",
+  "files": "Cargo.lock (2)",
+  "changed_lines": 4,
+  "pins_verified": 2,
+  "images_verified": 1,
+  "pip_verified": 0,
+  "recorded_at": "2026-01-01T00:00:00+00:00",
+  "recorded_by": "fixture-user",
+  "signature": "81912a2989157c3f988e941ca6d4669af2921fd17e24f3eb6fc74f49152f55cc"
+}
