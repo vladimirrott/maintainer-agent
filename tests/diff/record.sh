@@ -71,6 +71,26 @@ done
 tree_fingerprint() { ( cd "$tree" && find . -path ./.git -prune -o -type f -printf '%p %s %T@\n' | LC_ALL=C sort ); }
 before="$(tree_fingerprint)" || die "cannot read the tree"
 
+# Absolute paths to the tools the scenarios stub. A program that runs /usr/bin/gh
+# reaches the host's real gh and no stub ever sees the call, so the argv logs of a
+# tree that does it simply lack a line. This scan reads what the program TEXT
+# says (scripts, and strings in a compiled binary) and writes the distinct paths
+# to tree.abspath, which compare.sh holds equal across trees. It cannot see a
+# path built at run time; the argv logs and calls.log catch the effect of that.
+stub_tools="$(sed -n 's/^MX_STUB_TOOLS="\(.*\)"$/\1/p' "$here/lib.sh")"
+[ -n "$stub_tools" ] || die "cannot read MX_STUB_TOOLS from $here/lib.sh"
+alt="$(printf '%s' "$stub_tools" | sed 's/ /|/g; s/-/\\-/g')"
+abs_pat='(?<![A-Za-z0-9_.~$/-])(?:/usr/local/bin|/usr/bin|/usr/sbin|/bin|/sbin|/snap/bin|/opt/homebrew/bin)/(?:'"$alt"')(?![A-Za-z0-9_.-])'
+scan_roots=()
+for r in bin lib scripts platform profiles evals install.sh new-profile.sh; do
+    [ -e "$tree/$r" ] && scan_roots+=("$tree/$r")
+done
+[ "${#scan_roots[@]}" -gt 0 ] || die "tree '$tree' has nothing to scan for absolute tool paths"
+abs_out="$(LC_ALL=C grep -RhaoP -e "$abs_pat" -- "${scan_roots[@]}")"; abs_rc=$?
+case "$abs_rc" in 0|1) ;; *) die "the absolute-path scan of '$tree' failed (grep exit $abs_rc)" ;; esac
+printf '%s\n' "$abs_out" | LC_ALL=C sed '/^$/d' | LC_ALL=C sort -u > "$out/tree.abspath" \
+    || die "cannot write $out/tree.abspath"
+
 count=0
 for scen in "${scenarios[@]}"; do
     name="$(basename "$scen" .sh)"

@@ -28,16 +28,44 @@ export GIT_AUTHOR_DATE="2026-01-01T00:00:00+0000" GIT_COMMITTER_DATE="2026-01-01
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 export TZ=UTC LC_ALL=C LANG=C PYTHONDONTWRITEBYTECODE=1 PYTHONHASHSEED=0
 
-# mx_stub NAME [BODY]: a stub on the program's PATH. It logs its argv, one line
-# per call, to argv.NAME.log, then runs BODY (an argument or stdin) as bash.
+# mx_stub NAME [BODY]: a stub on the program's PATH. Every call writes, before
+# BODY runs, one line to each of four logs (BODY is an argument or stdin, run as bash):
+#   calls.log           NAME and argv, in call order across ALL stubs
+#   argv.NAME.log       argv of this stub only
+#   env.NAME.log        the environment variables that change what a tool does
+#   stdin.NAME.log      what the program piped into the stub (empty when nothing)
+# The stub reads its stdin to log it and hands BODY the same bytes again, so a
+# program that feeds a stub through a pipe or a here-document is compared too.
 mx_stub() {
     local name="$1" body
     if [ $# -ge 2 ]; then body="$2"; else body="$(cat)"; fi
     {
         printf '#!/usr/bin/env bash\n'
-        printf '_mx_log=%q\n' "$MX_RAW/argv.$name.log"
+        printf '_mx_dir=%q\n_mx_name=%q\n' "$MX_RAW" "$name"
         cat <<'HDR'
-{ printf 'argv:'; printf ' %q' "$@"; printf '\n'; } >> "$_mx_log"
+_mx_argv="$(printf ' %q' "$@")"
+printf 'argv:%s\n' "$_mx_argv" >> "$_mx_dir/argv.$_mx_name.log"
+printf '%s:%s\n' "$_mx_name" "$_mx_argv" >> "$_mx_dir/calls.log"
+_mx_in=""
+if [ ! -t 0 ]; then _mx_in="$(cat; printf x)"; _mx_in="${_mx_in%x}"; exec 0< <(printf '%s' "$_mx_in"); fi
+printf 'stdin: %q\n' "$_mx_in" >> "$_mx_dir/stdin.$_mx_name.log"
+# A credential is logged as set or unset, never by value. GH_TOKEN counts as set
+# when it holds anything; MAINTAINER_* names that look like a secret do too.
+_mx_e=""
+for _mx_v in GH_HOST GH_CONFIG_DIR HOME LC_ALL LANG TZ; do
+    if [ -n "${!_mx_v+x}" ]; then _mx_e+=" $_mx_v=${!_mx_v@Q}"; else _mx_e+=" $_mx_v=<unset>"; fi
+done
+for _mx_v in GH_TOKEN GITHUB_TOKEN; do
+    if [ -n "${!_mx_v:-}" ]; then _mx_e+=" $_mx_v=<set>"; else _mx_e+=" $_mx_v=<unset>"; fi
+done
+for _mx_v in $(compgen -v MAINTAINER_ | LC_ALL=C sort); do
+    case "$_mx_v" in
+        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*) _mx_e+=" $_mx_v=<set>" ;;
+        *) _mx_e+=" $_mx_v=${!_mx_v@Q}" ;;
+    esac
+done
+printf 'env:%s\n' "$_mx_e" >> "$_mx_dir/env.$_mx_name.log"
+unset _mx_dir _mx_name _mx_argv _mx_in _mx_e _mx_v
 HDR
         printf '%s\n' "$body"
     } > "$MX_STUBS/$name"
@@ -125,6 +153,64 @@ mx_git_repo() {
     local dir="${1:-$MX_REPO}"
     git init -q -b main "$dir"
 }
+
+# mx_update_gh PR STATE DECISION AUTHOR [REVIEW_STATE [REVIEW_USER [REVIEW_HEAD]]]
+# [CROSS [MODIFY]]: a gh stub that answers the three questions `maintainer-merge
+# update` asks, as the account testuser: the pull request facts, the reviews, and
+# who is logged in. MX_UPDATE_HEAD is the 40-hex head it reports. Variables, not
+# positional arguments, keep a scenario readable:
+#   MX_U_REVIEW="APPROVED testuser $MX_UPDATE_HEAD"   MX_U_CROSS=false  MX_U_MODIFY=false
+MX_UPDATE_HEAD="1111111111111111111111111111111111111111"
+mx_update_gh() {
+    local pr="$1" state="$2" decision="$3" author="$4"
+    local cross="${MX_U_CROSS:-false}" modify="${MX_U_MODIFY:-false}"
+    local rv_state rv_user rv_head
+    read -r rv_state rv_user rv_head <<<"${MX_U_REVIEW:-APPROVED testuser $MX_UPDATE_HEAD}"
+    local dec_json='null'; [ "$decision" = "-" ] || dec_json="\"$decision\""
+    mkdir -p "$MX_WORK/gh-answers"
+    printf '{"headRefOid":"%s","mergeStateStatus":"%s","reviewDecision":%s,"author":{"login":"%s"},"isCrossRepository":%s,"maintainerCanModify":%s}\n' \
+        "$MX_UPDATE_HEAD" "$state" "$dec_json" "$author" "$cross" "$modify" > "$MX_WORK/gh-answers/pr-view.json"
+    if [ "$rv_state" = "-" ]; then : > "$MX_WORK/gh-answers/reviews.jsonl"
+    else
+        printf '{"user":{"login":"%s"},"state":"%s","commit_id":"%s"}\n' "$rv_user" "$rv_state" "$rv_head" \
+            > "$MX_WORK/gh-answers/reviews.jsonl"
+    fi
+    mx_stub gh "case \"\$*\" in
+  *'auth switch'*) exit 0 ;;
+  *'api user'*) echo testuser ;;
+  *'api --paginate'*) cat \"$MX_WORK/gh-answers/reviews.jsonl\" ;;
+  *'pr view $pr'*) cat \"$MX_WORK/gh-answers/pr-view.json\" ;;
+esac"
+}
+
+# mx_pr_origin PR: a bare origin that holds the pull request's head at refs/pull/PR/head.
+mx_pr_origin() {
+    git init -q --bare -b main "$MX_WORK/origin.git"
+    git -C "$MX_REPO" remote add origin "$MX_WORK/origin.git"
+    git -C "$MX_REPO" push -q origin "main:refs/pull/$1/head" main
+}
+
+# mx_release_fixture: the repository maintainer-repo release-check reads. MX_REPO
+# has a bare origin, one commit tagged v0.1.0 with an empty Unreleased section,
+# and the profile globs the check counts. A scenario adds its own commits, then
+# calls mx_release_push.
+mx_release_fixture() {
+    mx_merge_env
+    mx_env PROD_GLOBS 'bin/* lib/*'
+    mx_env SHIPPED_GLOBS 'bin/*'
+    mx_git_repo "$MX_REPO"
+    git init -q --bare -b main "$MX_WORK/origin.git"
+    git -C "$MX_REPO" remote add origin "$MX_WORK/origin.git"
+    mx_commit "$MX_REPO" "release 0.1.0" CHANGELOG.md "# Changelog
+
+## [Unreleased]
+
+## [0.1.0] - 2026-01-01
+### Added
+- first release"
+    git -C "$MX_REPO" tag v0.1.0
+}
+mx_release_push() { git -C "$MX_REPO" push -q origin main v0.1.0; }
 
 # mx_deploy_fixture: a HOME that looks like a finished ./install.sh for a profile
 # named p, plus a clean checkout, state directory and logging stubs that answer
