@@ -11085,6 +11085,17 @@ if command -v flock >/dev/null 2>&1; then
 else
     noenv "hook lock cases need flock"
 fi
+# A lock path that is a symlink is refused, and what it points at is left alone.
+printf 'precious\n' > "$hk/victim"; ln -sf "$hk/victim" "$hk/linklock"
+out="$(env -u MAGENT_HOOK_LOCKED MAGENT_HOOK_LOCK="$hk/linklock" bash "$hl" true 2>&1)"; rc=$?
+[ "$rc" = 75 ] && grep -q 'symlink' <<<"$out" && [ "$(cat "$hk/victim")" = precious ] \
+    && ok "a symlinked lock path is refused and its target is not touched" \
+    || bad "a symlinked lock was followed (rc=$rc): $out"
+printf 'keep\n' > "$hk/existing.lock"
+env -u MAGENT_HOOK_LOCKED MAGENT_HOOK_LOCK="$hk/existing.lock" bash "$hl" true >/dev/null 2>&1
+[ "$(cat "$hk/existing.lock")" = keep ] \
+    && ok "taking the lock does not truncate the lock file" \
+    || bad "opening the lock file emptied it"
 p_noflock="$(hk_path noflock)"; rm -f "$p_noflock/flock"
 out="$(env -u MAGENT_HOOK_LOCKED PATH="$p_noflock" MAGENT_HOOK_LOCK="$lockf" bash "$hl" bash -c 'exit 3' 2>&1)"; rc=$?
 [ "$rc" = 3 ] && grep -q 'not serialised' <<<"$out" \
