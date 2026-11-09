@@ -1,0 +1,15 @@
+[package]
+name = "mx-ports"
+version = "0.1.0"
+description = "Ports to the outside world (gh, git, containers, clock, filesystem, processes), their fakes, and the one real adapter"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mx-core.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

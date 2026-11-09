@@ -132,6 +132,33 @@ jobs:
       - name: Run it over every shell script
         run: scripts/shellcheck-sweep.sh
 
+  rust:
+    name: rust
+    runs-on: ubuntu-latest
+    # No permissions block of its own: the workflow-level `contents: read`
+    # covers it, and the gate reads nothing else.
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The toolchain is the version rust/Cargo.toml names as rust-version, so
+      # the minimum supported version and the version CI lints with are one
+      # number. Clippy gains lints in every release, and a floating `stable`
+      # would turn a green main red on a day nobody touched it.
+      - name: Install the pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^rust-version *= *"\(.*\)"$/\1/p' rust/Cargo.toml)"
+          [ -n "$version" ] || { echo "::error::rust/Cargo.toml has no rust-version" >&2; exit 1; }
+          rustup toolchain install "$version" --profile minimal --component rustfmt --component clippy
+          rustup default "$version"
+          rustc --version
+
+      # fmt, clippy -D warnings, the tests with a floor on their count, and a
+      # probe that proves only mx-ports may start a process.
+      - name: Rust gate
+        run: scripts/rust-gate.sh
+
   powershell:
     name: the Windows installer parses
     runs-on: ubuntu-latest

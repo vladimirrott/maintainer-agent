@@ -1,0 +1,6 @@
+# Only mx-ports starts processes: the Proc port is the one place that sets an
+# environment allowlist, a timeout and a process group. Every other crate asks
+# a `Proc`. The one allowed call site carries an `#[allow]` with its reason.
+disallowed-methods = [
+    { path = "std::process::Command::new", reason = "start processes through the mx_ports::Proc port, never directly" },
+]
