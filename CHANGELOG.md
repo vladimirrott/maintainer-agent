@@ -10,6 +10,25 @@ middle digit.
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-09
+
+### Security
+
+- **`merge` refuses a head it cannot read.** ([#216](https://github.com/vladimirrott/maintainer-agent/pull/216))
+  The merge read the pull request's head with no check of `gh`'s exit status. A
+  `gh` that failed there left the head empty, and the merge ran with
+  `--match-head-commit ""`, which removes the fence against a push landing
+  between the last check and the merge. The head must now be read and look like a
+  commit id before any other fact is read, or the merge refuses (plan decision
+  F9). Found while writing characterization cases for the gate.
+- **`verify` refuses a mutation of production code the pull request did not
+  change.** ([#216](https://github.com/vladimirrott/maintainer-agent/pull/216))
+  The check asked whether the mutation hit production code and never whether it
+  hit the diff, so a mutation of any other production file earned a receipt that
+  spoke for a change nothing there had broken. The refusal names the mutated file
+  and the production files the pull request changed. An automated review of the
+  commit that added the production check found it.
+
 ### Added
 
 - **`maintainer-merge update <pr>` brings an approved `BEHIND` pull request up to
@@ -30,6 +49,34 @@ middle digit.
   `gh api *update-branch` in any flag order, and allows the wrapper; the three
   review prompts name the order verify, approve, update if BEHIND, wait for green,
   merge. Lesson 120.
+- **`MX_TREE` runs the offline suite against any tree with the repository
+  layout.** ([#213](https://github.com/vladimirrott/maintainer-agent/pull/213))
+  The first output line names the tree under test. A tree without
+  `bin/maintainer-merge`, `lib/run.sh` or `profiles/` exits 2 before any case
+  runs. 255 cases that read program source are tagged, and
+  `MX_SKIP_SOURCE_COUPLED=1` skips them and counts each as a skip, for a tree
+  whose programs are compiled.
+- **A differential recorder compares two program trees.**
+  ([#217](https://github.com/vladimirrott/maintainer-agent/pull/217))
+  `tests/diff/record.sh` runs 17 scenarios under `env -i` with logging stubs and
+  writes the argv each stub received, the exit code, stdout, stderr and a hash of
+  the state tree. `compare.sh` exits 0 only for zero differences and 2 for any
+  harness fault. Its blind spots (cross-stub call order, stub environment and
+  stdin, timestamp format) are recorded in the migration plan before it gates a
+  port.
+- **170 characterization cases pin what `maintainer-merge` does.**
+  ([#216](https://github.com/vladimirrott/maintainer-agent/pull/216))
+  `tests/run-characterization.sh` covers the `gh pr merge` argv, the `POST=off`
+  rehearsal, usage and exit codes by value, the check board, the staleness check,
+  `identity()` failures, stdout against stderr, hostile `show` arguments and a
+  known-answer receipt vector. Each case runs under `env -i` with stubbed `gh`,
+  `podman`, `docker`, `curl`, `wget`, `ssh` and `flock`.
+- **A Rust workspace skeleton.**
+  ([#215](https://github.com/vladimirrott/maintainer-agent/pull/215))
+  `rust/` holds `mx-core` (`Fact`, `Refusal` with an exhaustive exit-code table,
+  `NonEmpty`) and `mx-ports` (traits, fakes and `RealProc`), a clippy ban on
+  `Command::new` outside `mx-ports`, `scripts/rust-gate.sh` and a `rust` CI job.
+  No program is ported yet: the bash programs are the ones that run.
 
 ### Fixed
 
@@ -40,6 +87,19 @@ middle digit.
   suite now builds `localhost/sk-node:1` from `node.Containerfile` (node:24-slim
   plus `netcat-openbsd`), and `maintainer-doctor` checks the image carries `nc`
   and the recipe matches.
+- **Concurrent commits can no longer take the machine out of memory.**
+  ([#214](https://github.com/vladimirrott/maintainer-agent/pull/214),
+  [#216](https://github.com/vladimirrott/maintainer-agent/pull/216))
+  On 2026-11-09 four worktrees committed at once. Two shellcheck sweeps
+  (`tests/run-tests.sh` alone peaks at 8.7 GB) overlapped, and the kernel hit a
+  global OOM twice and killed the terminal. An address-space `ulimit` does not
+  bound shellcheck: it exits 251 on that file at 6 GB and at 12 GB. The sweep now
+  waits for 10 GiB of free memory and refuses with 75 when it never comes, runs
+  one shellcheck per script in a systemd scope with `MemoryMax=12G` and no swap,
+  and runs at nice 15. The pre-commit hook takes one lock per machine,
+  shared by every worktree, in a private directory the user owns: it never
+  follows a symlink and never truncates the lock file. CI skips the gate and the
+  cap.
 
 ## [0.10.1] — 2026-11-03
 
@@ -1473,7 +1533,8 @@ since 2026-09-02 and this repository since 2026-09-03.
 - `maintainer-repo prune` and `maintainer-merge merge` honour `POST=off`. Both
   write from inside a script, where no deny rule can see them.
 
-[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/vladimirrott/maintainer-agent/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.11.0
 [0.10.1]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.10.1
 [0.10.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.10.0
 [0.9.0]: https://github.com/vladimirrott/maintainer-agent/releases/tag/v0.9.0
