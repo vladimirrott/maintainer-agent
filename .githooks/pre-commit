@@ -3,6 +3,13 @@
 # solo maintainer's gate should run before the commit exists rather than after.
 set -uo pipefail
 root="$(git rev-parse --show-toplevel)"
+# One gate run per machine at a time, across every worktree. The suite and the
+# linter sweep are heavy (the sweep alone peaks near 8 GB), and four commits
+# in four worktrees at once took the laptop to a global OOM. The script re-runs
+# this hook under a lock; the inner run sees MAGENT_HOOK_LOCKED and goes on.
+if [ -z "${MAGENT_HOOK_LOCKED:-}" ]; then
+    exec bash "$root/scripts/with-hook-lock.sh" "$0" "$@"
+fi
 fail=0
 step() {
     # Keep the label. It used to `shift` first and then print "$1" on failure,
@@ -24,7 +31,7 @@ step "syntax: every shell script"  bash -c '
         esac
     done
     exit $rc'
-step "offline test suite"          bash "$root/tests/run-tests.sh"
+step "offline test suite"          nice -n 15 bash "$root/tests/run-tests.sh"
 # Every profile, with the ambient MAINTAINER_PROFILE cleared. git runs hooks
 # with the caller's environment, and new-profile.sh tells the adopter to export
 # that variable, so the hook once validated whichever profile happened to be
@@ -35,7 +42,7 @@ for pe in "$root"/profiles/*/profile.env; do
     step "eval rules still present ($pn)" \
         env -u MAINTAINER_PROFILE MAINTAINER_PROFILE="$pn" bash "$root/evals/run-evals.sh"
 done
-step "shellcheck sweep"            bash "$root/scripts/shellcheck-sweep.sh"
+step "shellcheck sweep"            nice -n 15 bash "$root/scripts/shellcheck-sweep.sh"
 step "docs match the code"          python3 "$root/scripts/check_drift.py"
 step "figures are rendered"         python3 "$root/scripts/render_figures.py" --check --no-tests
 step "README numbers are derived"  bash "$root/scripts/check_claims.sh"

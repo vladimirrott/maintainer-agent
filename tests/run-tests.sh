@@ -10976,6 +10976,124 @@ for f in profiles/sysknife/prompts/review.md profiles/magent/prompts/review.md p
 done
 rm -f "$stub_dir/gh"
 
+echo "== the local gates cannot starve the machine =="
+# 2026-11-09: four agents committed in four worktrees at once. Each hook ran the
+# linter sweep, and the linter needs about 8 GB for tests/run-tests.sh (peak RSS
+# 8.2 GB, 21 s, measured). Two overlapped, the kernel hit a global OOM, killed the
+# linter and took the terminal scope with it. An address-space ulimit does not
+# fix it: the linter exits 251 on that file at 6 GB and at 12 GB, because its
+# runtime reserves more than it uses. (A comment that starts with the tool's name
+# followed by a word is read as one of its directives, so these lines avoid it.) So the sweep waits for free memory, runs in
+# a memory-capped scope, and the hook takes one lock per machine.
+sw="$root/scripts/shellcheck-sweep.sh"; hl="$root/scripts/with-hook-lock.sh"
+hk="$stub_dir/hookcap"; mkdir -p "$hk"
+hk_path() {  # hk_path <name> [systemd-run]: a PATH with the tools the sweep needs and a stub linter
+    local d="$hk/$1"; rm -rf "$d"; mkdir -p "$d"
+    local t src
+    for t in git head tr sort bash readlink dirname grep sed sleep cat env nice flock; do
+        src="$(command -v "$t" 2>/dev/null)" && ln -sf "$src" "$d/$t"
+    done
+    # `command -v true` names the builtin, not a file; the stub systemd-run execs a real one.
+    ln -sf "$(type -P true)" "$d/true"
+    cat > "$d/shellcheck" <<'STUB'
+#!/usr/bin/env bash
+echo "shellcheck $#" >> "$HK_LOG"
+exit "${SC_RC:-0}"
+STUB
+    if [ "${2:-}" = systemd-run ]; then
+        cat > "$d/systemd-run" <<'STUB'
+#!/usr/bin/env bash
+echo "systemd-run $*" >> "$HK_SDLOG"
+[ -z "${SD_FAIL:-}" ] || exit 1
+while [ $# -gt 0 ]; do case "$1" in -p) shift 2 ;; --*) shift ;; *) break ;; esac; done
+exec "$@"
+STUB
+    fi
+    chmod +x "$d"/shellcheck "$d"/systemd-run 2>/dev/null
+    printf '%s' "$d"
+}
+meminfo() { printf 'MemTotal:       32000000 kB\nMemAvailable:   %s kB\n' "$1" > "$hk/meminfo"; printf '%s' "$hk/meminfo"; }
+sweep_run() {  # sweep_run <path> <meminfo-file> [VAR=val ...]; sets out, rc, and the two logs
+    local p="$1" mi="$2"; shift 2
+    : > "$hk/sc.log"; : > "$hk/sd.log"
+    out="$(env -u CI HK_LOG="$hk/sc.log" HK_SDLOG="$hk/sd.log" PATH="$p" MAGENT_MEMINFO="$mi" \
+        MAGENT_SWEEP_WAIT=0 MAGENT_SWEEP_POLL=1 "$@" bash "$sw" 2>&1)"; rc=$?
+}
+p_plain="$(hk_path plain)"; p_cap="$(hk_path capped systemd-run)"
+sweep_run "$p_plain" "$(meminfo 1000)"
+[ "$rc" = 75 ] && grep -q 'MemAvailable' <<<"$out" && [ ! -s "$hk/sc.log" ] \
+    && ok "the sweep refuses to start (75) when too little memory is free, and never starts the linter" \
+    || bad "low memory did not stop the sweep (rc=$rc, linter ran: $(wc -l < "$hk/sc.log")): $out"
+sweep_run "$p_plain" "$(meminfo 20000000)"
+[ "$rc" = 0 ] && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && ok "with enough memory free the sweep runs the linter once, over every script" \
+    || bad "the sweep with enough memory (rc=$rc, linter runs: $(wc -l < "$hk/sc.log")): $out"
+printf 'MemTotal: 32000000 kB\n' > "$hk/nomem"
+sweep_run "$p_plain" "$hk/nomem"
+[ "$rc" = 75 ] && [ ! -s "$hk/sc.log" ] \
+    && ok "a meminfo with no MemAvailable line refuses instead of guessing" \
+    || bad "an unreadable memory figure let the sweep start (rc=$rc): $out"
+sweep_run "$p_cap" "$(meminfo 20000000)"
+# The scope probe logs the same flags (it ends in `true`), so the case reads the
+# line that carries the linter: that is the one proving the linter ran inside it.
+[ "$rc" = 0 ] && grep -q -- '--scope.*MemoryMax=12G.*MemorySwapMax=0.* shellcheck ' "$hk/sd.log" \
+    && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && ok "the linter runs inside a memory-capped scope with no swap" \
+    || bad "the linter ran uncapped (rc=$rc): $(cat "$hk/sd.log")"
+sweep_run "$p_cap" "$(meminfo 20000000)" MAGENT_SWEEP_MEM_MAX=3G
+grep -q 'MemoryMax=3G.* shellcheck ' "$hk/sd.log" \
+    && ok "MAGENT_SWEEP_MEM_MAX sets the cap" \
+    || bad "the cap ignored MAGENT_SWEEP_MEM_MAX: $(cat "$hk/sd.log")"
+sweep_run "$p_cap" "$(meminfo 20000000)" SC_RC=137
+[ "$rc" != 0 ] && grep -q 'killed' <<<"$out" \
+    && ok "a linter killed by the cap fails the sweep and says so" \
+    || bad "a killed linter passed or went unexplained (rc=$rc): $out"
+sweep_run "$p_cap" "$(meminfo 1000)" CI=1
+[ "$rc" = 0 ] && [ ! -s "$hk/sd.log" ] && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && ok "under CI the gate and the cap stand down: the runner is its own sandbox" \
+    || bad "CI was gated or capped (rc=$rc): $out"
+sweep_run "$p_cap" "$(meminfo 20000000)" SD_FAIL=1
+[ "$rc" = 0 ] && grep -q 'no memory cap' <<<"$out" && [ "$(wc -l < "$hk/sc.log")" = 1 ] \
+    && ok "a host with no user scope runs uncapped and says so" \
+    || bad "a failing systemd-run broke or silently uncapped the sweep (rc=$rc): $out"
+
+lockf="$hk/hook.lock"
+# The pre-commit hook exports MAGENT_HOOK_LOCKED into this very run, so every case
+# that expects the lock to be taken clears it.
+out="$(env -u MAGENT_HOOK_LOCKED MAGENT_HOOK_LOCK="$lockf" bash "$hl" bash -c 'exit 7' 2>&1)"; rc=$?
+[ "$rc" = 7 ] && ok "the hook lock passes the command's exit code through" \
+    || bad "the hook lock returned rc=$rc for a command that exits 7: $out"
+if command -v flock >/dev/null 2>&1; then
+    # The subshell takes the lock on fd 9, then becomes `sleep` (exec), so one pid
+    # is both the holder and the thing the kill below ends.
+    ( exec 9>"$lockf"; flock 9; exec sleep 30 ) &
+    holder=$!
+    for _ in $(seq 1 50); do flock -n "$lockf" true 2>/dev/null || break; sleep 0.1; done
+    if [ "$(basename "$(readlink "/proc/$holder/exe" 2>/dev/null)")" = sleep ] && ! flock -n "$lockf" true 2>/dev/null; then
+        out="$(env -u MAGENT_HOOK_LOCKED MAGENT_HOOK_LOCK="$lockf" MAGENT_HOOK_LOCK_WAIT=1 bash "$hl" true 2>&1)"; rc=$?
+        [ "$rc" = 75 ] && grep -q 'another' <<<"$out" \
+            && ok "a second gate run waits for the lock, then gives up with 75 and says why" \
+            || bad "a held lock did not stop the second run (rc=$rc): $out"
+        out="$(MAGENT_HOOK_LOCKED=1 MAGENT_HOOK_LOCK="$lockf" MAGENT_HOOK_LOCK_WAIT=2 bash "$hl" bash -c 'exit 0' 2>&1)"; rc=$?
+        [ "$rc" = 0 ] \
+            && ok "a run that already holds the lock does not wait on itself" \
+            || bad "the nested run deadlocked on its own lock (rc=$rc): $out"
+    else
+        bad "the lock holder is not a live flock process, so the lock cases proved nothing"
+    fi
+    kill "$holder" 2>/dev/null; wait "$holder" 2>/dev/null
+else
+    noenv "hook lock cases need flock"
+fi
+p_noflock="$(hk_path noflock)"; rm -f "$p_noflock/flock"
+out="$(env -u MAGENT_HOOK_LOCKED PATH="$p_noflock" MAGENT_HOOK_LOCK="$lockf" bash "$hl" bash -c 'exit 3' 2>&1)"; rc=$?
+[ "$rc" = 3 ] && grep -q 'not serialised' <<<"$out" \
+    && ok "without flock the gate still runs and says it was not serialised" \
+    || bad "a missing flock stopped or silently unserialised the gate (rc=$rc): $out"
+grep -q 'with-hook-lock.sh' "$root/.githooks/pre-commit" && [ "$(grep -c 'nice -n 15' "$root/.githooks/pre-commit")" -ge 2 ] \
+    && ok "the pre-commit hook takes the machine lock and runs its heavy steps at low priority" \
+    || bad "the pre-commit hook runs unserialised or at full priority"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
