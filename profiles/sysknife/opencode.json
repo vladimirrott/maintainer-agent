@@ -79,6 +79,7 @@
       "*gh release*": "deny",
       "*gh pr merge*": "deny",
       "*gh api*update-branch*": "deny",
+      "*gh api*updatePullRequestBranch*": "deny",
       "*gh workflow run*": "deny",
       "*gh auth token*": "deny",
       "*gh secret*": "deny",

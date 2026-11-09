@@ -1924,6 +1924,7 @@ for tag, want, cmd in (
     ("deny", True, "gh api --method PUT repos/o/r/pulls/31/update-branch"),
     ("deny", True, "gh api repos/o/r/pulls/31/update-branch -X PUT"),
     ("deny", True, "gh api repos/o/r/pulls/31/update-branch --method PUT -f x=y"),
+    ("deny", True, "gh api graphql -f query='mutation{updatePullRequestBranch(input:{pullRequestId:\"x\"}){clientMutationId}}'"),
     ("deny", True, "maintainer-merge receipt 31 abc proof"),
 ):
     print(("ok " if hit(cmd) == want else "BAD ") + f"{tag} {cmd}")
@@ -1935,8 +1936,8 @@ for wp in _template magent sysknife; do
         && ok "$wp: the deny wall renders" || bad "$wp: render-settings failed on its deny.json"
     verdicts="$(wallchk "$wd/settings.json")"
     badv="$(grep '^BAD ' <<<"$verdicts" || true)"
-    [ -z "$badv" ] && [ "$(grep -c '^ok ' <<<"$verdicts")" = 11 ] \
-        && ok "$wp: update is matched by no deny rule, and every raw update-branch spelling is denied (11 probes)" \
+    [ -z "$badv" ] && [ "$(grep -c '^ok ' <<<"$verdicts")" = 12 ] \
+        && ok "$wp: update is matched by no deny rule, and every raw update-branch spelling is denied (12 probes)" \
         || bad "$wp: wall verdicts wrong: $(tr '\n' ';' <<<"${badv:-$verdicts}")"
     python3 - "$wd/settings.json" "$wd/settings-rehearsal.json" <<'PYEOF2' && ok "$wp: a rehearsal denies maintainer-merge update, the live wall does not" || bad "$wp: the rehearsal wall does not deny maintainer-merge update"
 import json, sys
@@ -1960,7 +1961,8 @@ def decide(c):
 want = {"maintainer-merge update 5": "allow",
         "gh pr update-branch 5": "deny",
         "gh api repos/o/r/pulls/5/update-branch -X PUT": "deny",
-        "gh api -X PUT repos/o/r/pulls/5/update-branch": "deny"}
+        "gh api -X PUT repos/o/r/pulls/5/update-branch": "deny",
+        "gh api graphql -f query=mutation{updatePullRequestBranch(input:{})}": "deny"}
 bad = {c: decide(c) for c, w in want.items() if decide(c) != w}
 sys.exit(1 if bad else 0)
 PYEOF2

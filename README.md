@@ -150,7 +150,7 @@ there stops Dependabot rebasing it; `gh pr update-branch` is in the deny wall, a
 Stated precisely, because a vague claim here is worse than none.
 
 **1. The backend deny list, and precisely what it is worth.** Under the Claude
-backend, `--settings` carries **<!-- fig:denied_verbs -->39<!-- /fig --> denied verbs**: `git push`, `git tag`,
+backend, `--settings` carries **<!-- fig:denied_verbs -->40<!-- /fig --> denied verbs**: `git push`, `git tag`,
 `gh pr merge`, `gh release`, `cargo publish`, `npm publish`, `gh workflow run`,
 `gh repo delete`, `gh issue create` (issue creation goes through the deduplicating `maintainer file-issue`), `gh pr update-branch` (a Dependabot branch is rebased by asking Dependabot), `curl`, `wget`, and reads of `~/.ssh`, `~/.config/gh`,
 `~/.aws`, `~/.gnupg`, `~/.netrc` and credentials files, among the rest.

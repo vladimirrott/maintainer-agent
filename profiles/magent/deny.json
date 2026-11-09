@@ -21,6 +21,7 @@
   "gh api -X DELETE",
   "gh api -X PUT",
   "gh api *update-branch",
+  "gh api graphql*updatePullRequestBranch*",
   "gh auth token",
   "gh issue create",
   "gh pr create",
