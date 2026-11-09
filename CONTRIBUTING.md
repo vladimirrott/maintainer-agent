@@ -98,6 +98,29 @@ because they asserted against whatever profile happened to be deployed on the
 author's machine and whatever timers happened to be registered. A test that
 reads your deployment is measuring you.
 
+### Running the suite against another tree
+
+The suite tests the programs it finds under `MX_TREE`, or in the checkout that
+holds `tests/run-tests.sh` when the variable is unset. Point it at any copy of
+this layout (`bin/`, `lib/`, `profiles/`, `platform/`, `scripts/`, `evals/`,
+`install.sh`, `new-profile.sh`, and the docs and workflow files the cases read):
+
+```sh
+MX_TREE=/path/to/tree bash ./tests/run-tests.sh
+```
+
+The first line of output names the tree. If the directory lacks
+`bin/maintainer-merge`, `lib/run.sh` or `profiles/`, the suite prints one line and
+exits 2 before it runs a case.
+
+A case is source-coupled when it greps a shell program's text, sources a program
+and calls an internal function, or runs a checker that scans program text. The
+summary line counts them. A tree whose programs are not shell text cannot satisfy
+them, so `MX_SKIP_SOURCE_COUPLED=1` skips each one and reports it as a skip. CI
+requires zero skips, so only a run against such a tree sets the variable. Wrap a
+new source-coupled case in `if sc_case N; then ... sc_end; fi`, where `N` is the
+number of cases the block records, and leave black-box cases outside the wrapper.
+
 ## What a change here has to prove
 
 This project's whole value is refusals, so a change that touches one must show

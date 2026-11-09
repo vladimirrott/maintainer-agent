@@ -9,7 +9,30 @@ set -uo pipefail
 # write into the caller's index (lesson 110), so none of them survive this line.
 # shellcheck disable=SC2046  # the names are git's own fixed list, one per word
 unset $(git rev-parse --local-env-vars)
-root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+# Two roots, because two different things are being named.
+#
+#   suite_root  the checkout that holds this file. The suite's own text goes
+#               through it and nothing else does.
+#   root        the tree under test: every program, profile, script and document
+#               the cases run or read. It is suite_root unless MX_TREE names
+#               another directory with the same layout, which is how a build whose
+#               programs are not shell is held to the same cases.
+#
+# MX_TREE is checked before anything runs. A tree that is missing what every case
+# needs would otherwise fail a thousand cases for one reason, and a wrong path
+# would read as a tree that fails.
+suite_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -n "${MX_TREE:-}" ]; then
+    root="$(cd -- "$MX_TREE" 2>/dev/null && pwd)" || root="$MX_TREE"
+else
+    root="$suite_root"
+fi
+if [ ! -f "$root/bin/maintainer-merge" ] || [ ! -f "$root/lib/run.sh" ] || [ ! -d "$root/profiles" ]; then
+    printf 'run-tests.sh: MX_TREE=%s is not a tree under test: it needs bin/maintainer-merge, lib/run.sh and profiles/\n' "$root" >&2
+    exit 2
+fi
+printf 'tree under test: %s\n' "$root"
 
 # Clear anything a run exports before measuring anything.
 #
@@ -26,13 +49,60 @@ unset MAINTAINER_FORCE MAINTAINER_POST MAINTAINER_PROFILE MAINTAINER_SETTINGS \
       MAINTAINER_TASKS MAINTAINER_SKILL MAINTAINER_IN_RUN MAINTAINER_SCRIPTS \
       MAINTAINER_BACKEND MAINTAINER_PROSE_STYLE MAINTAINER_ACCOUNT
 pass=0; fail=0; skip=0
-ok()   { printf '  PASS  %s\n' "$1"; pass=$((pass+1)); }
-bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+ok()   { printf '  PASS  %s\n' "$1"; pass=$((pass+1)); sc_count; }
+bad()  { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); sc_count; }
 # A skip is not a pass. It is counted separately, printed in the summary, and CI
 # requires the count to be zero, so a case that stops running because a tool went
 # missing shows up as a gap rather than as silence. The only user today is the
 # container verification, which needs podman or docker and cannot be faked.
 noenv(){ printf '  SKIP  %s\n' "$1"; skip=$((skip+1)); }
+
+# Source-coupled cases. A case is source-coupled when its verdict depends on the
+# TEXT of a shell program in the tree under test: it greps or sed-extracts the
+# program, sources it and calls an internal function, or runs a checker that
+# scans program text. A black-box case runs a program and reads what it prints,
+# writes and exits with, so it holds for any tree with this layout, a Rust build
+# included. A source-coupled case cannot: a binary has no text to grep and no
+# function to source, and a grep that happens to match a binary proves nothing.
+#
+#     if sc_case 2; then
+#     ...two cases: ok, bad or check calls...
+#     sc_end
+#     fi
+#
+# sc_case N opens a block that records exactly N outcomes. With
+# MX_SKIP_SOURCE_COUPLED=1 it returns 1, nothing in the block runs, and the N
+# cases count as N skips. sc_end proves the block recorded N outcomes, so the
+# number a skipped run reports is the number a normal run executes. The body is
+# not indented, so a heredoc inside it keeps its bytes. CI requires zero skips:
+# the only user of MX_SKIP_SOURCE_COUPLED is a run against a tree that is not
+# shell, never the gate for this repository.
+sc_total=0; sc_open=0; sc_want=0; sc_got=0; sc_line=0
+sc_count() { [ "$sc_open" = 1 ] || return 0; sc_got=$((sc_got+1)); sc_total=$((sc_total+1)); }
+# A malformed block is a defect in the suite, and it is counted as a failure, not
+# as an outcome of the block it is in.
+sc_flag() { printf '  FAIL  %s\n' "$1" >&2; fail=$((fail+1)); }
+sc_case() {
+    local n="$1" line="${BASH_LINENO[0]}"
+    if [ "$sc_open" = 1 ]; then
+        sc_flag "the source-coupled block at run-tests.sh:$sc_line was never closed with sc_end"; sc_open=0
+    fi
+    case "$n" in ''|*[!0-9]*|0) sc_flag "sc_case at run-tests.sh:$line needs a positive case count, not '$n'"; return 1 ;; esac
+    if [ "${MX_SKIP_SOURCE_COUPLED:-}" = 1 ]; then
+        sc_total=$((sc_total+n)); skip=$((skip+n))
+        printf '  SKIP  source-coupled, %d case(s) at run-tests.sh:%d\n' "$n" "$line"
+        return 1
+    fi
+    sc_open=1; sc_want=$n; sc_got=0; sc_line=$line
+}
+sc_end() {
+    if [ "$sc_open" != 1 ]; then sc_flag "sc_end at run-tests.sh:${BASH_LINENO[0]} closes no sc_case"; return 0; fi
+    sc_open=0
+    [ "$sc_got" = "$sc_want" ] \
+        || sc_flag "the source-coupled block at run-tests.sh:$sc_line declares $sc_want case(s) and recorded $sc_got"
+}
+sc_note() { printf ' (%d source-coupled cases)' "$sc_total"; }
+
 check(){ if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (expected '$3', got '$2')"; fi; }
 
 # The sysknife shell suite builds its own image, because the release rehearsal
@@ -593,22 +663,28 @@ echo "== the test suite cannot reach the real desktop notifier =="
 # A stub in $rbin would fix those two and the next minimal-PATH block would
 # bring it back. This is the second toast complaint in one session, so the
 # pattern changes rather than the site.
-grep -qE '^export MAINTAINER_NOTIFY=off' "$root/tests/run-tests.sh" \
+grep -qE '^export MAINTAINER_NOTIFY=off' "$suite_root/tests/run-tests.sh" \
     && ok "the suite turns notifications off for the whole process" \
     || bad "nothing stops a case with a minimal PATH from reaching the real notifier"
+if sc_case 1; then
 grep -q 'MAINTAINER_NOTIFY' "$root/lib/run.sh" \
     && ok "and run.sh honours it" \
     || bad "run.sh notifies regardless of what the caller asked for"
+sc_end; fi
 # systemd's OnFailure handler is a second notifier, and lesson 66 is that one
 # failure firing two popups is how somebody learns to dismiss both.
+if sc_case 1; then
 grep -q 'MAINTAINER_NOTIFY' "$root/platform/linux/alert.sh" \
     && ok "and so does the systemd OnFailure alert, so one setting covers both" \
     || bad "alert.sh still pops a critical toast on a host that asked for none"
+sc_end; fi
 # The audit trail is not optional. Turning the popup off must not turn off the
 # record of what failed.
+if sc_case 1; then
 grep -q 'alerts.log' "$root/platform/linux/alert.sh" \
     && ok "and the alert trail is written before the popup is even considered" \
     || bad "the switch could silence the record as well as the desktop"
+sc_end; fi
 
 # Behaviourally, in both directions, because a switch that silences everything
 # would be worse than the popups: the timers are supposed to notify.
@@ -726,39 +802,53 @@ printf 'API Error: Can%st reach the API server - check your internet or DNS (EAI
 printf 'Failed to authenticate: OAuth session expired and could not be refreshed\n' > "$tcl/oauth.log"
 printf 'thread panicked at src/main.rs:12: assertion failed\n' > "$tcl/real.log"
 # shellcheck disable=SC1090
+if sc_case 1; then
 tr_out=$( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/dns.log" ); tr_rc=$?
 { [ "$tr_rc" = 0 ] && grep -qi 'EAI_AGAIN' <<<"$tr_out"; } \
     && ok "a DNS failure reaching the API is classified as transient, quoting what matched" \
     || bad "EAI_AGAIN was called permanent, so it raised three critical toasts (rc=$tr_rc, '$tr_out')"
+sc_end; fi
 # shellcheck disable=SC1090
+if sc_case 1; then
 ( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/oauth.log" >/dev/null ) \
     && bad "an expired OAuth session was called transient, so nobody is told to log in" \
     || ok "an expired login is NOT transient, because no retry fixes it"
+sc_end; fi
 # shellcheck disable=SC1090
+if sc_case 1; then
 ( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_transient_reason "$tcl/real.log" >/dev/null ) \
     && bad "a genuine panic was waved through as transient" \
     || ok "a genuine failure is still not transient"
+sc_end; fi
 # An expired login needs a person, so it stays critical. It also repeats on
 # every timer until that person acts, which is the part that becomes noise.
 # shellcheck disable=SC1090
+if sc_case 1; then
 ( . "$root/lib/profile.sh" >/dev/null 2>&1; declare -F backend_needs_human_reason >/dev/null ) \
     && ok "there is a class for a failure that needs a person rather than a retry" \
     || bad "an expired login is lumped in with an unknown crash"
+sc_end; fi
 # shellcheck disable=SC1090
+if sc_case 1; then
 nh=$( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_needs_human_reason "$tcl/oauth.log" 2>/dev/null ); nh_rc=$?
 { [ "$nh_rc" = 0 ] && grep -qi 'oauth' <<<"$nh"; } \
     && ok "and an expired OAuth session is in it, quoting what matched" \
     || bad "the expired-login shape is not recognised (rc=$nh_rc, '$nh')"
+sc_end; fi
 # shellcheck disable=SC1090
+if sc_case 1; then
 ( . "$root/lib/profile.sh" >/dev/null 2>&1; backend_needs_human_reason "$tcl/dns.log" >/dev/null 2>&1 ) \
     && bad "a DNS blip is being reported as something a person must fix" \
     || ok "and a DNS blip is not"
+sc_end; fi
 # The toast has to say what to do. "Failed to authenticate" is the vocabulary of
 # the thing that broke, not a message to a person.
+if sc_case 1; then
 grep -q 'login' <<< "$( . "$root/lib/run.sh" 2>/dev/null; true )" 2>/dev/null || true
 grep -qE 'OAuth|authenticate' "$root/lib/run.sh" \
     && ok "run.sh translates an expired login into an instruction" \
     || bad "the raw 'Failed to authenticate' string is what reaches the desktop"
+sc_end; fi
 
 echo "== the audit names the cause, not whatever the log said last =="
 # _why_it_died returned the last non-header line, which is a heuristic and was
@@ -816,12 +906,16 @@ echo "== release-check says so when it read a CHANGELOG that is not the one you 
 # The existing guard asks whether HEAD is an ancestor of origin/main, which is
 # TRUE for a stale checkout. Being behind is the common case and it read as
 # healthy.
+if sc_case 1; then
 grep -q 'HEAD\.\.origin/main\|rev-list --count' "$root/bin/maintainer-repo" \
     && ok "release-check counts how far behind the tree is" \
     || bad "a checkout behind origin/main still reports a confident digit"
+sc_end; fi
+if sc_case 1; then
 grep -qi 'behind' "$root/bin/maintainer-repo" \
     && ok "and says so in words, next to the verdict it affects" \
     || bad "nothing tells the reader the CHANGELOG is not the one being tagged"
+sc_end; fi
 
 echo "== a container the kernel killed is not a test that failed =="
 # sysknife#470's verify came back `the test does not pass unmutated (rc=137)`.
@@ -829,12 +923,15 @@ echo "== a container the kernel killed is not a test that failed =="
 # memory cap or the OOM killer, and the pull request had nothing to do with it.
 # looks_environmental reads the LOG, and a killed process writes no diagnostic
 # at all, so no shape could ever match. The signal is in the exit code.
+if sc_case 1; then
 grep -qE '\b137\b' "$root/bin/maintainer-merge" \
     && ok "the gate knows what exit 137 means" \
     || bad "a SIGKILLed container is still reported as the contributor's test failing"
+sc_end; fi
 # And it must stay narrow: an ordinary non-zero is still the pull request's.
 kexit="$stub_dir/killexit"; rm -rf "$kexit"; mkdir -p "$kexit"
 : > "$kexit/empty.log"
+if sc_case 3; then
 kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 137 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
 [ "$kf" = yes ] && ok "137 is recognised as a kill" || bad "137 is not recognised (got '$kf')"
 kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 101 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
@@ -843,15 +940,20 @@ kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 101 
 kf=$(bash -c 'eval "$(sed -n "/^looks_killed()/,/^}/p" "$1")"; looks_killed 143 && echo yes || echo no' _ "$root/bin/maintainer-merge" 2>/dev/null)
 [ "$kf" = yes ] && ok "and SIGTERM (143), which is how the timeout arrives" \
     || bad "a timed-out container reads as a failing test (got '$kf')"
+sc_end; fi
 # The direction that matters most. The mutated run is EXPECTED to fail, so any
 # non-zero was read as the guard biting, and a container the memory cap killed
 # would mint a receipt on no evidence at all. A kill is not a proof.
+if sc_case 1; then
 grep -q 'looks_killed "$mut_rc"' "$root/bin/maintainer-merge" \
     && ok "a killed mutated run is refused rather than counted as the guard biting" \
     || bad "an OOM-killed mutation still buys a receipt"
+sc_end; fi
+if sc_case 1; then
 grep -q 'looks_killed "$clean_rc"' "$root/bin/maintainer-merge" \
     && ok "and a killed clean run is blamed on the container, not the contributor" \
     || bad "a killed clean run still reads as the pull request failing"
+sc_end; fi
 
 echo "== install.sh refuses to replace a tree a run is reading =="
 # install.sh does `rm -rf "$share/profiles"` and recopies. On 2026-09-21 a
@@ -860,9 +962,11 @@ echo "== install.sh refuses to replace a tree a run is reading =="
 # reads those files the whole way through; deleting them mid-run is a failure
 # nobody would be able to explain afterwards, because the evidence goes with
 # the directory.
+if sc_case 1; then
 grep -qE 'flock|run\.lock' "$root/install.sh" \
     && ok "install.sh asks whether a run is in flight" \
     || bad "install.sh replaces the deployed tree without checking for a live run"
+sc_end; fi
 ilk="$stub_dir/instlock"; rm -rf "$ilk"; mkdir -p "$ilk/state"
 : > "$ilk/state/run.lock"
 # Hold the lock the way a run does, then drive the check out of install.sh.
@@ -1051,6 +1155,7 @@ printf 'Compiling foo v1.0\nassertion failed: left != right\n' > "$envd/real.log
 # Drive the predicate straight out of the file: it is a pure function of a log
 # and the tool around it needs a whole profile to start.
 env_mg="$root/bin/maintainer-merge"
+if sc_case 5; then
 hit=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_environmental "$2"' _ "$env_mg" "$envd/glib.log") || true
 grep -qi 'system library' <<<"$hit" \
     && ok "an environmental refusal names the line that made it environmental" \
@@ -1078,6 +1183,7 @@ gp=$(bash -c 'eval "$(sed -n "/^looks_environmental()/,/^}/p" "$1")"; looks_envi
 grep -qi 'system library\|custom build command' <<<"$gp" \
     && ok "and a genuinely missing system library still is" \
     || bad "narrowing the shape lost the case it was written for: '$gp'"
+sc_end; fi
 
 echo "== the failure taxonomy is configuration, not a regex buried in a function =="
 # Two instructions met by one change. The shapes that decide whether a run is
@@ -1105,9 +1211,11 @@ for sh in d["shapes"]:
         assert sh.get("fix"), f"{sh['id']} tells nobody what to do"
 PYEOF
 # No number in the classifier that the table could carry instead.
+if sc_case 1; then
 grep -nE 'grep -aoiE "you' "$root/lib/profile.sh" >/dev/null 2>&1 \
     && bad "the alternation is still hardcoded in backend_transient_reason" \
     || ok "backend_transient_reason reads the table rather than carrying one"
+sc_end; fi
 
 echo "== every failure is classified, or says out loud that it was not =="
 tcx="$stub_dir/classify2"; rm -rf "$tcx"; mkdir -p "$tcx"
@@ -1115,6 +1223,7 @@ printf 'API Error: Can%st reach the API server - check your internet or DNS (EAI
 printf 'Failed to authenticate: OAuth session expired and could not be refreshed\n' > "$tcx/oauth.log"
 printf 'thread panicked at src/main.rs:12: assertion failed\n' > "$tcx/odd.log"
 # shellcheck disable=SC1090
+if sc_case 5; then
 cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; maintainer_classify_failure "$tcx/dns.log" ); crc=$?
 [ "$crc" = 0 ] && grep -q '^transient' <<<"$cls" \
     && ok "a DNS blip classifies as transient, with a cause id: $(cut -f2 <<<"$cls")" \
@@ -1142,6 +1251,7 @@ cls=$( . "$root/lib/profile.sh" >/dev/null 2>&1; MAINTAINER_FAILURE_SHAPES=/none
 [ "$crc" != 0 ] \
     && ok "an unreadable taxonomy refuses rather than reporting nothing wrong" \
     || bad "with no table every failure classified as clean"
+sc_end; fi
 
 echo "== one broken run raises one critical toast, not two =="
 # The second alert says "produced no report", which is the SAME event described
@@ -1187,12 +1297,14 @@ make_stub gh "case \"\$*\" in *'auth switch'*) exit 0;; *'auth token'*) echo TOK
 # And the OnFailure script must write to the failing profile's trail only. It
 # globbed every *-maint directory, so a magent failure appeared in sysknife's
 # alerts.log and an operator reading either one saw the other's incidents.
+if sc_case 1; then
 grep -q 'instance%%-\*\|profile=' "$root/platform/linux/alert.sh" \
     && ok "the alert resolves which profile failed" \
     || bad "the alert still writes every profile's trail"
+sc_end; fi
 
 echo "== the suite provisions from a local origin, never from the network =="
-grep -q 'export MAINTAINER_REPO_ORIGIN=' "$root/tests/run-tests.sh" \
+grep -q 'export MAINTAINER_REPO_ORIGIN=' "$suite_root/tests/run-tests.sh" \
     && ok "every case clones from a bare repo created here" \
     || bad "a case that reaches provisioning would clone from github.com"
 [ -d "$suite_origin" ] \
@@ -1264,11 +1376,13 @@ s="$wall_dir/settings.json"
 echo "== the Codex backend documents its weaker containment =="
 # Codex has no per-command deny list. If someone swaps the default backend
 # without reading that, publishing verbs stop being blocked. Pin the warning.
+if sc_case 1; then
 if grep -q 'COARSER' "$root/lib/backends/codex.sh"; then
     ok "codex backend states its containment is coarser"
 else
     bad "codex backend no longer warns that it cannot express a deny list"
 fi
+sc_end; fi
 if grep -q 'BACKEND="\${MAINTAINER_BACKEND:-claude}"' "$root/profiles/sysknife/profile.env"; then
     ok "default backend is claude"
 else
@@ -1460,9 +1574,11 @@ echo "== the mutation cannot execute on the host =="
 # the agent to pass `s/x/id/e`. sed --sandbox rejects e/w/r, so a mutation is a
 # transform and nothing else. Asserted on the source because the exec path needs
 # a real container run to exercise end to end; the flag is the guarantee.
+if sc_case 1; then
 grep -q 'sed --sandbox -i "$mutation"' "$root/bin/maintainer-merge" \
     && ok "the host-side mutation runs sed in --sandbox mode" \
     || bad "the mutation runs sed without --sandbox, so an e-flag mutation execs on the host"
+sc_end; fi
 # And prove --sandbox actually blocks it on this machine, so the flag is not
 # cargo-culted from a version that lacks it.
 sbx="$stub_dir/sbx"; rm -rf "$sbx"; mkdir -p "$sbx"; echo hello > "$sbx/f"; rm -f "$sbx/SBXPWN"
@@ -1740,6 +1856,7 @@ ut_run_rc 35; ut_expect "a docs-only head move keeps the receipt valid, as it do
 # production is then covered by nothing.
 # Only a part-receipt (verify-part) can fall short of the whole diff; a whole
 # receipt is covered by construction. This one names no suite.
+if sc_case 1; then
 ut_reset 35; printf 'crates/x/src/lib.rs\n' > "$ut/d/files"
 python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
 import json, sys
@@ -1748,6 +1865,8 @@ json.dump(d, open(sys.argv[1], "w"), indent=2)
 PYEOF2
 bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
 ut_run_rc 35; ut_expect "a part-receipt that does not reach the production paths is refused" 1 "was earned by" 0
+sc_end; fi
+if sc_case 1; then
 ut_reset 35; printf 'docs/a.md\n' > "$ut/d/files"
 python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
 import json, sys
@@ -1756,7 +1875,9 @@ json.dump(d, open(sys.argv[1], "w"), indent=2)
 PYEOF2
 bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
 ut_run_rc 35; ut_expect "and a part-receipt that names no suite speaks for nothing, whatever the diff" 1 "names no suite" 0
+sc_end; fi
 # `merge` asks the same question through the same function.
+if sc_case 1; then
 ut_reset 35; printf 'crates/x/src/lib.rs\n' > "$ut/d/files"
 python3 - "$MAINTAINER_STATE/receipts/35.json" <<'PYEOF2'
 import json, sys
@@ -1766,6 +1887,7 @@ PYEOF2
 bash -c '. "$1"; receipt_seal "$2"' _ "$mg" "$MAINTAINER_STATE/receipts/35.json" >/dev/null 2>&1
 out="$(PATH="$ut_bin:$stub_dir:$PATH" timeout 60 bash "$mg" merge 35 2>&1)"; rc=$?
 ut_expect "merge refuses the same part-receipt for the same reason" 1 "was earned by" 0
+sc_end; fi
 
 # --- 5. another actor's lease ----------------------------------------------------
 mkdir_leases() { mkdir -p "$MAINTAINER_STATE/leases"; }
@@ -2090,11 +2212,13 @@ for _v in "$root"/profiles/*/verify.d/*.sh; do
     esac
 done
 # And doctor has to say "build", not "pull", for an image no registry holds.
+if sc_case 1; then
 if grep -qE 'podman build .*-t ' "$root/bin/maintainer-doctor"; then
     ok "doctor tells you how to build a missing locally-built suite image"
 else
     bad "doctor would tell you to pull an image no registry has"
 fi
+sc_end; fi
 
 echo "== the installed layout resolves, not just the repo layout =="
 # The bug this catches: run.sh looked for profiles at ../profiles, which is right
@@ -2123,29 +2247,37 @@ else
     bad "prose style is no longer on by default"
 fi
 # A misspelled or absent value must still get the discipline. Only "raw" opts out.
+if sc_case 1; then
 if grep -q '!= "raw"' "$root/lib/run.sh"; then
     ok "only an explicit \"raw\" disables it; a typo still writes well"
 else
     bad "the opt-out is not fail-safe"
 fi
+sc_end; fi
 # And it must actually land in the assembled prompt.
+if sc_case 1; then
 if grep -q 'prose-style.md' "$root/lib/run.sh" && grep -q 'prose-style.md' "$root/install.sh"; then
     ok "prose style is assembled into the prompt and shipped by install"
 else
     bad "prose style is not wired into the prompt or not installed"
 fi
+sc_end; fi
 
 echo "== cross-platform: only scheduling forks, the core does not =="
 [ -f "$root/platform/linux/maintainer@.service" ]        && ok "linux: systemd units present"   || bad "linux units missing"
 [ -x "$root/platform/macos/install-launchd.sh" ]         && ok "macos: launchd installer present" || bad "macos installer missing"
 [ -f "$root/platform/windows/Install-Maintainer.ps1" ]   && ok "windows: PowerShell installer present" || bad "windows installer missing"
+if sc_case 1; then
 if grep -q 'uname -s' "$root/install.sh"; then ok "install.sh dispatches by platform"; else bad "install.sh is not platform-aware"; fi
+sc_end; fi
 # Only one implementation of the gate may exist.
 # Count only executable implementations. Prose that describes the gate (docs,
 # eval scenarios, this file) is not a second implementation, and an earlier
 # version of this check counted it as one.
+if sc_case 1; then
 gates=$(grep -rl 'no verification receipt' "$root/bin" "$root/lib" "$root/platform" 2>/dev/null | wc -l)
 if [ "$gates" = "1" ]; then ok "exactly one executable implementation of the merge gate"; else bad "$gates executable implementations of the merge gate (they will drift)"; fi
+sc_end; fi
 
 echo "== the PowerShell installer =="
 ps1="$root/platform/windows/Install-Maintainer.ps1"
@@ -2180,6 +2312,7 @@ echo "== every command a person can type is documented =="
 # compared the two. A command nobody can find is a command nobody uses, and the
 # drift is silent in both directions: a doc naming a command that was renamed
 # out of existence is the defect in docs/lessons.md 12.
+if sc_case 1; then
 CLI_TABLE="$(cli_table)" python3 - "$root" <<'PYEOF'
 import os, pathlib, re, sys
 root = pathlib.Path(sys.argv[1])
@@ -2215,6 +2348,7 @@ sys.exit("; ".join(errs) if errs else 0)
 PYEOF
 [ $? = 0 ] && ok "every non-internal subcommand appears in the docs" \
     || bad "a command exists that no document mentions"
+sc_end; fi
 [ -f "$root/docs/cli.md" ] && ok "there is a command reference" || bad "no docs/cli.md"
 grep -q 'cli.md' "$root/docs/SUMMARY.md" \
     && ok "and the book links it, so it is reachable" \
@@ -2231,6 +2365,7 @@ echo "== cursor has a wall now, and is still restricted until it is proven =="
 # command. A guard lifted because a configuration ought to work is the shape
 # docs/lessons.md keeps recording.
 cb="$root/lib/backends/cursor.sh"
+if sc_case 3; then
 grep -q 'backend_allowed_tasks' "$cb" && ok "cursor is still restricted while the wall is unproven" \
     || bad "cursor dropped its restriction; has the containment probe actually run?"
 grep -q 'CURSOR_CONFIG_DIR' "$cb" && ok "and it points cursor at a per-profile wall" \
@@ -2238,6 +2373,7 @@ grep -q 'CURSOR_CONFIG_DIR' "$cb" && ok "and it points cursor at a per-profile w
 grep -v '^[[:space:]]*#' "$cb" | grep -q 'no per-command deny list' \
     && bad "the stale claim is back in the cursor backend" \
     || ok "the stale no-deny-list claim is gone"
+sc_end; fi
 # Rendered into a scratch directory from the repository, never read out of the
 # deployed tree. The first version read $HOME/.local/share/maintainer/..., which
 # exists on the machine that wrote it and on no CI runner: it passed here and
@@ -2261,14 +2397,18 @@ PYEOF
     [ $? = 0 ] && ok "$prof denies verbs, not whole commands" \
         || bad "$prof would block the work rather than the damage"
 done
+if sc_case 1; then
 grep -q 'backend_allowed_tasks' "$root/lib/run.sh" && ok "run.sh enforces the declaration" || bad "run.sh ignores backend task restrictions"
+sc_end; fi
 # Only executable lines count. The file explains at length why --force is
 # absent, and an earlier version of this check read those comments as usage.
+if sc_case 1; then
 if sed 's/#.*//' "$cb" | grep -qE '(^|[[:space:]])--(force|yolo)([[:space:]]|$)'; then
     bad "cursor backend passes --force (full write access)"
 else
     ok "cursor backend never passes --force outside comments"
 fi
+sc_end; fi
 
 echo "== the receipt cannot be asserted by the agent, only observed =="
 if grep -q 'Bash(maintainer-merge receipt:\*)' "$s"; then
@@ -2276,16 +2416,20 @@ if grep -q 'Bash(maintainer-merge receipt:\*)' "$s"; then
 else
     bad "the agent can write its own receipt; the merge gate proves nothing"
 fi
+if sc_case 1; then
 if grep -q 'cmd_verify' "$mg" && grep -q 'THE GUARD DOES NOT BITE' "$mg"; then
     ok "verify runs the mutation and refuses a guard that stays green"
 else
     bad "there is no observed-verification path"
 fi
+sc_end; fi
+if sc_case 1; then
 if grep -q '"kind": "observed"' "$mg" || grep -q 'observed' "$mg"; then
     ok "receipts record whether they were observed or merely asserted"
 else
     bad "receipts do not distinguish observation from assertion"
 fi
+sc_end; fi
 
 echo "== absolute-path spellings of every blocked verb are denied =="
 # MEASURED: /usr/bin/touch evaded a rule written for touch. The matcher keys on
@@ -2359,7 +2503,9 @@ if bad: print("  wrong verdicts:", bad); sys.exit(1)
 sys.exit(0)
 PYEOF
 grep -q '"\*": "deny"' "$oc" && ok "opencode config is default-deny" || bad "opencode config is not default-deny"
+if sc_case 1; then
 grep -q 'default-deny' "$root/lib/backends/opencode.sh" && ok "opencode backend explains its posture" || bad "opencode backend does not state its containment"
+sc_end; fi
 
 
 echo "== a denied verb is denied when written with a relative path =="
@@ -2421,24 +2567,30 @@ echo "== POST=off selects the rehearsal wall by asking the backend, not by guess
 # knows which variable it reads.
 for b in claude opencode cursor; do
     bf="$root/lib/backends/$b.sh"
+    if sc_case 1; then
     if grep -q 'backend_rehearsal()' "$bf" && ! grep -q 'backend_rehearsal_wall()' "$bf"; then
         bad "$b claims it can honour POST=off and cannot say where its rehearsal wall is"
     else
         ok "$b says where its rehearsal wall is"
     fi
+    sc_end; fi
 done
 # run.sh must not carry the enumeration that went stale.
 # Comments stripped first. The paragraph explaining why the enumeration is gone
 # names the files it used to test for, and matching that is the same over-match
 # this suite already records for `jq`.
+if sc_case 1; then
 if grep -v '^[[:space:]]*#' "$root/lib/run.sh" | grep -q 'opencode-rehearsal.json'; then
     bad "run.sh still hardcodes a backend's rehearsal filename"
 else
     ok "run.sh names no backend's rehearsal file"
 fi
+sc_end; fi
+if sc_case 1; then
 grep -q 'backend_rehearsal_wall' "$root/lib/run.sh" \
     && ok "run.sh asks the backend for it" \
     || bad "nothing asks the backend where its rehearsal wall is"
+sc_end; fi
 # Driven, per backend, against a scratch profile directory. The function must
 # export the variable ITS backend reads and refuse when the wall is absent.
 rw="$stub_dir/rehearsalwall"; rm -rf "$rw"; mkdir -p "$rw"
@@ -2458,6 +2610,7 @@ rw_probe() {  # $1 backend, $2 expected env var, $3 what to create
           printf 'REFUSED\n'
       fi )
 }
+if sc_case 5; then
 printf '%s' "$(rw_probe claude MAINTAINER_SETTINGS file settings-rehearsal.json)" \
     | grep -q 'OK .*settings-rehearsal.json' \
     && ok "claude points MAINTAINER_SETTINGS at its rehearsal wall" \
@@ -2477,6 +2630,7 @@ printf '%s' "$(rw_probe cursor MAINTAINER_CURSOR_DIR dir)" \
 printf '%s' "$(rw_probe cursor MAINTAINER_CURSOR_DIR none)" | grep -q REFUSED \
     && ok "and refuses when the rehearsal directory is not rendered" \
     || bad "cursor accepted a rehearsal with no wall on disk"
+sc_end; fi
 # The rehearsal wall has to be the STRICTER one, or selecting it buys nothing.
 # Measured from the rendered pair rather than asserted.
 cw2="$stub_dir/cursorwalls"; rm -rf "$cw2"; mkdir -p "$cw2"
@@ -2495,15 +2649,19 @@ fi
 echo "== the universal cron fallback =="
 cr="$root/platform/posix/install-cron.sh"
 [ -x "$cr" ] && ok "cron installer present and executable" || bad "cron installer missing"
+if sc_case 2; then
 grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
 grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
+sc_end; fi
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
 [ -x "$d" ] && ok "doctor present and executable" || bad "doctor missing"
+if sc_case 3; then
 grep -q 'podman run' "$d" && ok "doctor actually starts a container" || bad "doctor only checks that podman exists"
 grep -q 'gh api user' "$d" && ok "doctor resolves the real gh identity" || bad "doctor does not check identity"
 grep -q 'fix:' "$d" && ok "doctor prints a fix, not just a symptom" || bad "doctor reports problems without remedies"
+sc_end; fi
 if PATH="$stub_dir:$PATH" HOME="$stub_dir/nothing" bash "$d" --quick >/dev/null 2>&1; then
     bad "doctor passed against an empty home; it inspects nothing"
 else
@@ -2767,6 +2925,7 @@ python3 "$tcheck" "$tprobe" >/dev/null 2>&1 \
 echo "== housekeeping: prune and release-check =="
 mr="$root/bin/maintainer-repo"
 [ -x "$mr" ] && ok "maintainer-repo present and executable" || bad "maintainer-repo missing"
+if sc_case 4; then
 grep -q 'gh pr list' "$mr" && ok "prune consults open PRs before deleting a branch" || bad "prune could delete a branch that still has an open PR"
 grep -q 'merge-base --is-ancestor' "$mr" && ok "prune defines merged as an ancestor of origin/main" || bad "prune uses a weaker merged test"
 grep -qE 'case "\$br" in main\|master' "$mr" && ok "prune never touches main" || bad "prune does not exclude main"
@@ -2775,6 +2934,7 @@ grep -qE 'case "\$br" in main\|master' "$mr" && ok "prune never touches main" ||
 # genuine authorization fix as zero, because its subject said "gate mutating
 # query actions".
 if grep -q "format=%s.*grep -ciE 'security" "$mr"; then bad "release-check still guesses from commit subjects"; else ok "release-check does not guess from commit subjects"; fi
+sc_end; fi
 # Driven, not grepped. A real repository with a tag, an origin, and a CHANGELOG
 # this test controls.
 rcrepo="$stub_dir/rcrepo"; rcorigin="$stub_dir/rcorigin"
@@ -2953,8 +3113,10 @@ out=$(cad_run MAINTAINER_FORCE=1)
 grep -q '^skipped' <<<"$out" && bad "MAINTAINER_FORCE did not override the gate" \
     || ok "MAINTAINER_FORCE overrides the gate"
 # The gate must read the profile's number, not a constant compiled into run.sh.
+if sc_case 1; then
 grep -q 'MIN_HOURS_\$task' "$root/lib/run.sh" && ok "the interval comes from the profile" \
     || bad "run.sh no longer reads MIN_HOURS_<task> from the profile"
+sc_end; fi
 
 echo "== rehearsal: POST=off does the work and reaches nobody =="
 reh="$wall_dir/settings-rehearsal.json"
@@ -2982,12 +3144,14 @@ grep -q 'list what you WOULD have posted' <<<"$banner" && ok "the rehearsal asks
 default=$(PATH="$stub_dir:$PATH" bash "$root/lib/run.sh" --show-prompt sysknife review 2>/dev/null)
 grep -q 'REHEARSAL' <<<"$default" && bad "the rehearsal notice appears when POST is on" \
     || ok "POST=on carries no rehearsal notice"
+if sc_case 3; then
 grep -q 'backend_rehearsal' "$root/lib/backends/claude.sh" && ok "claude declares it can enforce POST=off" \
     || bad "claude no longer declares rehearsal support"
 grep -q 'backend_rehearsal' "$root/lib/backends/codex.sh" && bad "codex claims rehearsal support it cannot enforce" \
     || ok "codex does not claim rehearsal support (it has no deny list)"
 grep -q 'backend_rehearsal' "$root/lib/run.sh" && ok "run.sh refuses a rehearsal on a backend that cannot enforce it" \
     || bad "run.sh would hand POST=off to a backend with no per-command control"
+sc_end; fi
 # A new profile must start silent.
 grep -q 'MAINTAINER_POST:-off' "$root/profiles/_template/profile.env" && ok "a scaffolded profile starts at POST=off" \
     || bad "a new profile would post on its first run"
@@ -3086,11 +3250,13 @@ grep -q 'first run there is no previous baseline' <<<"$scaffolded" \
     && ok "the template handles a first run with no baseline" \
     || bad "a scaffolded first run has no instruction for an empty baseline"
 # And no code file may carry a repository's name for it to work.
+if sc_case 1; then
 if grep -q 'MAINTAINER_TASKS' "$root/bin/maintainer" && grep -q 'MAINTAINER_TASKS' "$root/lib/run.sh"; then
     ok "the task list comes from the profile, not from bin/maintainer"
 else
     bad "bin/maintainer still hardcodes the task list"
 fi
+sc_end; fi
 
 echo "== status answers the question a maintainer actually has =="
 # Built here rather than read off this machine. These cases used to run against
@@ -3437,6 +3603,7 @@ fi
 
 # 2. the merge gate must not merge during a rehearsal. Same shape as prune:
 #    `gh pr merge` runs inside the script, where no deny rule can see it.
+if sc_case 2; then
 grep -q 'POST="\${MAINTAINER_POST:-on}"' "$root/bin/maintainer-merge" \
     && ok "the merge gate reads POST" || bad "the merge gate ignores POST"
 # Located by line number rather than by a context window, which was set to four
@@ -3454,6 +3621,7 @@ if not any("return 0" in l for l in window):
     print("  the POST=off branch does not return before the merge"); sys.exit(1)
 sys.exit(0)
 PYEOF
+sc_end; fi
 
 # 3. the profile name must not reach a shell unquoted.
 inj="$stub_dir/injhome"; rm -rf "$inj"
@@ -3581,6 +3749,7 @@ for f in "$root"/bin/* "$root"/lib/*.sh "$root"/install.sh "$root"/new-profile.s
     [ -f "$f" ] || continue
     # Executable lines only. The files explain the defaults they used to have,
     # and a check that reads its own rationale is the vacuous kind.
+    if sc_case 1; then
     code=$(sed 's/#.*//' "$f")
     if grep -qF "$needle_repo" <<<"$code"; then
         bad "$(basename "$f") still defaults to a specific repository"
@@ -3589,6 +3758,7 @@ for f in "$root"/bin/* "$root"/lib/*.sh "$root"/install.sh "$root"/new-profile.s
     else
         ok "$(basename "$f") names no repository or account in code"
     fi
+    sc_end; fi
 done
 # And it must refuse rather than guess.
 nohome="$stub_dir/noprofile"; mkdir -p "$nohome"
@@ -3738,6 +3908,7 @@ done
 # This was a grep for the refusal's exact wording, which is the weak shape this
 # project keeps recording: rewording the message to be more useful broke the
 # test while the behaviour was unchanged. Driven through the function now.
+if sc_case 2; then
 uncov="$(PROFILE_DIR="$(dirname "$vs")" MAINTAINER_PROFILE=vs MAINTAINER_SLUG=o/r \
     MAINTAINER_REPO=/tmp MAINTAINER_ACCOUNT=t \
     bash -c '. "'"$root"'/bin/maintainer-merge"; pick_suite "" crates/x/src/lib.rs weird.xyz' 2>&1)"
@@ -3748,10 +3919,13 @@ urc=$?
 grep -q 'weird\.xyz' <<<"$uncov" \
     && ok "and the refusal names the path it could not place" \
     || bad "the refusal does not say which path had no suite"
+sc_end; fi
 # The receipt has to say which suite proved it.
+if sc_case 1; then
 grep -q '"suite": suite' "$root/bin/maintainer-merge" \
     && ok "the receipt records which suite produced it" \
     || bad "a receipt does not say what verified it"
+sc_end; fi
 
 echo "== a suite declares every binary the scripts it runs actually invoke =="
 # sysknife#410 added a test that does `git init`, `git add` and `git update-index`
@@ -4422,9 +4596,11 @@ pip_hostile "pads a marker past the line cap" 'not a pinned requirement' "${rq_h
 
 # And the gate has to spend that classification: a dependency receipt is one an
 # unattended run may merge on, because the gate observed the checks itself.
+if sc_case 1; then
 grep -q 'verify-deps' "$root/bin/maintainer-merge" \
     && ok "maintainer-merge exposes verify-deps" \
     || bad "no verify-deps subcommand"
+sc_end; fi
 
 # `gh pr diff --patch` on a pull request with more than one commit emits an mbox
 # header per commit: a `From <sha>` line, the message, a bare `---`, and a
@@ -4893,9 +5069,11 @@ else
 fi
 unset DEP_SCRIPTS
 rm -f "$stub_dir/gh"
+if sc_case 1; then
 grep -qE 'observed\|dependency|dependency\|observed' "$root/bin/maintainer-merge" \
     && ok "an unattended run may merge on a dependency receipt" \
     || bad "a dependency receipt is still 'not observed' to cmd_merge"
+sc_end; fi
 
 echo "== a pin comment names a tag GitHub has, not a path GitHub normalises =="
 # The same class as sysknife's GHSA-j754. The classifier took a pin's comment as
@@ -5094,9 +5272,11 @@ iout="$(img_doctor "$img_recipe")"
 grep -q 'was built from a different' <<<"$iout" \
     && bad "doctor reports drift for an image built from exactly this recipe" \
     || ok "an image whose fingerprint matches the recipe raises nothing"
+if sc_case 1; then
 grep -q 'maintainer.recipe=' "$root/bin/maintainer-doctor" \
     && ok "doctor's rebuild command stamps the fingerprint it will later check" \
     || bad "doctor tells you to build an image it cannot later recognise"
+sc_end; fi
 # An environment with no USER. `podman run` sets none, and `set -u` then killed
 # maintainer-doctor at the lingering check, halfway through its report and
 # before Container verification ever printed. The two image-recipe cases above
@@ -5118,6 +5298,7 @@ grep -q 'Container verification' <<<"$iout" \
     || bad "doctor stops before Container verification when USER is unset"
 # The same read sits on the unattended runner's notification path, which is the
 # worst place for a crash: it fires only when something has already failed.
+if sc_case 2; then
 bare_user="$(grep -rn '[$]USER' "$root/bin" "$root/lib" "$root/scripts" "$root/install.sh" 2>/dev/null \
     | grep -v 'USER:-' || true)"
 [ -z "$bare_user" ] \
@@ -5126,6 +5307,7 @@ bare_user="$(grep -rn '[$]USER' "$root/bin" "$root/lib" "$root/scripts" "$root/i
 grep -rq 'USER:-' "$root/bin" "$root/lib" \
     && ok "and the fallback form is present, so the check above can match" \
     || bad "no USER:- anywhere, so the anti-pattern grep proves nothing"
+sc_end; fi
 rm -f "$stub_dir/podman"
 command -v podman >/dev/null 2>&1 \
     && ok "the podman stub is gone, so the cases below see the real one" \
@@ -5190,6 +5372,7 @@ echo "== the verify container can run a script the test itself wrote =="
 # the PR can already execute whatever it likes. What noexec removes is the
 # ordinary write-a-stub-and-run-it pattern that both this repo's suite and
 # sysknife's use.
+if sc_case 3; then
 grep -q 'tmpfs "\?/tmp' "$root/bin/maintainer-merge" \
     && ok "the verify container gives the suite a writable /tmp" \
     || bad "no tmpfs for /tmp, so a test that needs scratch space cannot run"
@@ -5199,10 +5382,13 @@ grep -qE 'tmpfs "?/tmp:[^"]*noexec' "$root/bin/maintainer-merge" \
 grep -qE 'tmpfs "?/tmp:[^"]*nosuid' "$root/bin/maintainer-merge" \
     && ok "and /tmp is still nosuid" \
     || bad "nosuid was dropped along with noexec"
+sc_end; fi
 for _f in --cap-drop=ALL --security-opt=no-new-privileges --read-only --network=none; do
+    if sc_case 1; then
     grep -q -- "$_f" "$root/bin/maintainer-merge" \
         && ok "the verify container still passes $_f" \
         || bad "$_f was dropped from the verify container"
+    sc_end; fi
 done
 
 echo "== a clean run that dies on the environment is not the pull request's fault =="
@@ -5221,6 +5407,7 @@ error: failed to run custom build command for `glib-sys v0.18.1`
 warning: build failed, waiting for other jobs to finish...
 LOG
 # shellcheck disable=SC1090
+if sc_case 9; then
 ( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
     && ok "a missing system library reads as the suite environment" \
     || bad "a dependency build failure is reported as the pull request failing its own test"
@@ -5258,6 +5445,7 @@ LOG
 ( . "$mg" 2>/dev/null; looks_environmental "$envlog" ) \
     && bad "a failing assertion was excused as an environment problem" \
     || ok "and a failing assertion is still the pull request's"
+sc_end; fi
 
 echo "== coverage is required of production paths, which is what a receipt binds =="
 # Issue #19. Six of seven merges on 2026-09-10 fell back to an asserted receipt
@@ -5293,6 +5481,7 @@ u9err="$u9/stderr"
 pg='crates/*/src/* Cargo.lock'
 
 # The case from issue #19: production .rs plus documentation, no single suite.
+if sc_case 14; then
 out="$(u9run "$pg" crates/x/src/lib.rs README.md)"; rc=$?
 [ "$rc" = 0 ] && [ "$out" = rust ] \
     && ok "a receipt is earnable when one suite covers every production path" \
@@ -5394,6 +5583,7 @@ out="$(u9named docs "$pg" crates/x/tests/helper.rs)"; rc=$?
 [ "$rc" != 0 ] \
     && ok "and a suite that runs none of the changed paths is refused even with no production path" \
     || bad "a suite bought a receipt for a diff it does not touch (returned '$out')"
+sc_end; fi
 
 echo "== a receipt may be earned by several suites when no single one covers production =="
 # sysknife#429 changed crates/*/src/*.rs, packaging/*, Makefile and
@@ -5431,6 +5621,7 @@ u10cover() {  # $1 = PROD_GLOBS, $2 = suite names, $3... = changed paths
 pg429='crates/*/src/* packaging/* Makefile .github/*'
 p429=(crates/d/src/actions/ssh.rs packaging/sysknife-sudoers Makefile .github/workflows/ci.yml CHANGELOG.md)
 
+if sc_case 7; then
 u10cover "$pg429" "rust shell" "${p429[@]}"; rc=$?
 [ "$rc" = 0 ] \
     && ok "two suites together cover a production diff neither covers alone" \
@@ -5476,6 +5667,7 @@ u10cover "$pg429" docs README.md docs/x.md; rc=$?
 [ "$rc" = 0 ] \
     && ok "and a diff with no production path needs no production coverage" \
     || bad "a docs-only diff was refused for not covering production (rc=$rc)"
+sc_end; fi
 
 echo "== the shell suite really runs, fails on a mutation, and writes a receipt =="
 # End to end against a repository built here, because forcing this through a
@@ -5718,12 +5910,14 @@ done
     && ok "the overlay's upperdir and workdir stay inside the scratch the gate handed over" \
     || bad "the suite writes outside its scratch, where the mutation glob can reach:$stray"
 # The gate must hand over a scratch, never the tree the mutation walks.
+if sc_case 2; then
 grep -q 'suite_extra_args "$rt" "$work"' "$mg" \
     && bad "the gate passes the extracted tree as suite scratch" \
     || ok "the gate passes a scratch directory, not the extracted tree"
 
 grep -q 'container_runtime()' "$mg" && ok "the gate accepts podman or docker" \
     || bad "the gate requires one specific container runtime"
+sc_end; fi
 grep -q 'suite_requires' "$root/profiles/sysknife/verify.d/rust.sh" \
     && ok "a suite that needs a specific runtime says so" \
     || bad "the rust suite does not declare its podman requirement"
@@ -5753,6 +5947,7 @@ think_for() {  # $1 = task -> the budget the backend exported
       backend_run /dev/null opus "$tlog" /tmp >/dev/null 2>&1 )
     sed -n 's/^MAX_THINKING_TOKENS=//p' "$tlog" | head -1
 }
+if sc_case 3; then
 r_think="$(think_for review)"; c_think="$(think_for ci)"
 [ -n "$r_think" ] && ok "review exports a thinking budget ($r_think)" \
     || bad "no MAX_THINKING_TOKENS reached the process for review"
@@ -5762,6 +5957,7 @@ r_think="$(think_for review)"; c_think="$(think_for ci)"
 grep -q 'MAX_THINKING_TOKENS' "$root/lib/backends/claude.sh" \
     && ok "the backend names the mechanism rather than implying a flag" \
     || bad "the thinking budget is not wired into the claude backend"
+sc_end; fi
 
 echo "== the MCP server speaks the protocol, and exposes no way round the gate =="
 mcp="$root/bin/maintainer-mcp"
@@ -5826,9 +6022,11 @@ for pe in "$root"/profiles/*/profile.env; do
     grep -q '^PROD_GLOBS=' "$pe" && ok "$pn declares which paths are production" \
         || bad "$pn declares no PROD_GLOBS, so a receipt can survive a rewrite"
 done
+if sc_case 1; then
 grep -q 'PROD_GLOBS:-' "$root/bin/maintainer-merge" \
     && ok "the gate reads the globs from the profile" \
     || bad "the gate still carries a hardcoded production path list"
+sc_end; fi
 # Executed, not grepped: a merge with no production paths declared must refuse.
 out=$(env -u PROD_GLOBS PATH="$stub_dir:$PATH" MAINTAINER_STATE="$stub_dir/state" \
       MAINTAINER_ACCOUNT=testuser MAINTAINER_SLUG=o/r MAINTAINER_REPO="$stub_dir/repo" \
@@ -5981,6 +6179,7 @@ esc() { mgfn tree_escapes "$1"; }
 tr1="$stub_dir/tree1"; mkdir -p "$tr1/docs/images" "$tr1/assets"
 printf 'png\n' > "$tr1/assets/social.png"
 ln -sf ../../assets/social.png "$tr1/docs/images/social.png"
+if sc_case 4; then
 [ -z "$(esc "$tr1")" ] && ok "an in-tree relative symlink is allowed" \
     || bad "a repository's own docs symlink is refused: $(esc "$tr1")"
 outside="$stub_dir/outside-key"; printf 'CANARY\n' > "$outside"
@@ -5996,10 +6195,12 @@ printf '%s' "$(esc "$tr1")" | grep -q 'trav.sh' \
 rm -f "$tr1/docs/images/trav.sh"
 [ -z "$(esc "$tr1")" ] && ok "and the tree reads clean once it is removed" \
     || bad "the scan reports an escape that is no longer there"
+sc_end; fi
 # Driven, not grepped. The grep this replaces matched the literal string
 # `find . -type f -name`, so widening the mutation to several globs broke the
 # test while the property it guards was untouched: a check that reads the source
 # instead of the behaviour fails on a refactor and passes on a regression.
+if sc_case 4; then
 mt="$stub_dir/mutatetree"; rm -rf "$mt"; mkdir -p "$mt/sub"
 printf 'GUARD=on\n' > "$mt/real.sh"
 printf 'GUARD=on\n' > "$mt/helper.py"
@@ -6023,6 +6224,7 @@ grep -q 'GUARD=on' "$mt/untouched.md" \
 [ -L "$mt/link.sh" ] && grep -q 'GUARD=on' "$stub_dir/mutate-target-outside" \
     && ok "and a symlink is neither followed nor replaced with its content" \
     || bad "the mutation step wrote through a symlink, out of the tree"
+sc_end; fi
 # Demonstrated: sed -i through a symlink materialises the target.
 sl="$stub_dir/symlinkdemo"; mkdir -p "$sl"; secret="$stub_dir/fake-key"
 printf 'CANARY-KEY-MATERIAL\n' > "$secret"; ln -sf "$secret" "$sl/evil.sh"
@@ -6065,6 +6267,7 @@ xtree() { # $1 ref, $2 dir: the real extract_tree, tar broken, stderr kept
 }
 rm -f "$stub_dir/tar-called"
 xo="$stub_dir/xt-out"; rm -rf "$xo"; mkdir -p "$xo"
+if sc_case 8; then
 xout="$(xtree HEAD "$xo")"; xrc=$?
 [ "$xrc" -eq 0 ] && [ -z "$xout" ] \
     && ok "a tree extracts although tar answers ENOSYS" \
@@ -6102,6 +6305,7 @@ xout="$(xtree "$xt_empty" "$xo5")"; xrc=$?
 [ "$xrc" -ne 0 ] && grep -q 'lists no files' <<<"$xout" \
     && ok "a ref with no files is refused, since zero of zero is not an extraction" \
     || bad "an empty tree was accepted (rc=$xrc)"
+sc_end; fi
 
 echo "== doctor probes extraction under the unit's own hardening =="
 # Driven against a stand-in for systemd-run: a control call with no properties
@@ -6153,9 +6357,11 @@ echo "== the shellcheck sweep runs locally, or says it did not =="
 sw="$root/scripts/shellcheck-sweep.sh"
 [ -x "$sw" ] && ok "the sweep is a script, not a workflow step" \
     || bad "the shellcheck sweep is not runnable outside CI"
+if sc_case 1; then
 grep -q 'shellcheck-sweep.sh' "$root/.githooks/pre-commit" \
     && ok "the pre-commit hook runs the same sweep" \
     || bad "the local gate still skips shellcheck"
+sc_end; fi
 grep -q 'shellcheck-sweep.sh' "$root/.github/workflows/ci.yml" \
     && ok "CI runs the same sweep, not a second copy of it" \
     || bad "CI has its own copy of the sweep, which will drift"
@@ -6185,6 +6391,7 @@ noise="$stub_dir/noise.log"
   printf 'time="2026-09-04T06:43:41-06:00" level=error msg="failed to find plugin bridge"\n'
   printf 'FAIL  story-7.sh header claims story 97\n'
   printf 'some later error\n'; } > "$noise"
+if sc_case 4; then
 ffl="$(mgfn first_failure_line "$noise")"
 [ "$ffl" = "FAIL  story-7.sh header claims story 97" ] \
     && ok "the runtime's logfmt is skipped and the test's own line is taken" \
@@ -6205,6 +6412,7 @@ printf 'time="x" level=warning msg="Error validating CNI config"\n' > "$noise"
 grep -q '"\$rt" --log-level=error run' "$mg" \
     && ok "the runtime is told to keep its warnings out of the log" \
     || bad "runtime warnings still land in the log the byte count reads"
+sc_end; fi
 
 echo "== every profile declares a budget for every task it runs =="
 # The template grew THINKING_<task> after profiles/magent had been generated
@@ -6306,6 +6514,7 @@ echo "== a notification is written for a person =="
 # with no next step: "backend claude unusable: missing /home/.../settings.json".
 # And nothing was sent at all when a run SUCCEEDED, so the agent only ever spoke
 # to its owner to complain.
+if sc_case 5; then
 grep -q 'humanise()' "$root/lib/run.sh" && ok "failures are translated before they are shown" \
     || bad "the raw shell error still goes straight to the desktop"
 grep -q 'notify normal' "$root/lib/run.sh" \
@@ -6322,12 +6531,15 @@ grep -q 'alerts.log' "$root/platform/linux/alert.sh" \
 grep -q 'sort -u' "$root/platform/linux/alert.sh" \
     && ok "and writes it once, not once per matching glob" \
     || bad "both state globs match the same directory, so alerts are double-counted"
+sc_end; fi
 grep -q 'ExecStart=%h/.local/share/maintainer/alert.sh' "$root/platform/linux/maintainer-alert@.service" \
     && ok "the unit calls a script rather than quoting shell into ExecStart" \
     || bad "systemd refuses the inline version with Unbalanced quoting"
+if sc_case 1; then
 grep -q 'alert.sh' "$root/install.sh" \
     && ok "install.sh deploys it, so the unit's ExecStart resolves" \
     || bad "the alert unit points at a file the installer never copies"
+sc_end; fi
 
 echo "== the one-offer rule is arithmetic, not a sentence in a skill file =="
 # The rule exists because it was measured: of thirteen offers, five people got
@@ -7001,10 +7213,12 @@ echo "== a model usage window that resets on a clock is transient =="
 # This is the same class as the unreachable-API path, arriving through the
 # backend instead of through gh.
 tfix="$stub_dir/transient"; rm -rf "$tfix"; mkdir -p "$tfix"
+if sc_case 1; then
 ( . "$root/lib/profile.sh" 2>/dev/null
   declare -F backend_transient_reason >/dev/null ) \
     && ok "the transient classifier is a sourceable function, so it can be tested" \
     || bad "no backend_transient_reason in lib/profile.sh"
+sc_end; fi
 
 printf "I'll start by loading the skill.\nYou've hit your session limit · resets 10:10pm (America/Mexico_City)\n" > "$tfix/limit.log"
 printf 'API Error: 529 {"type":"overloaded_error"}\n' > "$tfix/overloaded.log"
@@ -7015,6 +7229,7 @@ printf 'wrote the report and finished cleanly\n' > "$tfix/clean.log"
 
 check_transient() { ( . "$root/lib/profile.sh" 2>/dev/null; backend_transient_reason "$1" ); }
 
+if sc_case 8; then
 r="$(check_transient "$tfix/limit.log")"; rc=$?
 [ "$rc" = 0 ] && ok "a session limit that names its reset time is transient" \
     || bad "the 2026-09-07 session limit still reads as a real failure"
@@ -7036,14 +7251,17 @@ check_transient "$tfix/clean.log" >/dev/null \
     && bad "a clean log was classified as transient" || ok "a clean log is not transient"
 check_transient "$tfix/does-not-exist.log" >/dev/null \
     && bad "a missing log was called transient" || ok "a log that cannot be read is not transient"
+sc_end; fi
 
 # run.sh has to USE it, on both alert paths, or the classifier is decoration.
+if sc_case 2; then
 grep -q 'backend_transient_reason' "$root/lib/run.sh" \
     && ok "run.sh consults the classifier" \
     || bad "the classifier exists and run.sh never calls it"
 n=$(grep -c 'exit 75' "$root/lib/run.sh")
 [ "$n" -ge 4 ] && ok "run.sh has at least four exit-75 paths, backend included ($n)" \
     || bad "the backend path still exits 1, so OnFailure fires a second popup ($n exit-75 paths)"
+sc_end; fi
 
 echo "== the pinned token never survives the run that used it =="
 # Found by the magent issues run on 2026-09-09, in its own report: it wrote
@@ -7054,9 +7272,11 @@ echo "== the pinned token never survives the run that used it =="
 # for the whole run on purpose, so the token being reachable is by design and
 # the token OUTLIVING the run is the defect.
 scr="$stub_dir/scrub"; rm -rf "$scr"; mkdir -p "$scr/sub"
+if sc_case 1; then
 ( . "$root/lib/profile.sh" 2>/dev/null; declare -F maintainer_scrub_secret >/dev/null ) \
     && ok "the scrubber is a sourceable function" \
     || bad "no maintainer_scrub_secret in lib/profile.sh"
+sc_end; fi
 
 SECRET='ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
 printf 'line one\nGH_TOKEN set? yes%s\nline three\n' "$SECRET" > "$scr/a.log"
@@ -7065,6 +7285,7 @@ printf 'nothing sensitive here\n' > "$scr/clean.log"
 head -c 512 /dev/urandom > "$scr/sub/binary.bin"
 before_a=$(wc -l < "$scr/a.log"); before_b=$(wc -l < "$scr/sub/b.jsonl")
 
+if sc_case 5; then
 ( . "$root/lib/profile.sh" 2>/dev/null; maintainer_scrub_secret "$SECRET" "$scr" ) > "$scr/report.txt" 2>&1
 grep -qF "$SECRET" "$scr/a.log" \
     && bad "the secret survived in a.log" || ok "the secret is gone from the log"
@@ -7079,8 +7300,10 @@ grep -q 'line three' "$scr/a.log" \
 grep -qE 'a\.log|b\.jsonl' "$scr/report.txt" \
     && ok "it names the files it changed" \
     || bad "the scrubber cleans in silence, so nothing can act on it"
+sc_end; fi
 # The negative twin that matters most. An empty secret matches everywhere, and a
 # scrubber that accepts one rewrites every file it walks.
+if sc_case 2; then
 : > "$scr/canary.log"; printf 'untouched\n' > "$scr/canary.log"
 ( . "$root/lib/profile.sh" 2>/dev/null; maintainer_scrub_secret "" "$scr" ) >/dev/null 2>&1
 [ "$(cat "$scr/canary.log")" = "untouched" ] \
@@ -7090,11 +7313,14 @@ grep -qE 'a\.log|b\.jsonl' "$scr/report.txt" \
 [ "$(cat "$scr/canary.log")" = "untouched" ] \
     && ok "a too-short secret is refused, because a common substring is not a credential" \
     || bad "a five-character string was scrubbed out of every file"
+sc_end; fi
 # The secret must not travel in argv, where /proc and any ps make it readable.
+if sc_case 1; then
 grep -nE 'maintainer_scrub_secret\(\)' -A 24 "$root/lib/profile.sh" 2>/dev/null \
     | grep -qE '(sed|perl|grep)[^\n]*"\$(secret|1)"' \
     && bad "the scrubber passes the secret as a command-line argument" \
     || ok "the secret reaches the helper through the environment, not argv"
+sc_end; fi
 
 # A grep for the NAME used to stand here, and it passed for the whole life of
 # the feature while the trap was a no-op. lib/run.sh calls
@@ -7136,6 +7362,7 @@ grep -q 'trailing line' "$scrubrun/state/leaked.log" 2>/dev/null \
 # The class, not the one instance. Any shell script that CALLS a helper defined
 # in lib/profile.sh has to source lib/profile.sh, and naming one without
 # sourcing it fails open every time, because the callers all use `|| true`.
+if sc_case 1; then
 scrub_helpers="$(grep -oE '^maintainer_[a-z_]+' "$root/lib/profile.sh" | sort -u)"
 scrub_unsourced=""
 for _f in "$root"/lib/run.sh "$root"/lib/run-instance.sh "$root"/bin/*; do
@@ -7153,6 +7380,7 @@ done
 [ -z "$scrub_unsourced" ] \
     && ok "every shell script that calls a profile.sh helper also sources it" \
     || bad "these call a helper whose definition they never load:$scrub_unsourced"
+sc_end; fi
 # The other direction. A tree missing profile.sh has to refuse at the start,
 # not reach the exit trap and find nothing there. Failing open on the way out is
 # how this went unnoticed; failing open on the way in would be the same defect
@@ -7166,9 +7394,11 @@ if [ "$rc" = 64 ] && grep -q 'profile\.sh' <<<"$out"; then
 else
     bad "a tree with no profile.sh started anyway (rc=$rc)"
 fi
+if sc_case 1; then
 grep -q 'maintainer_scrub_secret\|token still on disk\|pinned token' "$root/bin/maintainer-doctor" \
     && ok "doctor looks for a token left behind by an earlier run" \
     || bad "nothing notices a token that a previous run left on disk"
+sc_end; fi
 # Could not ask is not an answer. With the listing unreadable the free list must
 # say it is unverified rather than silently claim every issue is offerable.
 cat > "$stub_dir/gh" <<'GHEOF'
@@ -7516,9 +7746,11 @@ echo "== a run can find the toolchain it is asked to use =="
 # its first invocation and had to prefix PATH by hand for every later command.
 # rustup installs into ~/.cargo/bin, which is on an interactive shell's PATH via
 # the profile and absent from a systemd user unit's.
+if sc_case 1; then
 grep -q 'cargo/bin' "$root/lib/run.sh" \
     && ok "run.sh puts the cargo toolchain on PATH" \
     || bad "a run cannot find cargo; every Rust gate it is asked to run fails 127"
+sc_end; fi
 
 echo "== the gate reads the thread, not only the label =="
 # sysknife#252, 2026-09-07. The maintainer pointed a contributor at the issue
@@ -7842,6 +8074,7 @@ out=$(PATH="$stub_dir:$PATH" HOME="$uh" MAINTAINER_UNINSTALL_YES=1 \
 # It must also never stop half way. The previous version put cron removal at the
 # end of an && list, so a crontab that exists but cannot write killed the script
 # under set -e after the timers were off and before a file was removed.
+if sc_case 2; then
 grep -v '^[[:space:]]*#' "$root/install.sh" \
     | grep -q 'command -v crontab.*&&.*&&.*run' \
     && bad "cron removal is still an && list; set -e aborts the uninstall mid-way" \
@@ -7849,6 +8082,7 @@ grep -v '^[[:space:]]*#' "$root/install.sh" \
 grep -q '_failed' "$root/install.sh" \
     && ok "and a failed step is reported rather than silently skipped" \
     || bad "a failing uninstall step leaves no trace"
+sc_end; fi
 # The wall spells it too, in every profile.
 for pdj in "$root"/profiles/*/deny.json; do
     pn="$(basename "$(dirname "$pdj")")"
@@ -7947,6 +8181,7 @@ trrun finish 2026-01-05T00-00-review >/dev/null 2>&1
     && ok "and leaves another task's failure alone" \
     || bad "a review clearing the ci failure hides a red sweep"
 trrun ok ci >/dev/null 2>&1
+if sc_case 3; then
 grep -q 'HELPER" failed' "$root/lib/run.sh" \
     && ok "run.sh records the marker before it tries any channel" \
     || bad "run.sh still bets everything on notify-send"
@@ -7956,6 +8191,7 @@ grep -v '^[[:space:]]*#' "$root/lib/run.sh" | grep -q 'DISPLAY:-:1' \
 grep -q 'MAINTAINER_ALERT_CMD' "$root/lib/run.sh" \
     && ok "a profile can name its own escalation channel" \
     || bad "there is no way to reach ntfy, mail or a webhook"
+sc_end; fi
 
 echo "== a report is a claim; the transcript is the record =="
 # lessons.md 12: a report read `sysknife-maint screen 348 -> DO NOT EXECUTE` for
@@ -8138,12 +8374,14 @@ echo "== a task that fans out declares the model its subagents get =="
 # why _FORCE is NOT used contains the word _FORCE, and a bare grep failed the
 # check that enforces the decision. docs/lessons.md 31 is this exact shape.
 code() { grep -v '^[[:space:]]*#' "$1"; }
+if sc_case 2; then
 code "$root/lib/backends/claude.sh" | grep -q 'export CLAUDE_CODE_SUBAGENT_MODEL=' \
     && ok "the claude backend exports a subagent model" \
     || bad "SUBAGENT_MODEL_<task> is declared and never reaches the process"
 code "$root/lib/backends/claude.sh" | grep -q 'CLAUDE_CODE_SUBAGENT_MODEL_FORCE' \
     && bad "the backend FORCES every subagent onto one model, overriding definitions that chose their own" \
     || ok "it sets a default, so an agent definition's own model still wins"
+sc_end; fi
 for pe in "$root"/profiles/*/profile.env; do
     pn="$(basename "$(dirname "$pe")")"
     tasks="$(sed -n 's/^TASKS="\(.*\)"/\1/p' "$pe")"
@@ -8167,6 +8405,7 @@ SUBAGENT_MODEL_review=sonnet
 MAINTAINER_SETTINGS=/dev/null
 backend_run() { :; }
 PROBE
+if sc_case 2; then
 out=$(bash -c '
     . "'"$sm"'/probe.sh"
     . "'"$root"'/lib/backends/claude.sh"
@@ -8181,6 +8420,7 @@ grep -q 'CLAUDE_CODE_SUBAGENT_MODEL=sonnet' <<<"$out" \
 grep -q 'MAX_THINKING_TOKENS=31999' <<<"$out" \
     && ok "and the main loop keeps its own budget" \
     || bad "the thinking budget was lost"
+sc_end; fi
 
 echo "== published text is written AS the maintainer, not about them =="
 # 2026-09-09. Five sysknife pull request reviews posted under vladimirrott went
@@ -8227,9 +8467,11 @@ grep -q 'Never delegate the decision' "$pc" \
     && ok "and says the decision is never delegated" \
     || bad "nothing stops a subagent's conclusion becoming a merge"
 # Every profile gets it, because the preamble is shared and run.sh concatenates it.
+if sc_case 1; then
 grep -q 'preamble-core.md' "$root/lib/run.sh" \
     && ok "run.sh assembles that preamble into every prompt" \
     || bad "the doctrine is a file nothing reads"
+sc_end; fi
 
 echo "== the doctor reports on the profile it was asked about =="
 # It globbed `maintainer@*` in systemctl, so with MAINTAINER_PROFILE=magent it
@@ -8237,6 +8479,7 @@ echo "== the doctor reports on the profile it was asked about =="
 # while magent had two timer files, both disabled, and had never fired once.
 # Same shape as the hardcoded profile default in bin/maintainer.
 md="$root/bin/maintainer-doctor"
+if sc_case 4; then
 grep -q "maintainer@\$profile-\*" "$md" \
     && ok "the scheduler check names the profile" \
     || bad "the doctor counts every profile's timers and calls them this one's"
@@ -8252,13 +8495,14 @@ grep -q 'list-unit-files' "$md" \
 grep -q 'none enabled: nothing runs unattended' "$md" \
     && ok "and it says out loud that nothing runs unattended" \
     || bad "a profile with no enabled timer is not told so"
+sc_end; fi
 
 echo "== a verdict is read from output, not from a pipeline's exit code =="
 # `doctor | grep -q` returns doctor's status under pipefail, not the match. One
 # case in this file passed for two runs that way while the check it tested did
 # not exist. The rule already appears as a comment beside the maintainer-merge
 # cases; a comment did not stop the repeat.
-piped="$(grep -nE '^\s*(vdoc|bash "\$(d|md|mg)")[^|]*\| *grep' "$root/tests/run-tests.sh" || true)"
+piped="$(grep -nE '^\s*(vdoc|bash "\$(d|md|mg)")[^|]*\| *grep' "$suite_root/tests/run-tests.sh" || true)"
 if [ -z "$piped" ]; then
     ok "no case decides from a pipeline whose left side can fail"
 else
@@ -8271,20 +8515,122 @@ echo "== a skip is not a pass =="
 # container. Counting them as passes would be worse: docs/lessons.md already has
 # an entry where a missing optional dependency turned a gate green over seven
 # real errors. They are their own count, printed, and CI requires it to be zero.
-grep -q 'skip=$((skip+1))' "$root/tests/run-tests.sh" \
+grep -q 'skip=$((skip+1))' "$suite_root/tests/run-tests.sh" \
     && ok "a skip has its own counter" || bad "a skip is folded into pass or fail"
 grep -q 'skipped' "$root/.github/workflows/ci.yml" \
     && ok "CI fails when the suite skips anything" \
     || bad "CI would accept a run that skipped half the cases"
 # Proved by driving the summary: a suite with a skip must say so in its last line.
 probe="$stub_dir/skipprobe.sh"
-{ sed -n '1,/^check(){/p' "$root/tests/run-tests.sh"
+{ sed -n '1,/^check(){/p' "$suite_root/tests/run-tests.sh"
   printf 'noenv "a deliberate skip"\n'
-  sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' "$root/tests/run-tests.sh"; } > "$probe"
-out=$(bash "$probe" 2>&1)
+  sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' "$suite_root/tests/run-tests.sh"; } > "$probe"
+out=$(env -u MX_SKIP_SOURCE_COUPLED MX_TREE="$root" bash "$probe" 2>&1)
 grep -qE '0 passed, 0 failed, 1 skipped' <<<"$out" \
     && ok "and the summary line names the skipped count" \
     || bad "a skipped case left no trace in the summary: $(printf '%s' "$out" | tail -1)"
+
+echo "== the suite tests the tree it is told to test, and says which =="
+# MX_TREE points the suite at any tree with this layout, so a build whose programs
+# are not shell can be held to the same cases. suite_root is the checkout that
+# holds this file, and only the suite's own text goes through it. These cases drive
+# the head of the suite, the part that picks the tree, the way the skip case above
+# drives the summary. A shell tree and a Rust tree meet the same head.
+mxn=0
+mx_probe() {  # $1 = where the probe lives, $2 = lines to run between head and summary, then env args
+    local at="$1" body="$2"; shift 2
+    mkdir -p "$(dirname "$at")"
+    { sed -n '1,/^check(){/p' "$suite_root/tests/run-tests.sh"
+      printf '%s\n' "$body"
+      sed -n '/^if \[ "\$skip" -gt 0 \]/,$p' "$suite_root/tests/run-tests.sh"; } > "$at"
+    env -u MX_TREE -u MX_SKIP_SOURCE_COUPLED "$@" bash "$at" 2>&1
+}
+mx_fake_tree() {  # $1 = dir, then the members to leave out
+    local d="$1"; shift
+    rm -rf "$d"; mkdir -p "$d/bin" "$d/lib" "$d/profiles"
+    : > "$d/bin/maintainer-merge"; : > "$d/lib/run.sh"
+    local gone; for gone in "$@"; do rm -rf "${d:?}/$gone"; done
+}
+mxp="$stub_dir/mxprobe"
+out="$(mx_probe "$mxp/probe.sh" 'ok "probe case"' MX_TREE="$root")"; rc=$?
+[ "$rc" = 0 ] && [ "$(head -1 <<<"$out")" = "tree under test: $root" ] \
+    && ok "the first line of output names the tree under test" \
+    || bad "the output opens with '$(head -1 <<<"$out")' (rc=$rc), not the tree under test"
+mx_fake_tree "$mxp/checkout"; mkdir -p "$mxp/checkout/tests"
+out="$(mx_probe "$mxp/checkout/tests/probe.sh" 'ok "probe case"')"; rc=$?
+[ "$rc" = 0 ] && [ "$(head -1 <<<"$out")" = "tree under test: $mxp/checkout" ] \
+    && ok "with no MX_TREE the tree under test is the checkout that holds the suite" \
+    || bad "the default tree is '$(head -1 <<<"$out")' (rc=$rc), not the checkout holding the suite"
+mx_fake_tree "$mxp/other"
+out="$(cd "$mxp" && mx_probe "$mxp/checkout/tests/probe.sh" 'ok "probe case"' MX_TREE=other)"; rc=$?
+[ "$rc" = 0 ] && [ "$(head -1 <<<"$out")" = "tree under test: $mxp/other" ] \
+    && ok "a relative MX_TREE is resolved to an absolute path before any case runs" \
+    || bad "a relative MX_TREE gave '$(head -1 <<<"$out")' (rc=$rc)"
+for gone in bin/maintainer-merge lib/run.sh profiles; do
+    mxn=$((mxn+1)); mx_fake_tree "$mxp/short$mxn" "$gone"
+    out="$(mx_probe "$mxp/probe.sh" 'ok "probe case"' MX_TREE="$mxp/short$mxn")"; rc=$?
+    [ "$rc" != 0 ] && [ "$(wc -l <<<"$out")" = 1 ] && grep -q "$mxp/short$mxn" <<<"$out" && ! grep -q 'PASS' <<<"$out" \
+        && ok "a tree without $gone is refused in one line, before any case runs" \
+        || bad "a tree without $gone was not refused cleanly (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-160)"
+done
+mkdir -p "$mxp/empty"
+out="$(mx_probe "$mxp/probe.sh" 'ok "probe case"' MX_TREE="$mxp/empty")"; rc=$?
+[ "$rc" != 0 ] && [ "$(wc -l <<<"$out")" = 1 ] && ! grep -q 'PASS' <<<"$out" \
+    && ok "an empty directory is refused in one line, before any case runs" \
+    || bad "an empty directory was not refused cleanly (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-160)"
+out="$(mx_probe "$mxp/probe.sh" 'ok "probe case"' MX_TREE="$mxp/no-such-dir")"; rc=$?
+[ "$rc" != 0 ] && [ "$(wc -l <<<"$out")" = 1 ] && ! grep -q 'PASS' <<<"$out" \
+    && ok "a path that does not exist is refused in one line, before any case runs" \
+    || bad "a missing tree was not refused cleanly (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-160)"
+# The source-coupled blocks. A tree whose programs are not shell text cannot be
+# grepped or sourced, so MX_SKIP_SOURCE_COUPLED=1 must not run the block at all.
+mxm="$stub_dir/mx-block-ran"; rm -f "$mxm"
+mxblock="if sc_case 2; then : > '$mxm'; ok 'never runs'; ok 'never runs either'; sc_end; fi; ok 'runs'"
+out="$(mx_probe "$mxp/probe.sh" "$mxblock" MX_TREE="$root" MX_SKIP_SOURCE_COUPLED=1)"; rc=$?
+grep -qE '^ +1 passed, 0 failed, 2 skipped \(2 source-coupled cases\)' <<<"$out" && [ "$rc" = 0 ] \
+    && ok "MX_SKIP_SOURCE_COUPLED=1 counts a skipped block as one skip per case" \
+    || bad "the skip summary is wrong (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+[ ! -e "$mxm" ] \
+    && ok "and the skipped block does not run" \
+    || bad "a source-coupled block ran although MX_SKIP_SOURCE_COUPLED=1 was set"
+rm -f "$mxm"
+out="$(mx_probe "$mxp/probe.sh" "$mxblock" MX_TREE="$root")"; rc=$?
+grep -qE '^ +3 passed, 0 failed \(2 source-coupled cases\)' <<<"$out" && [ "$rc" = 0 ] && [ -e "$mxm" ] \
+    && ok "without the variable the block runs, and the summary names how many cases are source-coupled" \
+    || bad "the normal summary is wrong (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+out="$(mx_probe "$mxp/probe.sh" "if sc_case 2; then ok 'one'; sc_end; fi" MX_TREE="$root")"; rc=$?
+[ "$rc" != 0 ] && grep -q 'declares 2 case(s) and recorded 1' <<<"$out" \
+    && ok "a block that records fewer cases than it declares fails" \
+    || bad "a short block passed (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+out="$(mx_probe "$mxp/probe.sh" "if sc_case 1; then ok 'one'; ok 'two'; sc_end; fi" MX_TREE="$root")"; rc=$?
+[ "$rc" != 0 ] && grep -q 'declares 1 case(s) and recorded 2' <<<"$out" \
+    && ok "a block that records more cases than it declares fails" \
+    || bad "an overfull block passed (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+out="$(mx_probe "$mxp/probe.sh" "if sc_case 1; then ok 'one'; fi; if sc_case 1; then ok 'two'; sc_end; fi" MX_TREE="$root")"; rc=$?
+[ "$rc" != 0 ] && grep -q 'never closed with sc_end' <<<"$out" \
+    && ok "a block that is never closed fails at the next one" \
+    || bad "an unclosed block passed (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+out="$(mx_probe "$mxp/probe.sh" "if sc_case 0; then ok 'one'; sc_end; fi" MX_TREE="$root")"; rc=$?
+[ "$rc" != 0 ] && grep -q 'needs a positive case count' <<<"$out" && ! grep -q 'PASS' <<<"$out" \
+    && ok "a block that declares no cases fails and does not run" \
+    || bad "a block with a zero count was accepted (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+out="$(mx_probe "$mxp/probe.sh" "sc_end; ok 'one'" MX_TREE="$root")"; rc=$?
+[ "$rc" != 0 ] && grep -q 'closes no sc_case' <<<"$out" \
+    && ok "an sc_end with no block open fails" \
+    || bad "a stray sc_end was accepted (rc=$rc): $(tail -3 <<<"$out" | tr '\n' ' ' | cut -c1-200)"
+rm -rf "$mxp"
+# Two roots stay apart. The first needle is written so that this line does not match
+# it: the check reads the suite's own text, and a pattern that matches itself would
+# fail the day it was added.
+mx_self="$suite_root/tests/run-tests.sh"
+stray="$(grep -nE '^[^#]*\$\{?roo[t]\}?/tests/' "$mx_self" || true)"
+[ -z "$stray" ] \
+    && ok "the suite reads its own text through suite_root, never through the tree under test" \
+    || bad "a case reads the suite through the tree under test: $(printf '%s' "$stray" | head -1 | cut -c1-120)"
+stray="$(grep -nE '^[^#]*\$\{?suite_roo[t]\}?/(bin|lib|profiles|platform|scripts|evals|install\.sh|new-profile\.sh)' "$mx_self" || true)"
+[ -z "$stray" ] \
+    && ok "and no program, profile or script is reached through suite_root" \
+    || bad "a case runs or reads a program from the suite's own checkout: $(printf '%s' "$stray" | head -1 | cut -c1-120)"
 
 echo "== the gate needs nothing that is not already required =="
 # Run inside python:3.12, five tests failed with `jq: command not found`, and
@@ -8293,11 +8639,13 @@ echo "== the gate needs nothing that is not already required =="
 # Whole-line comments dropped first. The paragraph explaining why jq is gone
 # matched a grep for jq, which is the same over-match that made the "CI reads no
 # secrets" check fail on the comment describing the policy.
+if sc_case 1; then
 if grep -v '^[[:space:]]*#' "$mg" | grep -qE '\| *jq |\$\( *jq |^ *jq '; then
     bad "maintainer-merge still shells out to jq"
 else
     ok "maintainer-merge needs no jq; gh's own --jq is not a second binary"
 fi
+sc_end; fi
 # And a count that is not a number must say so rather than interpolate a blank.
 make_stub gh "case \"\$*\" in
       *'auth switch'*) exit 0;;
@@ -8326,9 +8674,11 @@ echo "== a receipt for an already-merged pull request is stale, not open =="
 # shipped, and doctor counted it as open. I removed it by hand after noticing.
 # A receipt that outlives its merge is indistinguishable from one guarding work
 # still in flight, which is the only thing receipts exist to tell apart.
+if sc_case 1; then
 grep -qE 'already merged|merged pull request|stale receipt' "$root/bin/maintainer-doctor" \
     && ok "doctor can tell an open receipt from one whose pull request already merged" \
     || bad "doctor counts a receipt for merged work as though the work were pending"
+sc_end; fi
 
 echo "== the preamble warns that a two-dot diff blames the branch for the base =="
 # On 2026-09-10 `git diff main..399` showed a markdown-link fix rolling a third
@@ -8359,6 +8709,7 @@ envlog="$stub_dir/envfail"; mkdir -p "$envlog"
 printf 'running the suite\n/repo/check.sh: line 3: git: command not found\n' > "$envlog/a.log"
 printf 'bash: /tmp/tmp.XyZ/stub.sh: Permission denied\n' > "$envlog/b.log"
 printf 'FAIL: the guard did not fire\nassertion failed\n' > "$envlog/c.log"
+if sc_case 2; then
 grep -q 'looks_environmental\|environment_hint' "$mg" \
     && ok "maintainer-merge has a way to tell an environment failure from a test failure" \
     || bad "nothing distinguishes 'your test failed' from 'my container lacks a binary'"
@@ -8366,6 +8717,7 @@ grep -q 'looks_environmental\|environment_hint' "$mg" \
 grep -qE 'suite environment|not the pull request|my (container|image)' "$mg" \
     && ok "and it says the failure is the gate's environment, not the contributor" \
     || bad "the refusal still reads as though the pull request failed"
+sc_end; fi
 # And behaviourally, in a real container, because the three times this happened
 # the grep-able words were all present and the message was still wrong.
 if [ -n "$rt" ]; then
@@ -8440,9 +8792,11 @@ echo "== two merges of one pull request cannot both run =="
 # duplicate pair by luck, which MISTAKES rule 9 already calls luck rather than
 # design. One watcher per action is a habit; a lock is a mechanism.
 mlock="$stub_dir/mlock"; rm -rf "$mlock"; mkdir -p "$mlock"
+if sc_case 1; then
 grep -qE 'flock' "$mg" \
     && ok "the merge takes a lock rather than trusting one caller at a time" \
     || bad "nothing stops two concurrent merges of the same pull request"
+sc_end; fi
 # And behaviourally, because a grep for `flock` proves the word is present, not
 # that a second caller is stopped.
 #
@@ -8554,12 +8908,16 @@ grep -qiE 'another verify of #9 is already running' <<<"$out" \
     || ok "and once the first caller exits the verify lock is free again"
 
 echo "== the merge is pinned to the head that was checked =="
+if sc_case 1; then
 grep -q 'match-head-commit' "$mg" && ok "gh pr merge is pinned to the verified head" \
     || bad "a push landing mid-merge would be merged unchecked"
+sc_end; fi
 echo "== naming a suite does not skip the coverage check =="
+if sc_case 1; then
 grep -q 'does not cover every changed path' "$mg" \
     && ok "an explicitly named suite must still cover the changed paths" \
     || bad "naming a suite bypasses coverage, and the name is reachable from MCP"
+sc_end; fi
 
 echo "== the suite never writes into the index of the commit that runs it =="
 # 2026-10-21: `git commit -a` runs pre-commit with GIT_INDEX_FILE pointing at a
@@ -8646,10 +9004,12 @@ for i, ln in enumerate(lines):
 sys.exit("; ".join(bad) if bad else 0)
 PYEOF
 # No numeric default may be written inline in a tool again.
+if sc_case 1; then
 lits="$(grep -nE '\$\{MAINTAINER_[A-Z_]+:-[1-9]|size=[0-9]+m|--limit "[0-9]+"|--limit [0-9]+ ' \
     "$root"/bin/* "$root"/lib/*.sh "$root"/lib/backends/* 2>/dev/null | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' || true)"
 [ -z "$lits" ] && ok "bin/ and lib/ carry no inline numeric default" \
     || bad "a default is written inline again: $(printf '%s' "$lits" | head -3 | tr '\n' ' ' | cut -c1-200)"
+sc_end; fi
 
 # Behaviour: drive `maintainer-merge verify` against a podman stub that records
 # its argv, so the flags a real container would get are the thing under test.
@@ -8730,6 +9090,7 @@ tun_verify   # restore the recorded argv the resource cases below read
 # first match, the writer takes SIGPIPE, and under `pipefail` the MATCH reads as
 # a failure. v0.8.0 shipped three: fixup's sign-off check (seen flaking in the
 # suite on 2026-10-27), prune's open-PR keep test, and the doctor's timer check.
+if sc_case 1; then
 pq_files=( "$root"/bin/* "$root"/lib/*.sh "$root"/lib/backends/* "$root"/install.sh "$root"/new-profile.sh \
            "$root"/platform/*/*.sh "$root"/profiles/*/verify.d/*.sh )
 pq_n=0; for f in "${pq_files[@]}"; do [ -f "$f" ] && pq_n=$((pq_n + 1)); done
@@ -8738,6 +9099,7 @@ pq="$(grep -nE '\|[[:space:]]*grep[[:space:]]+-[a-zA-Z]*q' "${pq_files[@]}" 2>/d
 [ "$pq_n" -ge 10 ] || bad "the pipe-into-grep -q scan found only $pq_n shipped scripts; the glob is wrong"
 [ -z "$pq" ] && ok "no shipped script pipes into grep -q ($pq_n scanned)" \
     || bad "a shipped script pipes into grep -q, which turns a match into a failure under pipefail: $(printf '%s' "$pq" | head -3 | tr '\n' ' ' | cut -c1-220)"
+sc_end; fi
 for pair in "memory:VERIFY_MEMORY" "cpus:VERIFY_CPUS" "pids-limit:VERIFY_PIDS" "timeout:VERIFY_TIMEOUT"; do
     flag="${pair%%:*}"; key="${pair##*:}"; want="$(dget "$key")"
     [ -n "$want" ] || { bad "lib/defaults.env has no $key"; continue; }
@@ -8961,10 +9323,12 @@ oc_model() {  # env assignments -> the --model the backend passed
         . "$1/lib/backends/opencode.sh"; backend_run "$2/prompt" opus "$2/log" "$2"' _ "$root" "$ocd" >/dev/null 2>&1
     awk 'p{print; exit} $0=="--model"{p=1}' "$ocd/args"
 }
+if sc_case 2; then
 [ "$(oc_model)" = "$(dget OPENCODE_MODEL)" ] && ok "opencode's default model is OPENCODE_MODEL from lib/defaults.env" \
     || bad "opencode ran '$(oc_model)', not '$(dget OPENCODE_MODEL)'"
 [ "$(oc_model MAINTAINER_OPENCODE_MODEL=a/b)" = "a/b" ] && ok "and MAINTAINER_OPENCODE_MODEL overrides it" \
     || bad "MAINTAINER_OPENCODE_MODEL was ignored: '$(oc_model MAINTAINER_OPENCODE_MODEL=a/b)'"
+sc_end; fi
 rm -f "$stub_dir/opencode"
 
 # maintainer-doctor reads its thresholds the same way.
@@ -9096,6 +9460,7 @@ grep -q 'MAINTAINER_REPO' "$root/profiles/sysknife/prompts/review.md" \
 # The README's claim, held by a checker. Executable lines only: comments cite
 # the incidents that taught each rule, and those name the repositories.
 chk="$root/scripts/check_drift.py"
+if sc_case 5; then
 python3 "$chk" --root "$root" --only repo-names >"$stub_dir/chk.out" 2>&1 \
     && ok "no executable line in bin/ or lib/ names a deployed profile, repository or account" \
     || bad "bin/ or lib/ carries a name: $(head -3 "$stub_dir/chk.out" | tr '\n' ' ' | cut -c1-200)"
@@ -9119,6 +9484,7 @@ mkdir -p "$cm/profiles/zz"; printf 'REPO_SLUG="zzorg/zzrepo"\nGH_ACCOUNT="zzacct
 printf 'owner = "zzacct"\n' >> "$cm/bin/maintainer"
 python3 "$chk" --root "$cm" --only repo-names >/dev/null 2>&1 \
     && bad "the checker passed an account name" || ok "and on a GitHub account"
+sc_end; fi
 rm -rf "$cm"
 
 echo "== --help tells the truth, from the table main() dispatches on =="
@@ -9166,11 +9532,13 @@ grep -n 'Called by run.sh' <<<"$hout" >/dev/null \
     || bad "internal verbs are mixed in with the ones a person types"
 
 # maintainer-merge's header and dispatcher agree.
+if sc_case 1; then
 mg_head="$(sed -n '1,16p' "$root/bin/maintainer-merge" | grep -oE '^#   maintainer-merge [a-z-]+' | awk '{print $3}' | sort | paste -sd' ')"
 mg_case="$(sed -n '/^_executed || return 0/,$p' "$root/bin/maintainer-merge" | grep -oE '^    [a-z-]+\)' | tr -d ' )' | sort | paste -sd' ')"
 [ -n "$mg_case" ] && [ "$mg_head" = "$mg_case" ] \
     && ok "maintainer-merge's header lists the verbs its dispatcher takes ($mg_case)" \
     || bad "maintainer-merge's header says '$mg_head', its dispatcher takes '$mg_case'"
+sc_end; fi
 
 echo "== the documentation is held to the code, by one checker =="
 # README said three backends while four existed, "twenty-five" lessons beside
@@ -9182,10 +9550,12 @@ echo "== the documentation is held to the code, by one checker =="
 # non-zero for a check it has never heard of.
 chk="$root/scripts/check_drift.py"
 for name in cli-verbs config-docs env-vars doc-paths readme-counts readme-profiles changelog-links; do
+    if sc_case 1; then
     out="$(python3 "$chk" --root "$root" --only "$name" 2>&1)"; rc=$?
     [ "$rc" = 0 ] && grep -q "ok: $name" <<<"$out" \
         && ok "drift check '$name' passes on the tree" \
         || bad "drift check '$name' fails or does not exist: $(printf '%s' "$out" | head -3 | tr '\n' ' ' | cut -c1-220)"
+    sc_end; fi
 done
 dr="$stub_dir/driftdocs"
 drift_fresh() { rm -rf "$dr"; mkdir -p "$dr"
@@ -9199,9 +9569,11 @@ drift_bites() {
     # that passes on a pristine tree reads exactly like one that missed the
     # mutation. The lesson-count cases did that when lessons went 110 -> 113.
     if [ "$(drift_sum)" = "$drift_pristine" ]; then bad "$3: the mutation did not apply, so nothing was tested"; return; fi
+    if sc_case 1; then
     local out; out="$(python3 "$chk" --root "$dr" --only "$1" 2>&1)"; local rc=$?
     [ "$rc" != 0 ] && grep -qE "FAIL \[$1\].*$2" <<<"$out" \
         && ok "$3" || bad "$3 (rc=$rc): $(printf '%s' "$out" | head -2 | tr '\n' ' ' | cut -c1-200)"
+    sc_end; fi
 }
 drift_fresh; sed -i '/^| `maintainer offer <issue>/d' "$dr/docs/cli.md"
 drift_bites cli-verbs 'offer' "a verb missing from the cli.md command table is caught"
@@ -9278,8 +9650,10 @@ rm -rf "$dr"
 # A checker nothing runs is decoration (MISTAKES 7): the hook, CI and the suite
 # all have to reach it.
 [ -x "$chk" ] && ok "check_drift.py is executable, as the README says to run it" || bad "check_drift.py is not executable"
+if sc_case 1; then
 grep -q 'check_drift.py' "$root/.githooks/pre-commit" \
     && ok "the pre-commit hook runs check_drift.py" || bad "the hook never runs the docs checker"
+sc_end; fi
 grep -q 'check_drift.py' "$root/.github/workflows/ci.yml" \
     && ok "and CI runs it" || bad "CI never runs the docs checker"
 
@@ -9436,15 +9810,21 @@ h1="$(fig_sum)"; out="$(python3 "$rf" --root "$fg" --write 2>&1)"; rc=$?
     || bad "--write believed a red suite's count (rc=$rc)"
 rm -rf "$fg"
 # The consumers reach it, and the old regexes are gone from the claim checker.
+if sc_case 1; then
 grep -q 'render_figures.py' "$root/.githooks/pre-commit" \
     && ok "the pre-commit hook runs render_figures.py" || bad "the hook never runs the figure check"
+sc_end; fi
 grep -q 'render_figures.py' "$root/.github/workflows/ci.yml" \
     && ok "CI runs render_figures.py" || bad "CI never runs the figure check"
+if sc_case 1; then
 grep -qE 'render_figures.py.*--check.*--tests' "$root/scripts/check_claims.sh" \
     && ok "check_claims.sh hands render_figures.py the count it measured" || bad "check_claims.sh does not pass --tests"
+sc_end; fi
 grep -q 'render_figures' "$root/scripts/check_drift.py" \
     && ok "check_drift.py counts through the same module" || bad "check_drift.py keeps its own counting code"
+if sc_case 1; then
 if grep -q 'claim ' "$root/scripts/check_claims.sh"; then bad "check_claims.sh still compares typed README numbers"; else ok "check_claims.sh no longer compares typed README numbers"; fi
+sc_end; fi
 
 echo "== the check board must be entirely pass or skipping =="
 # gh buckets a check as pass, fail, pending, skipping or cancel. The gate counted
@@ -10005,9 +10385,11 @@ for prof in ("sysknife", "magent", "_template"):
     assert head == "a" * 40 and [k for k, _ in items] == ["rebase", "test-count"], (prof, items)
 PYEOF
 for zk in FIXUP_QUIET_DAYS FIXUP_NOTICE_DAYS FIXUP_MAX_LINES; do
+    if sc_case 1; then
     grep -q "^$zk=[0-9]\+\$" "$root/lib/defaults.env" && ! grep -nE "(^|[^A-Z_])$zk *= *[0-9]" "$root/bin/maintainer" "$root/bin/maintainer-repo" >/dev/null \
         && ok "$zk has its default in lib/defaults.env and no literal in the code" \
         || bad "$zk is missing from lib/defaults.env or has a literal in bin/"
+    sc_end; fi
 done
 
 # ===== Z: stalled pull requests (end) =====
@@ -10977,9 +11359,11 @@ done
 rm -f "$stub_dir/gh"
 
 if [ "$skip" -gt 0 ]; then
-    printf '\n  %d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
+    printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
+    [ "${MX_SKIP_SOURCE_COUPLED:-}" != 1 ] \
+        || printf '  MX_SKIP_SOURCE_COUPLED=1 skipped the source-coupled cases on purpose; only a tree that is not shell may be run this way.\n'
 else
-    printf '\n  %d passed, %d failed\n' "$pass" "$fail"
+    printf '\n  %d passed, %d failed%s\n' "$pass" "$fail" "$(sc_note)"
 fi
 [ "$fail" -eq 0 ]
