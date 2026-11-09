@@ -1,0 +1,9 @@
+{
+  "pr": 7,
+  "head": "cc5e01302bbd828fbf516fca54e1a6e12738de7c",
+  "kind": "asserted",
+  "proof": "mutation \"proved\" \u00e9\nsecond line",
+  "recorded_at": "2026-01-01T00:00:00+00:00",
+  "recorded_by": "fixture-user",
+  "signature": "d43b8aa35fa30e2d9c5ac8693570fc2b726d649b8c8cf6da64a39c3b57bb6f87"
+}
