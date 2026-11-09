@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Runs the characterization tests of the merge gate (tests/characterization/gate-*.sh)
+# Runs the characterization tests (tests/characterization/{gate,run,doctor,repo,install}-*.sh)
 # and prints "N cases, P passed, F failed".
 #
-# These cases record what the bash bin/maintainer-merge does today, odd
+# These cases record what the bash programs do today, odd
 # behaviour included, so a later port can be held to it. MX_TREE names the tree
 # under test and defaults to this checkout:
 #
 #   bash tests/run-characterization.sh                  # this checkout
 #   MX_TREE=/path/to/other/tree bash tests/run-characterization.sh
-#   bash tests/run-characterization.sh gate-usage.sh    # one gate file
+#   bash tests/run-characterization.sh gate-usage.sh    # one case file
 #
 # It exits non-zero when a case fails, when no case ran, when a gate file ends
 # without its summary line, or when the cases a file printed do not add up to
@@ -23,23 +23,25 @@ if [ ! -f "$MX_TREE/bin/maintainer-merge" ]; then
 fi
 printf 'tree under test: %s\n' "$MX_TREE"
 
-# Arguments name gate files to run (gate-usage.sh, ...). With none, every
-# gate-*.sh runs. A name that matches no file is an error, not an empty run.
+# Arguments name case files to run (gate-usage.sh, ...). With none, every file of
+# a known family runs: gate (the merge gate), run (the orchestrator), doctor,
+# repo and install. Helpers (lib*.sh) never run. A name that matches no file is
+# an error, not an empty run.
 shopt -s nullglob
 files=()
 if [ "$#" -gt 0 ]; then
     for want in "$@"; do
         if [ ! -f "$here/characterization/$want" ]; then
-            printf 'run-characterization: no such gate file: %s\n' "$want" >&2
+            printf 'run-characterization: no such case file: %s\n' "$want" >&2
             exit 2
         fi
         files+=("$here/characterization/$want")
     done
 else
-    files=("$here"/characterization/gate-*.sh)
+    files=("$here"/characterization/{gate,run,doctor,repo,install}-*.sh)
 fi
 if [ "${#files[@]}" -eq 0 ]; then
-    echo "run-characterization: no gate-*.sh files found; this run inspected nothing" >&2
+    echo "run-characterization: no case files found; this run inspected nothing" >&2
     exit 1
 fi
 

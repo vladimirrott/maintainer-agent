@@ -11534,6 +11534,23 @@ grep -q 'with-hook-lock.sh' "$root/.githooks/pre-commit" && [ "$(grep -c 'nice -
     && ok "the pre-commit hook takes the machine lock and runs its heavy steps at low priority" \
     || bad "the pre-commit hook runs unserialised or at full priority"
 
+echo "== the characterization runner finds every family of case files =="
+# It globbed gate-*.sh only, so a case file named for the orchestrator, the
+# doctor, the repo tool or the installers would never have run, and the runner
+# would still have printed "168 passed". One fake file per family, plus a helper
+# that must not run.
+cr="$stub_dir/crun"; rm -rf "$cr"; mkdir -p "$cr/tests/characterization"
+cp "$suite_root/tests/run-characterization.sh" "$cr/tests/"
+for fam in gate run doctor repo install; do
+    printf '#!/usr/bin/env bash\necho "PASS  %s case"\necho "SUMMARY cases=1 pass=1 fail=0"\n' "$fam" > "$cr/tests/characterization/$fam-x.sh"
+done
+printf '#!/usr/bin/env bash\nexit 1\n' > "$cr/tests/characterization/lib-x.sh"
+out="$(env -u MX_TREE MX_TREE="$root" bash "$cr/tests/run-characterization.sh" 2>&1)"; rc=$?
+[ "$rc" = 0 ] && grep -q '^5 cases, 5 passed, 0 failed' <<<"$out" \
+    && ok "the characterization runner runs the gate, run, doctor, repo and install families and skips helpers" \
+    || bad "the characterization runner missed a family or ran a helper (rc=$rc): $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+rm -rf "$cr"
+
 if [ "$skip" -gt 0 ]; then
     printf '\n  %d passed, %d failed, %d skipped%s\n' "$pass" "$fail" "$skip" "$(sc_note)"
     printf '  A skip is a case this machine could not run. CI requires zero.\n'
