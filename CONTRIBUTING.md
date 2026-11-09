@@ -36,6 +36,11 @@ The gates run in three places, and they are the same gates: a pre-commit hook
 before a commit exists, GitHub Actions on every push and pull request, and your
 own shell whenever you want. Nothing is gated only on a maintainer's laptop.
 
+`tests/diff/` holds the differential recorder: it runs one set of scenarios against two
+trees and reports every difference in the argv sent to each stubbed tool, the exit code,
+stdout, stderr and the resulting state. `bash tests/diff/selftest.sh` tests the recorder
+itself. `tests/diff/README.md` has the scenario format.
+
 ## Setup
 
 ```sh
