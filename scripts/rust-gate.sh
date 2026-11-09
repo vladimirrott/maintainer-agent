@@ -4,6 +4,9 @@
 #   2. cargo clippy --workspace --all-targets --locked -- -D warnings
 #   3. cargo test --workspace --locked, and a floor on how many tests ran
 #   4. a probe that proves the "only mx-ports starts a process" rule still bites
+#   5. no crate but mx-ports may mention the disallowed_methods lint (an
+#      #[allow] elsewhere would switch the ban off), and every crate inherits
+#      the workspace lints
 # Each step prints one `[rust-gate]` line. Exit 0 with `no rust workspace` only
 # when rust/Cargo.toml does not exist: a missing tool or a missing file inside an
 # existing workspace is a failure, never a skip.
@@ -112,3 +115,15 @@ want="disallowed method \`std::process::Command::new\`"
 grep -qF "$want" <<<"$out" \
     || fail "probe (clippy failed, but not on the disallowed-method rule)" "$out"
 say "probe: ok (Command::new outside mx-ports is refused by clippy)"
+
+# 5. the ban only holds if no other crate can silence it. The workspace lint is
+# `deny`, and an `#[allow(clippy::disallowed_methods)]` (or a per-crate lint
+# table) in any crate but mx-ports would override it, so the name may not
+# appear there at all. grep exits 0 on a hit, 1 on none, 2 on an error.
+hits="$(grep -rnE 'disallowed[_-]methods' "$ws/crates" --include='*.rs' --include='*.toml' --exclude-dir=mx-ports 2>&1)"; rc=$?
+[ "$rc" = 1 ] || fail "allow-scan (disallowed_methods named outside mx-ports, or grep failed; grep exited $rc)" "$hits"
+for manifest in "$ws"/crates/*/Cargo.toml; do
+    grep -qx '\[lints\]' "$manifest" || fail "allow-scan ($manifest has no [lints] table)"
+    grep -qx 'workspace = true' "$manifest" || fail "allow-scan ($manifest does not inherit the workspace lints)"
+done
+say "allow-scan: ok (disallowed_methods is named only in mx-ports, and every crate inherits the workspace lints)"

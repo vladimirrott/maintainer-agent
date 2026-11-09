@@ -6,6 +6,8 @@ pub const EXIT_OK: i32 = 0;
 pub const EXIT_FAIL: i32 = 1;
 /// Bad usage, or a missing tree, profile or task.
 pub const EXIT_USAGE: i32 = 64;
+/// `maintainer-merge update` needs the author, not a retry.
+pub const EXIT_NEEDS_AUTHOR: i32 = 3;
 /// A transient condition (`EX_TEMPFAIL`). The next timer tick is the fix.
 pub const EXIT_TEMPFAIL: i32 = 75;
 /// A configuration refusal (`EX_CONFIG`): the run is not allowed here.
@@ -14,7 +16,7 @@ pub const EXIT_CONFIG: i32 = 78;
 /// Every way a magent program declines to go on.
 ///
 /// The classes come from the behaviour contracts of `maintainer-merge` (exit 1
-/// for every refusal, 64 for usage and profile load) and `lib/run.sh` (0, 1,
+/// for a refusal, 3 for `update` needing the author, 64 for usage and profile load) and `lib/run.sh` (0, 1,
 /// 64, 75 and 78). [`Refusal::exit_code`] has no catch-all arm, so adding a
 /// variant without choosing its exit code does not compile.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -180,6 +182,11 @@ pub enum Refusal {
     /// GitHub refused the merge or the branch update, or it was not confirmed.
     #[error("GitHub did not complete the change to #{pr}: {reason}")]
     MergeRefused { pr: u64, reason: String },
+    /// `maintainer-merge update` cannot proceed and a retry will not help.
+    /// bash: `update_refuse3() { ...; exit 3; }` in `bin/maintainer-merge`,
+    /// "Exit 3 is its own answer: this needs the author, not a retry".
+    #[error("will not update #{pr}: {reason}")]
+    UpdateNeedsAuthor { pr: u64, reason: String },
 }
 
 impl Refusal {
@@ -242,6 +249,8 @@ impl Refusal {
             | Self::ChecksNotGreen { .. }
             | Self::ClaimConflict { .. }
             | Self::MergeRefused { .. } => EXIT_FAIL,
+
+            Self::UpdateNeedsAuthor { .. } => EXIT_NEEDS_AUTHOR,
         }
     }
 }
@@ -310,6 +319,7 @@ mod tests {
             Refusal::ChecksNotGreen { .. } => 45,
             Refusal::ClaimConflict { .. } => 46,
             Refusal::MergeRefused { .. } => 47,
+            Refusal::UpdateNeedsAuthor { .. } => 48,
         }
     }
 
@@ -551,6 +561,14 @@ mod tests {
                 EXIT_FAIL,
                 Scope::Merge,
             ),
+            (
+                Refusal::UpdateNeedsAuthor {
+                    pr: 7,
+                    reason: "the author must press Update branch".to_string(),
+                },
+                EXIT_NEEDS_AUTHOR,
+                Scope::Merge,
+            ),
         ]
     }
 
@@ -569,7 +587,7 @@ mod tests {
         for (index, (refusal, _, _)) in table().iter().enumerate() {
             assert_eq!(rank(refusal), index, "{refusal:?} is out of place in the table");
         }
-        let last = rank(&Refusal::MergeRefused { pr: 0, reason: String::new() });
+        let last = rank(&Refusal::UpdateNeedsAuthor { pr: 0, reason: String::new() });
         assert_eq!(table().len(), last + 1, "a variant has no row in the table");
     }
 
@@ -577,22 +595,26 @@ mod tests {
     fn only_the_codes_the_contracts_name_are_used() {
         for (refusal, code, _) in table() {
             assert!(
-                [EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_CONFIG].contains(&code),
+                [EXIT_OK, EXIT_FAIL, EXIT_NEEDS_AUTHOR, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_CONFIG]
+                    .contains(&code),
                 "{refusal:?} exits with {code}"
             );
         }
         assert_eq!(
-            (EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_CONFIG),
-            (0, 1, 64, 75, 78)
+            (EXIT_OK, EXIT_FAIL, EXIT_NEEDS_AUTHOR, EXIT_USAGE, EXIT_TEMPFAIL, EXIT_CONFIG),
+            (0, 1, 3, 64, 75, 78)
         );
     }
 
     #[test]
-    fn merge_refusals_exit_with_1_or_64_only() {
+    fn merge_refusals_exit_with_1_3_or_64_only() {
         let mut checked = 0;
         for (refusal, code, scope) in table() {
             if scope != Scope::Run {
-                assert!([EXIT_FAIL, EXIT_USAGE].contains(&code), "{refusal:?} exits with {code}");
+                assert!(
+                    [EXIT_FAIL, EXIT_NEEDS_AUTHOR, EXIT_USAGE].contains(&code),
+                    "{refusal:?} exits with {code}"
+                );
                 checked += 1;
             }
         }

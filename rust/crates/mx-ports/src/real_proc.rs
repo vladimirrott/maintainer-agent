@@ -40,7 +40,7 @@ const UNKNOWN_EXIT: i32 = 255;
 /// counts as running until the timeout: the call waits for the pipes to close.
 #[derive(Debug, Clone)]
 pub struct RealProc {
-    search_path: OsString,
+    search_dirs: Vec<PathBuf>,
     base_env: Vec<(String, String)>,
     kill_tools: Vec<PathBuf>,
 }
@@ -50,7 +50,7 @@ impl RealProc {
     /// `base_env` to every child.
     pub fn new(search_path: impl Into<OsString>, base_env: Vec<(String, String)>) -> Self {
         Self {
-            search_path: search_path.into(),
+            search_dirs: absolute_entries(&search_path.into()),
             base_env,
             kill_tools: KILL_TOOLS.iter().map(PathBuf::from).collect(),
         }
@@ -78,14 +78,16 @@ impl RealProc {
 impl Proc for RealProc {
     fn run(&self, spec: &ProcSpec) -> Result<ProcOutput, ProcError> {
         let name = spec.argv.first();
-        let program = resolve(&self.search_path, name)?;
+        let program = resolve(&self.search_dirs, name)?;
 
         let mut command = new_command(&program);
         command.arg0(name).args(&spec.argv.as_slice()[1..]).env_clear();
         for (key, value) in self.base_env.iter().chain(&spec.env) {
             command.env(key, value);
         }
-        command.env("PATH", &self.search_path).env("LC_ALL", "C");
+        command
+            .env("PATH", std::env::join_paths(&self.search_dirs).unwrap_or_default())
+            .env("LC_ALL", "C");
         if let Some(dir) = &spec.cwd {
             command.current_dir(dir);
         }
@@ -223,8 +225,14 @@ fn wait_until(deadline: Instant, mut ready: impl FnMut() -> bool) -> bool {
     }
 }
 
+/// The absolute entries of a search path. A relative or empty entry means "the
+/// current directory" to a child, so neither is searched and neither is passed on.
+fn absolute_entries(search_path: &OsStr) -> Vec<PathBuf> {
+    std::env::split_paths(search_path).filter(|dir| dir.is_absolute()).collect()
+}
+
 /// Finds the executable for `program`.
-fn resolve(search_path: &OsStr, program: &str) -> Result<PathBuf, ProcError> {
+fn resolve(search_dirs: &[PathBuf], program: &str) -> Result<PathBuf, ProcError> {
     if program.contains('/') {
         let path = Path::new(program);
         if !path.is_absolute() {
@@ -237,10 +245,7 @@ fn resolve(search_path: &OsStr, program: &str) -> Result<PathBuf, ProcError> {
         };
     }
     let mut found_but_not_executable = false;
-    for dir in std::env::split_paths(search_path) {
-        if !dir.is_absolute() {
-            continue;
-        }
+    for dir in search_dirs {
         let candidate = dir.join(program);
         match fs_mode(&candidate) {
             Some(mode) if mode & 0o111 != 0 => return Ok(candidate),
@@ -639,6 +644,13 @@ mod tests {
                 "path {search:?}"
             );
         }
+    }
+
+    #[test]
+    fn the_child_gets_only_the_absolute_entries_of_the_search_path_as_path() {
+        let proc = RealProc::new("/usr/bin:rel:/bin::sub/dir", Vec::new());
+        let seen = env_of_child(&proc, &call("printenv", &[]));
+        assert_eq!(seen.get("PATH").map(String::as_str), Some("/usr/bin:/bin"));
     }
 
     #[test]

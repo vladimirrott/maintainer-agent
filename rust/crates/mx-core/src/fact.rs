@@ -12,8 +12,10 @@ use std::fmt::Display;
 /// - [`Fact::Unreadable`]: the read could not be made, with the reason.
 ///
 /// The rule every method here keeps: **`Unreadable` never becomes `Absent`**.
-/// There is deliberately no `Default`, no `unwrap_or`, and no conversion into
-/// `Option`, because each of those folds the third state into "nothing".
+/// There is deliberately no `Default`, no `unwrap_or`, and no `From<Fact<T>>`
+/// for `Option`, because each of those folds the third state into "nothing".
+/// The one place the fold exists is [`Fact::known`], which says so by name and
+/// in its documentation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[must_use = "a Fact that is never inspected is a check that never ran"]
 pub enum Fact<T> {
@@ -38,8 +40,9 @@ impl<T> Fact<T> {
 
     /// The value when it was read.
     ///
-    /// `None` means "not known" and covers both `Absent` and `Unreadable`. Use
-    /// it to decline to go on. When the difference changes the outcome, use
+    /// This is the one method that folds `Unreadable` into `None`: `None` means
+    /// "not known" and covers both `Absent` and `Unreadable`. Use it only where
+    /// both mean "decline to go on", and never to decide that a thing is absent. When the difference changes the outcome, use
     /// [`Fact::absent_ok`] or [`Fact::require`].
     #[must_use]
     pub fn known(self) -> Option<T> {

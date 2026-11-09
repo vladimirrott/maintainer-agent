@@ -18,4 +18,6 @@ mod refusal;
 
 pub use fact::Fact;
 pub use nonempty::{Empty, NonEmpty};
-pub use refusal::{EXIT_CONFIG, EXIT_FAIL, EXIT_OK, EXIT_TEMPFAIL, EXIT_USAGE, Refusal};
+pub use refusal::{
+    EXIT_CONFIG, EXIT_FAIL, EXIT_NEEDS_AUTHOR, EXIT_OK, EXIT_TEMPFAIL, EXIT_USAGE, Refusal,
+};
