@@ -361,6 +361,13 @@ B
 cz_case "scrub: SIGTERM during the backend ends the run with 143, the exit trap scrubs the token and clears the lease, finish never runs" case_scrub_signal
 
 case_scrub_hangup() {
+    # This case sends the run a hangup. A runner started with SIGHUP ignored
+    # (`nohup`) passes that disposition down and the run ends with another status,
+    # so say so up front instead of failing on a bare exit code.
+    if [ $(( 0x$(sed -n 's/^SigIgn:[[:space:]]*//p' /proc/$$/status) & 1 )) -ne 0 ]; then
+        cz_note_fail "the runner was started with SIGHUP ignored (nohup?); run it without nohup"
+        return
+    fi
     rz_setup
     rz_plant_leak "$RZ_STATE/leak.txt"
     rz_backend_behave <<'B'

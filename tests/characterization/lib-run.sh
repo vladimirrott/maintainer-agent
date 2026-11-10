@@ -323,6 +323,10 @@ rz_pairs() {
     for k in "${!CZ_E[@]}"; do RZ_PAIRS+=("$k=${CZ_E[$k]}"); done
 }
 
+# The hook lock leaves fd 9 open, and a lock case that makes the run's own
+# `exec 9>` fail got the caller's descriptor instead (run-cadence-lock.sh: a
+# run.lock that cannot be opened). Every run closes fd 9 with `9>&-`.
+
 # rz_run ARGS...: run.sh <ARGS>. Sets CZ_RC; the two streams land in
 # $CZ_CASE/stdout and $CZ_CASE/stderr, apart.
 rz_run() {
@@ -331,9 +335,9 @@ rz_run() {
     # dies of a signal, so it does not land in the runner's output.
     if [ -n "$RZ_RUNNER" ]; then
         # shellcheck disable=SC2086  # RZ_RUNNER is a command line of plain words
-        { env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 $RZ_RUNNER "$@" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null; } 2>/dev/null
+        { env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 $RZ_RUNNER "$@" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null 9>&-; } 2>/dev/null
     else
-        { env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 "$RZ_BASH" "$RZ_TREE/lib/run.sh" "$@" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null; } 2>/dev/null
+        { env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 "$RZ_BASH" "$RZ_TREE/lib/run.sh" "$@" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null 9>&-; } 2>/dev/null
     fi
     CZ_RC=$?
 }
@@ -344,7 +348,7 @@ rz_run() {
 rz_drive() {
     CZ_E[RZ_TREE]="$RZ_TREE"; CZ_E[PROFILE_DIR]="$RZ_PROFILE_DIR"
     rz_pairs
-    env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 "$RZ_BASH" -c "$1" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null
+    env -i "${RZ_PAIRS[@]}" "$RZ_TIMEOUT" 60 "$RZ_BASH" -c "$1" > "$CZ_CASE/stdout" 2> "$CZ_CASE/stderr" < /dev/null 9>&-
     CZ_RC=$?
 }
 
