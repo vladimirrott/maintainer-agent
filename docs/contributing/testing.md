@@ -2,7 +2,7 @@
 
 Everything in this repository's suite tests a refusal. magent earns trust by what it declines to do, so a test here proves that a guard stops something, and a test that cannot fail proves nothing. This page covers the four layers of tests, how to run each, how to write a case that can go red, how to prove it goes red, and how to run the same gates the maintainer runs before a commit exists.
 
-If you read one section, read [Writing a test that can fail](#3-writing-a-test-that-can-fail) and [Proving a test bites](#4-proving-a-test-bites). Every defect in `docs/lessons.md` about the suite is a test that passed while the guard it named was absent.
+If you read one section, read [Writing a test that can fail](#3-writing-a-test-that-can-fail) and [Proving a test bites](#4-proving-a-test-bites). Most of the suite defects recorded in `docs/lessons.md` are a test that passed while the guard it named was absent.
 
 ## Contents
 
@@ -72,7 +72,7 @@ sc_end; fi
 
 ### `tests/characterization/`
 
-A characterization case records what the bash gate does now. Where the bash program does something a port is meant to change, the comment above the case says `pins current behaviour, see plan decision F<n>`, and the case still pins it. Where a case caught a defect, it flips to the fixed behaviour and says `fixed`, as the F9 head-fence cases do (`tests/characterization/gate-merge-path.sh`).
+A characterization case records what the bash gate does now. Where the bash program does something a port is meant to change, the comment above the case says `pins current behaviour, see plan decision F<n>` (`F<n>` numbers a decision in the maintainer's private migration plan, so read the case's own comment for the reason), and the case still pins it. Where a case caught a defect, it flips to the fixed behaviour and says `fixed`, as the F9 head-fence cases do (`tests/characterization/gate-merge-path.sh`).
 
 `tests/run-characterization.sh` runs every file of a known family (`gate`, `run`, `doctor`, `repo`, `install`, matched as `<family>-*.sh`), skips helper files named `lib*.sh`, and takes file names to run a subset:
 
@@ -298,13 +298,13 @@ bash scripts/check_claims.sh                                # runs the suite, me
 
 `--check` prints one `FAIL file:line: reason` per problem: a stale marker, an unknown name, a malformed or nested marker, a marker inside a code fence, a figure typed outside a marker, a required site that stopped stating its figure, and a source that could not be read. It never skips: a figure whose source cannot be read is a failure.
 
-Add a case and the `tests` count moves. `--check --no-tests` (the hook step) never compares that value; `check_claims.sh` does, and the floor makes it differ only when the count crosses a multiple of 100. Add a lesson, an eval scenario, a profile or a backend, and the exact figure moves, so run `--write --no-tests` and commit the result. A figure typed in prose where a marker belongs fails `--check`; the `BARE` patterns in `render_figures.py` say which phrasings it recognises, and the suite size is policed in the README. `check_claims.sh` counts passed plus skipped cases as the suite size, so a contributor with no container runtime measures the same size the README states.
+Add a case and the `tests` count moves. `--check --no-tests` (the hook step) never compares that value; `check_claims.sh` does, and the floor makes it differ only when the count crosses a multiple of 100. Add an eval scenario, a profile or a backend and an exact figure moves; a lesson rarely moves its figure, because that one is a floor of 10, so run `--write --no-tests` and commit the result. A figure typed in prose where a marker belongs fails `--check`; the `BARE` patterns in `render_figures.py` say which phrasings it recognises, and the suite size is policed in the README. `check_claims.sh` counts passed plus skipped cases as the suite size, so a contributor with no container runtime measures the same size the README states.
 
 Do not type a count in a document you write. Point at the command that prints it, or add a name to `FIGURES` with a source function that fails closed on a missing directory, an unparseable file and a count of zero.
 
 ## 7. Running the gates locally
 
-CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `rust` and `powershell`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
+CI runs the same gates on every push and pull request, including from a fork. The jobs in `.github/workflows/ci.yml` are `the four gates` (syntax by shebang, the suite twice, the eval rules per profile, README numbers, drift, figures, action pins, relative links), `shellcheck`, `rust` and `the Windows installer parses`. Locally, the pre-commit hook (`.githooks/pre-commit`; enable it once with `git config core.hooksPath .githooks`) runs these steps in order and reports each failing step by name:
 
 | step | what it protects |
 |---|---|
@@ -383,7 +383,7 @@ These are the questions a reviewer asks, and a contributor can ask them first.
 | `sweep: MemAvailable is ... KB and the linter needs ... KB; gave up` (exit 75) | less than 10 GiB free for 300 s | close something heavy and retry, or lower `MAGENT_SWEEP_MIN_AVAIL_KB` knowing a smaller figure can reach the cap |
 | `sweep: shellcheck was killed (rc=137)` | the `MemoryMax=12G` scope killed the linter on a large file | raise `MAGENT_SWEEP_MEM_MAX`, and check that nothing else is using the memory the scope counts |
 | `shellcheck is not installed, so this gate inspected nothing` (exit 127) | the linter is missing | install shellcheck; the gate never passes without it |
-| the figures step fails after you added a case, a lesson, a profile, an eval or a backend | the exact figures moved | `python3 scripts/render_figures.py --write --no-tests`, then commit the changed markers. The `tests` figure is a floor, so a new case alone rarely moves it |
+| the figures step fails after you added a case, a profile, an eval or a backend | an exact figure moved | `python3 scripts/render_figures.py --write --no-tests`, then commit the changed markers. The `tests` and `lessons` figures are floors, so a new case or lesson alone rarely moves them |
 | `check_claims.sh` says `the test suite is RED` | the suite failed before the claims were checked | fix the failing case first; the script prints the first ten `FAIL` lines |
 | a case fails under `MX_TREE=<export>` and passes in your worktree | it reads program text, and the tree under test has none the case understands, or it needs `git` | decide whether the case is source-coupled (wrap it in `sc_case N`) or a black-box case that should pass on any tree |
 | `git ls-files` cases fail in an exported tree with `no tracked files or no PROD_GLOBS; the check below would be vacuous` and `no production file matched both PROD_GLOBS and suite_covers` | `git archive` and a plain copy have no `.git`, so `git -C "$root" ls-files` prints nothing | use a clone as the tree under test, or run `git init` and `git add -A` in the export. The cases refuse an empty file list on purpose, so they fail instead of scanning nothing |
@@ -394,5 +394,5 @@ These are the questions a reviewer asks, and a contributor can ask them first.
 | a mutant run reports `0 passed, N failed` for every case | the mutant does not parse | `bash -n` the mutated file; mutate a whole statement, not half of a continued one |
 | a mutant "survived" and you cannot see why | the case is shaped for a different path, or an outer guard refuses first | read the line that refuses; build the input that reaches only the guard under test |
 | cargo reuses a mutant's build after you restore | `cp -a` kept old modification times | `find <tree> -type f -exec touch {} +` before every run, and look for `Compiling` |
-| the suite fails `a home path leaked into the repository` after you ran `rust-gate.sh` | cargo wrote `rust/target/` inside the tree, and that case greps every file under the tree for your home path, ignored files included | delete `rust/target`, or build outside the tree with `CARGO_TARGET_DIR=~/.cache/magent-target scripts/rust-gate.sh` |
+| the suite fails `a home path leaked into the repository` after you ran `rust-gate.sh` | cargo wrote `rust/target/` inside the tree, and that case greps every file under the tree, ignored files included, for one fixed string, the maintainer's account name, so that a path from the maintainer's machine never lands in the repository. It fails for you only when a file you generated holds that string | delete `rust/target`, or build outside the tree with `CARGO_TARGET_DIR=~/.cache/magent-target scripts/rust-gate.sh` |
 | `rust-gate.sh` reports `FAILED: probe (the clean copy does not pass clippy ...)` | the workspace does not pass clippy on its own, so the probe proves nothing | fix clippy first; the gate runs the clean copy as a control on purpose |
