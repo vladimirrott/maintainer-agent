@@ -37,15 +37,16 @@ Contents:
 
 ## The path of a pull request
 
-Steps 1 to 4 repeat until nothing blocks. Steps 5 to 9 follow once.
+Steps 4 and 5 repeat until nothing blocks. Steps 6 to 9 follow once.
 
 1. **You open the pull request against `main`.** Fill in the template in
    `.github/PULL_REQUEST_TEMPLATE.md`. Its "The mutation" section is the one a
    reviewer reads first: it shows what you broke, what went red, and that the
    suite is green again after you restored it. A change that adds no guard says
-   so there. Docs and prose changes need no mutation.
-2. **Intake.** A maintainer (`CODEOWNERS` lists them) or the scheduled agent
-   picks the pull request up, runs `maintainer screen <pr>` to learn whether its
+   so there. A docs-only change has nothing in production to break: the maintainer
+   earns its receipt with the `docs` suite (see [Receipts](#receipts)), so you do
+   not supply a mutation for it.
+2. **Intake.** A maintainer (`CODEOWNERS` lists them) picks the pull request up, runs `maintainer screen <pr>` to learn whether its
    code may be executed on the maintainer's host, and takes a lease with
    `maintainer lease take <pr>` so two reviewers do not work it at once.
 3. **CI.** GitHub holds the workflow runs of a first-time contributor until a
@@ -77,8 +78,8 @@ Steps 1 to 4 repeat until nothing blocks. Steps 5 to 9 follow once.
    approved and has its receipt, we bring it up to date with
    `maintainer-merge update <pr>`. That works when you ticked "Allow edits by
    maintainers" on the pull request. When you did not, the command exits 3 and
-   tells you to press Update branch yourself, and you do. Conflicts are never
-   resolved for you: you resolve them and push.
+   tells you to press Update branch yourself, and you do. You resolve
+   conflicts and push.
 8. **Board green, then merge.** After the update the required checks run again,
    and `maintainer-merge merge <pr>` refuses until every check has passed. The
    merge is a squash: your commits become one commit on `main`, authored by you.
@@ -99,9 +100,11 @@ whose last success is younger than that, so the 16:17 slot runs only when the
 nothing, and that is the case the retry exists for. The test suite checks that
 the gap between the two slots stays under `MIN_HOURS`.
 
-A person can act at any time and often does sooner than the timer. The timer
-also reads only what the profile's review prompt tells it to; the maintainer
-decides whether a given pull request goes to a person, to the agent, or to both.
+Today the scheduled run for this repository reviews commits that already landed
+on `main` and Dependabot's pull requests (`profiles/magent/prompts/review.md`
+says so in its first lines). It does not review contributor pull requests, so a
+person reads yours, on no fixed schedule. The timer matters to you only when your
+pull request is a Dependabot bump.
 
 When your pull request waits longer than you expected, comment on it and ask for
 a look. A comment costs nothing and a reviewer who sees one at the top of the
@@ -250,12 +253,15 @@ three of them concern you:
   request over. The one narrow path is `maintainer-repo fixup`, described in
   [A pull request that stalls](#a-pull-request-that-stalls).
 
-The agent names the head it reviewed, and its prompt tells it to skip a head it
-already reviewed. `maintainer reviewed <pr>` shows what this account already
-said at the current head, so a new push gets its own review and an old one is
-not posted twice. Both are rules in the prompt; the gate is what checks the head
-at merge time (`--match-head-commit`). When a person works your pull request, a lease tells the agent to
-skip it, and the agent says so in its report. A run yields to a person.
+In a profile that reviews pull requests (the `sysknife` profile today), the agent
+names the head it reviewed, and its prompt tells it to skip a head it already
+reviewed or one a person has leased with `maintainer lease take <pr>`.
+`maintainer reviewed <pr>` shows what this account already said at the current
+head, so a new push gets its own review and an old one is not posted twice. Those
+rules live in `profiles/sysknife/prompts/review.md`; the `magent` review prompt
+does not carry them because it does not review contributor pull requests. The
+gate is what checks the head at merge time (`--match-head-commit`), whoever
+reviewed.
 
 To ask for a human, say so in a comment on the pull request. The agent and the
 maintainers read the same thread, and a person decides.
@@ -307,9 +313,9 @@ closes, so someone else may take it.
   when a release is owed (`maintainer-repo release-check` says whether one is,
   see [When a release is owed](../release.md)). Do not edit `CHANGELOG.md` in
   your pull request.
-- **Next work.** The merge comment points at one or two open issues that fit what
-  your pull request showed. If one is offered to you by name, we hold it for you
-  and nobody else is offered it.
+- **Next work.** Our reviews point at one or two open issues that fit what your
+  pull request showed. That is the reviewer's habit, not a gate. If one is offered
+  to you by name, the reviewer holds it for you and offers it to nobody else.
 - **A regression.** If something your change touched breaks, open an issue from
   the bug template and link your pull request. A security problem goes through
   `SECURITY.md`, never a public thread.
@@ -345,12 +351,13 @@ the whole relationship. What we do:
   you #N on #N". Never offer an issue held for someone else; `maintainer offers`
   prints who is free.
 - **Invite the contributor as a user, once.** Someone who sends a careful pull
-  request to a tool that maintains repositories probably maintains one. After
+  request to a tool that maintains repositories likely maintains one. After
   "merging" (never before it, and never as a condition), say in a short
   paragraph tied to what their diff showed that we would like to know how magent
   holds up on their repository. Point them at the safe start in `CONTRIBUTING.md`:
   `./new-profile.sh`, `POST=off`, read the report. Once per person; a second ask
-  turns a maintainer into a salesperson.
+  turns a maintainer into a salesperson. This is a maintainer practice: the
+  `magent` review prompt does not carry it.
 
 Two cases have no code behind them yet and are tracked in issue #13: a pull
 request that is correct and unwanted, and one labelled `DO-NOT-MERGE`. The
