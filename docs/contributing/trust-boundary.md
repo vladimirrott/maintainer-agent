@@ -63,7 +63,7 @@ gate.
 
 **The rule.** `maintainer-merge merge` spends a receipt only when it recomputes
 the receipt's HMAC-SHA256 signature and the result matches, and the signing key
-sits where the agent's deny wall refuses every reader.
+sits where the agent's deny wall refuses every reader it knows how to spell.
 
 **Why it exists.** `SECURITY.md` lists forging a receipt first. Receipts were
 once unsigned JSON protected by a deny rule on one command, and the wall
@@ -594,10 +594,10 @@ Python helpers, which take paths through `sys.argv`; `sed --sandbox` (rule 8);
 `lib/preamble-core.md` for the prompt-injection doctrine. The preamble is a
 convention, not a gate: no code stops a model from reading an instruction. What
 holds is that the wall and the gates do not depend on the model complying.
-The one known exception is `maintainer-merge show`, which does not call
-`pr_or_die` and reads `"$RECEIPTS/<arg>.json"` as typed. The characterization
-cases pin that behaviour as it is today, with the note that a later port will
-refuse such an argument. Do not extend the pattern to a new command.
+One read-only command does not yet use `pr_or_die`; the migration plan
+tracks it and the Rust port refuses the same inputs. Do not extend the
+pattern to a new command: every argument that names a file or a number goes
+through the same validator.
 
 **Pinned by.** `tests/run-tests.sh`. Weaken the `*[!0-9]*` pattern in
 `pr_or_die` and "merge rejects a non-integer PR" fails for each hostile input
