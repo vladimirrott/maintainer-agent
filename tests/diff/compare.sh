@@ -48,8 +48,8 @@ while IFS= read -r name; do
         scn_diff=$((scn_diff + 1)); fld_diff=$((fld_diff + 1)); fld_total=$((fld_total + 1))
         continue
     fi
-    fields="$( { ( cd "$old/$name" && find . -type f -printf '%P\n' )
-                 ( cd "$new/$name" && find . -type f -printf '%P\n' ); } | LC_ALL=C sort -u )" \
+    fields="$( { ( cd "$old/$name" && find . ! -type d -printf '%P\n' )
+                 ( cd "$new/$name" && find . ! -type d -printf '%P\n' ); } | LC_ALL=C sort -u )" \
         || die "cannot list the fields of $name"
     this_diff=0
     while IFS= read -r field; do
@@ -58,6 +58,13 @@ while IFS= read -r name; do
         a="$old/$name/$field"; b="$new/$name/$field"
         # A field one side never wrote is not an empty field. Comparing it with
         # /dev/null made "no argv log at all" equal "a stub nobody called".
+        # A symlink is never followed: it would compare the target, not the field.
+        if [ -L "$a" ] || [ -L "$b" ]; then
+            side=old; [ -L "$b" ] && side=new
+            printf 'DIFF scenario=%s field=%s\nfield is a symlink in %s\n' "$name" "$field" "$side"
+            fld_diff=$((fld_diff + 1)); this_diff=1
+            continue
+        fi
         if [ ! -f "$a" ] || [ ! -f "$b" ]; then
             side=old; [ -f "$a" ] && side=new
             printf 'DIFF scenario=%s field=%s\nfield missing in %s\n' "$name" "$field" "$side"

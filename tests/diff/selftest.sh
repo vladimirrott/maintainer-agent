@@ -51,6 +51,7 @@ sec_normaliser() {
     check "a Z suffix and a +00:00 suffix stay different" "$(nf 2026-01-01T00:00:00Z)|$(nf 2026-01-01T00:00:00+00:00)" "NNNN-NN-NNTNN:NN:NNZ|NNNN-NN-NNTNN:NN:NN+00:00"
     check "a T and a space between date and time stay different" "$(nf '2026-01-01T00:00:00Z')|$(nf '2026-01-01 00:00:00Z')" "NNNN-NN-NNTNN:NN:NNZ|NNNN-NN-NN NN:NN:NNZ"
     check "fractional seconds stay visible and their digits do not" "$(nf 2026-01-01T00:00:00.123456Z)|$(nf 2027-02-03T04:05:06.9Z)|$(nf 2026-01-01T00:00:00Z)" "NNNN-NN-NNTNN:NN:NN<FRAC>Z|NNNN-NN-NNTNN:NN:NN<FRAC>Z|NNNN-NN-NNTNN:NN:NNZ"
+    check "two different mktemp-looking verify-work names are random, two words are not" "$(nf verify-work/Xy12AbCd)|$(nf verify-work/snapshot)|$(nf verify-work/baseline)" "verify-work/<RAND>|verify-work/snapshot|verify-work/baseline"
     check "two different instants with the same shape normalise to the same text" "$(nf 2026-01-01T00:00:00Z)" "$(nf 2031-12-31T23:59:59Z)"
 }
 
@@ -304,7 +305,21 @@ claude: --version"
     differs "LC_ALL differs" 'LC_ALL=C gh x' 'LC_ALL=en_US.UTF-8 gh x' env.gh.log
     differs "TZ differs" 'TZ=UTC gh x' 'TZ=Europe/Madrid gh x' env.gh.log
     differs "HOME differs" 'HOME=/nonexistent gh x' 'gh x' env.gh.log
+    # every secret-looking name, in any case, must stay out of every recorded file
+    local names="MAINTAINER_token MAINTAINER_password MAINTAINER_api_key MAINTAINER_PASSWD MAINTAINER_PAT MAINTAINER_CREDENTIAL MAINTAINER_AUTH MAINTAINER_Secret MAINTAINER_GH_PAT" n body="" i=0 leaks=0
+    for n in $names; do i=$((i + 1)); body+="$n=leakvalue$i "; done
+    pair "secret-looking names" "$body gh x" "gh x" || true
+    for i in $(seq 1 9); do
+        if grep -rq "leakvalue$i" "$PAIR_DIR/o-old"; then leaks=$((leaks + 1)); fi
+    done
+    check "no secret-looking MAINTAINER_ value reaches any recorded file (leaks of 9)" "$leaks" "0"
     same "control: a MAINTAINER_ secret is logged as set, not by value" 'MAINTAINER_RECEIPT_KEY=aaa gh x' 'MAINTAINER_RECEIPT_KEY=bbb gh x'
+    # a symlink in one recording is a difference, not a followed link
+    pair "a symlink field" 'gh x' 'gh x' || true
+    ln -s argv.gh.log "$PAIR_DIR/o-new/prog/extra.log"
+    PAIR_OUT="$(cmp_ "$PAIR_DIR/o-old" "$PAIR_DIR/o-new" 2>&1)"; PAIR_RC=$?
+    check "a symlink added to one recording exits 1" "$PAIR_RC" "1"
+    says "and is named as a symlink" "$PAIR_OUT" "field is a symlink in new"
     # 3. stub stdin
     differs "different bytes piped into a stub" 'echo one | gh api --input -' 'echo two | gh api --input -' stdin.gh.log
     differs "bytes piped into a stub versus none" 'echo one | gh api --input -' 'gh api --input -' stdin.gh.log

@@ -59,8 +59,8 @@ for _mx_v in GH_TOKEN GITHUB_TOKEN; do
     if [ -n "${!_mx_v:-}" ]; then _mx_e+=" $_mx_v=<set>"; else _mx_e+=" $_mx_v=<unset>"; fi
 done
 for _mx_v in $(compgen -v MAINTAINER_ | LC_ALL=C sort); do
-    case "$_mx_v" in
-        *KEY*|*TOKEN*|*SECRET*|*PASSWORD*) _mx_e+=" $_mx_v=<set>" ;;
+    case "${_mx_v^^}" in
+        *KEY*|*TOKEN*|*SECRET*|*PASS*|*PAT|*PAT_*|*CRED*|*AUTH*) _mx_e+=" $_mx_v=<set>" ;;
         *) _mx_e+=" $_mx_v=${!_mx_v@Q}" ;;
     esac
 done

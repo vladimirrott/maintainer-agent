@@ -20,3 +20,14 @@ A log a stub never wrote is empty. `compare.sh` treats a field that one recordin
 At the top of the out directory `record.sh` writes `tree.abspath`: the distinct absolute paths to a stubbed tool (`/usr/bin/gh`, `/usr/local/bin/podman`, ...) found in the program text under `bin lib scripts platform profiles evals install.sh new-profile.sh`, scripts and compiled binaries alike. A program that runs `/usr/bin/gh` reaches the host's gh and no stub sees the call, so `compare.sh` holds `tree.abspath` equal across the two trees. The scan reads text, so a path assembled at run time is not found by it; the missing line in `calls.log` shows the effect of that case.
 
 `normalise.py rules` lists every substitution with its reason, and `normalise.py selftest` runs the examples each rule must change and the text it must leave alone. The timestamp rule replaces only the digits: `2026-01-01T00:00:00Z` and `2026-01-01 00:00:00+00:00` stay different, and so do a fraction and its absence. The scenarios use fixed git dates, `TZ=UTC` and `LC_ALL=C`. A program that exits non-zero is data. A harness fault (a scenario with no program run, a tree modified by a run, an unfinished recording) exits 2. Environment: `MX_SCRATCH` moves the scratch base (default `~/.cache/magent-diff-scratch`, never /tmp), `MX_KEEP=1` keeps it, `MX_TIMEOUT` sets seconds per program (default 120).
+
+## Limits
+
+argv and stdin are recorded raw. A secret a scenario passes to a stub in argv or on stdin lands in the recording, so a scenario must never do that. Only environment values are masked: GH_TOKEN, GITHUB_TOKEN and any `MAINTAINER_*` name containing KEY, TOKEN, SECRET, PASS, CRED, AUTH or ending in PAT (any case) log as set or unset.
+
+What the recorder cannot see:
+
+- The key-file rule turns any 64-hex file into one token, so two different keys compare equal.
+- The epoch-field, stamp-filename and mktemp-dir rules hide real differences in those values. mktemp-dir leaves an all-lowercase 8-letter name alone (a word such as `snapshot`), so a random name of that shape shows up as a difference about once in a thousand recordings.
+- The env allowlist logs only the variables named above; any other variable a program sets for a stub goes unseen.
+- A symlink in a result directory is a difference, never followed.

@@ -246,7 +246,7 @@ hmutant token-value-logged lib.sh \
     '_mx_e+=" $_mx_v=${!_mx_v:-<unset>}"' \
     blindspots "a GH_TOKEN value reached the recording"
 hmutant secret-mask-removed lib.sh \
-    '*KEY*|*TOKEN*|*SECRET*|*PASSWORD*) _mx_e+=" $_mx_v=<set>" ;;' \
+    '*KEY*|*TOKEN*|*SECRET*|*PASS*|*PAT|*PAT_*|*CRED*|*AUTH*) _mx_e+=" $_mx_v=<set>" ;;' \
     '__none__) _mx_e+=" $_mx_v=<set>" ;;' \
     blindspots "control: a MAINTAINER_ secret is logged as set, not by value: compare exits 0"
 hmutant stdin-not-replayed lib.sh \
@@ -272,6 +272,19 @@ hmutant abspath-scan-disabled record.sh \
 hmutant abspath-local-bin-dropped record.sh \
     '(?:/usr/local/bin|/usr/bin|/usr/sbin|' '(?:/usr/bin|/usr/sbin|' \
     blindspots "an absolute path built in another form (/usr/local/bin/podman): the report names field tree.abspath"
+hmutant secret-pattern-old lib.sh \
+    '*KEY*|*TOKEN*|*SECRET*|*PASS*|*PAT|*PAT_*|*CRED*|*AUTH*) _mx_e+=" $_mx_v=<set>" ;;' \
+    '*KEY*|*TOKEN*|*SECRET*|*PASSWORD*) _mx_e+=" $_mx_v=<set>" ;;' \
+    blindspots "no secret-looking MAINTAINER_ value reaches any recorded file"
+hmutant case-sensitive-mask lib.sh 'case "${_mx_v^^}" in' 'case "$_mx_v" in' \
+    blindspots "no secret-looking MAINTAINER_ value reaches any recorded file"
+hmutant symlink-ignored compare.sh '( cd "$new/$name" && find . ! -type d -printf' \
+    '( cd "$new/$name" && find . -type f -printf' \
+    blindspots "a symlink added to one recording exits 1"
+hmutant symlink-not-rejected compare.sh 'if [ -L "$a" ] || [ -L "$b" ]; then' 'if false; then' \
+    blindspots "and is named as a symlink"
+hmutant mktemp-dir-any-name normalise.py '(?![a-z]{8}\b)' '' \
+    normaliser "two different mktemp-looking verify-work names are random, two words are not"
 hmutant empty-stub-logs-dropped normalise.py \
     'for kind in ("argv", "env", "stdin"):' 'for kind in ("argv",):' \
     state "env.gh.log missing"
