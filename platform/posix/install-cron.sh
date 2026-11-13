@@ -62,7 +62,23 @@ gen() {
     printf '%s end\n' "$marker"
 }
 
-current="$(crontab -l 2>/dev/null || true)"
+# An empty list is only right when there is no crontab yet. Any other failure of
+# `crontab -l` (a spool error, a permission problem) must not be read as empty,
+# or the write below would drop every other job the user has. The message is
+# matched in English, so the call runs under the C locale whatever the user's
+# language is; otherwise a localized "no crontab" would look like a real error.
+list_err="$(mktemp)"
+if current="$(LC_ALL=C crontab -l 2>"$list_err")"; then
+    :
+elif grep -q 'no crontab for' "$list_err"; then
+    current=""
+else
+    cat "$list_err" >&2
+    rm -f "$list_err"
+    echo "install-cron: crontab -l failed; leaving the crontab unchanged" >&2
+    exit 1
+fi
+rm -f "$list_err"
 # Strip any previous block so this is idempotent. Reinstalling must replace, not
 # accumulate; the same mistake cost a stale deny wall on the file-copy path.
 stripped="$(printf '%s\n' "$current" | awk -v m="$marker" '

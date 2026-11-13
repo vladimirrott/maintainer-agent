@@ -2653,6 +2653,9 @@ if sc_case 2; then
 grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
 grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
 sc_end; fi
+bash "$root/tests/install-cron-crontab-errors.sh" >/dev/null 2>&1 \
+    && ok "cron install keeps the crontab when crontab -l fails, and installs when there is none" \
+    || bad "cron install overwrites the crontab when crontab -l fails (run tests/install-cron-crontab-errors.sh)"
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"
