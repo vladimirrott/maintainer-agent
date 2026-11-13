@@ -2653,6 +2653,10 @@ if sc_case 2; then
 grep -q 'PATH=' "$cr" && ok "cron entries pin PATH (cron gives almost none)" || bad "cron entries do not pin PATH"
 grep -q 'awk -v m=' "$cr" && ok "cron install strips its old block (idempotent)" || bad "cron install would accumulate entries"
 sc_end; fi
+# Cron output routing is in its own file so it can run alone (the full suite is
+# slower than a single-case gate allows). It reads the tree under test from MX_TREE.
+if MX_TREE="$root" bash "$suite_root/tests/cron-output.sh"; then ok "cron output routing (tests/cron-output.sh)"; else bad "cron output routing (tests/cron-output.sh)"; fi
+grep -qF '[ "$fail" -eq 0 ]' "$suite_root/tests/cron-output.sh" && ok "cron output routing ends by exiting with its failure count" || bad "cron output routing no longer exits non-zero when a case fails"
 
 echo "== doctor executes rather than inspects =="
 d="$root/bin/maintainer-doctor"

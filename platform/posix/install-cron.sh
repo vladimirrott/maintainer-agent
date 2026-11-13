@@ -53,10 +53,13 @@ cron_path="$HOME/.local/bin:$HOME/.cargo/bin:/usr/local/bin:/usr/bin:/bin"
 gen() {
     printf '%s\n' "$marker"
     printf 'PATH=%s\n' "$cron_path"
-    local hour=9
+    local hour=9 logf="$STATE_DIR/logs/cron.out"
+    # Refusals made before run.sh opens its own log (unknown profile, missing
+    # wall, another run in progress) go to stderr. Keep them somewhere readable
+    # rather than discarding them, since a cron host has no journal.
     for task in $TASKS; do
-        printf '17 %d * * *  %s %s %s >/dev/null 2>&1\n' \
-            "$hour" "$share/run.sh" "$profile" "$task"
+        printf '17 %d * * *  %s %s %s >>"%s" 2>&1\n' \
+            "$hour" "$share/run.sh" "$profile" "$task" "$logf"
         hour=$((hour + 1))
     done
     printf '%s end\n' "$marker"
@@ -77,6 +80,7 @@ case "$mode" in
     printf '%s\n' "$stripped" | crontab -
     echo "  maintainer entries removed" ;;
   install)
+    mkdir -p "$STATE_DIR/logs"
     { printf '%s\n' "$stripped"; gen; } | crontab -
     echo "  installed $(gen | grep -c run.sh) cron entries for profile '$profile'"
     echo "  inspect with: crontab -l"
