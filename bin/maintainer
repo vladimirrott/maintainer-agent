@@ -611,17 +611,26 @@ def _claim_in(claim: str, record: str) -> bool:
         inside a harness script the agent wrote and ran. The record holds the
         outer invocation, not each line the script then executed.
 
-    So: a claim carrying an explicit `...` is compared on the part before it,
-    because the author already said it was abridged, and a long claim matches on
-    a generous prefix. Both weaken the check, and the check is a warning whose
-    only job is to put a human's eye on the right line.
+    So: a claim carrying an explicit `...` is abridged on purpose, and only its
+    fragments between the ellipses must occur in the record, in order. Anything
+    else must occur whole. A prefix match would pass a claim whose flags differ
+    from the record's (`--squash --admin` against `--rebase`), which is the case
+    this check exists to catch.
     """
     if claim in record:
         return True
-    head = claim.split("...", 1)[0].strip() if "..." in claim else claim
-    if len(head) >= 12 and head in record:
-        return True
-    return len(claim) > 40 and claim[:40] in record
+    if "..." not in claim:
+        return False
+    frags = [f.strip() for f in claim.split("...") if f.strip()]
+    if not frags:
+        return False
+    pos = 0
+    for frag in frags:
+        i = record.find(frag, pos)
+        if i < 0:
+            return False
+        pos = i + len(frag)
+    return True
 
 
 def audit_run(run_id: str) -> tuple[str, list[str], int]:

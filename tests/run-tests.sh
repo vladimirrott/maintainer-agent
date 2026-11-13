@@ -8258,6 +8258,19 @@ printf '$ gh pr list --state open\n' > "$au/logs/2026-01-02T00-00-review.command
 aurun 2026-01-02T00-00-review | grep -q 'all 1 quoted command' \
     && ok "a command the report recommends is not counted as one it ran" \
     || bad "the audit treats a recommendation as a claim, which fires on every report"
+# A claim over 40 characters is matched whole, not on its first 40: a changed
+# flag in the tail is exactly what the audit exists to catch. An abridged claim
+# with `...` must still have each fragment in the record, so a changed tail
+# after the ellipsis is caught too.
+printf '# r\n\n```\n$ gh pr merge 5 --repo owner/name --squash --admin\n$ gh run list --repo owner/name ... --json databaseId,status\n```\n' \
+    > "$au/runs/2026-01-03T00-00-review.md"
+printf '$ gh pr merge 5 --repo owner/name --squash --rebase\n$ gh run list --repo owner/name --json databaseId,conclusion\n' \
+    > "$au/logs/2026-01-03T00-00-review.commands"
+out="$(aurun 2026-01-03T00-00-review)"
+grep -q 'gh pr merge 5 --repo owner/name --squash --admin' <<<"$out" \
+    && grep -q 'gh run list --repo owner/name ... --json databaseId,status' <<<"$out" \
+    && ok "a long claim with a changed tail, and an abridged claim with a changed tail, are both reported as missing" \
+    || bad "a claim whose tail differs from the record passes the audit: $(printf '%s' "$out" | tr '\n' ' ' | cut -c1-160)"
 # No record at all must read differently from a record that matched.
 rm -f "$au/logs/2026-01-02T00-00-review.commands"
 aurun 2026-01-02T00-00-review | grep -q 'no command record' \
