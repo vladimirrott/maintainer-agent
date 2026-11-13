@@ -1014,6 +1014,53 @@ else
     bad "a refused install still wrote $ih_files file(s) (rc=$ih_rc): $(find "$ihome" -type f | head -3 | tr '\n' ' ')"
 fi
 
+echo "== install.sh accepts a checkout with no sysknife profile (#207) =="
+# install.sh used to test for profiles/sysknife by name after copying, and a fork
+# that carries only its own profile stopped with "profiles did not land where
+# run.sh expects" and never installed the units. Each case installs from a
+# scratch copy of this checkout into a scratch HOME. Offline.
+ins_dir="$(mktemp -d)"
+ins_home="$ins_dir/home"; mkdir -p "$ins_home"
+# Unset the caller's state dir: a held run lock there makes install exit 69.
+ins_src="$ins_dir/repo"; mkdir -p "$ins_src"
+cp -r "$root/." "$ins_src/" && rm -rf "$ins_src/.git" "$ins_src/profiles/sysknife"
+if [ -e "$ins_src/profiles/sysknife" ]; then
+    bad "the fixture still has profiles/sysknife, so the case proves nothing"
+else
+    ok "the fixture has no sysknife profile"
+fi
+ins_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins_home" bash "$ins_src/install.sh" 2>&1)"; ins_rc=$?
+if [ "$ins_rc" = 0 ]; then
+    ok "install.sh exits 0 without a sysknife profile"
+else
+    bad "install.sh exited $ins_rc without a sysknife profile (expected 0): $(tail -n 3 <<<"$ins_out" | tr '\n' ' ')"
+fi
+ins_deployed="$ins_home/.local/share/maintainer/profiles/magent/profile.env"
+if [ -f "$ins_deployed" ]; then
+    ok "the magent profile is deployed"
+else
+    bad "the magent profile was not deployed to $ins_deployed"
+fi
+if [ "$(uname -s)" = Linux ]; then
+    if ls "$ins_home"/.config/systemd/user/maintainer@*.service >/dev/null 2>&1; then
+        ok "the systemd units are copied without a sysknife profile"
+    else
+        bad "no systemd units were copied without a sysknife profile"
+    fi
+fi
+# A checkout with no profile at all is still refused, before anything is written.
+ins2_src="$ins_dir/empty"; mkdir -p "$ins2_src"
+cp -r "$root/." "$ins2_src/" && rm -rf "$ins2_src/.git" "$ins2_src/profiles"
+mkdir -p "$ins2_src/profiles"
+ins2_home="$ins_dir/home2"; mkdir -p "$ins2_home"
+ins2_out="$(env -u MAINTAINER_STATE_DIR HOME="$ins2_home" bash "$ins2_src/install.sh" 2>&1)"; ins2_rc=$?
+if [ "$ins2_rc" = 1 ] && grep -q 'profiles did not land' <<<"$ins2_out"; then
+    ok "install.sh refuses a checkout with no profile at all"
+else
+    bad "a checkout with no profile: expected exit 1 and 'profiles did not land' (rc=$ins2_rc)"
+fi
+rm -rf "$ins_dir"
+
 echo "== packages/setup has a suite, because 127 tests had no gate at all =="
 # sysknife#468 raised the sysknife-setup Node floor and no suite covered a line
 # of it. `packages/setup` is an npm package with 127 tests of its own, it ships

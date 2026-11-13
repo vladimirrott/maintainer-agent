@@ -226,7 +226,8 @@ run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/mai
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
 # must mirror the repository layout: $share/{run.sh,profiles,backends}.
-if [ "$dry" = 0 ] && [ ! -d "$share/profiles/sysknife" ]; then
+# Any profile will do: a fork carries its own, not sysknife's.
+if [ "$dry" = 0 ] && ! ls "$share"/profiles/*/profile.env >/dev/null 2>&1; then
     echo "install.sh: profiles did not land where run.sh expects" >&2
     exit 1
 fi
