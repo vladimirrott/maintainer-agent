@@ -1,0 +1,3 @@
+  installed 4 cron entries for profile 'sysknife'
+  inspect with: crontab -l
+  note: cron does not catch up a missed run; see the header of this script

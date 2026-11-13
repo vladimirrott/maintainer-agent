@@ -1,0 +1,14 @@
+  deploying from @TREE@
+  minted a receipt-signing key
+  magent: 62 deny rules, 656 in rehearsal
+  sysknife: 62 deny rules, 656 in rehearsal
+  platform: Linux (systemd user units)
+  enabled maintainer@magent-issues.timer
+  enabled maintainer@magent-review.timer
+  enabled maintainer@sysknife-audit.timer
+  enabled maintainer@sysknife-ci.timer
+  enabled maintainer@sysknife-issues.timer
+  enabled maintainer@sysknife-review.timer
+  done
+  
+  next: maintainer-doctor        # checks the install by running it, not by listing files

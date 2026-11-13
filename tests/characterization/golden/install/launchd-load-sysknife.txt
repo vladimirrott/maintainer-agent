@@ -1,0 +1,5 @@
+  loaded dev.maintainer.sysknife.review (fires daily at 09:17; runs when 6h have passed)
+  loaded dev.maintainer.sysknife.issues (fires daily at 10:17; runs when 36h have passed)
+  loaded dev.maintainer.sysknife.ci (fires daily at 11:17; runs when 60h have passed)
+  loaded dev.maintainer.sysknife.audit (fires daily at 12:17; runs when 108h have passed)
+  done. list with: launchctl list | grep dev.maintainer.sysknife

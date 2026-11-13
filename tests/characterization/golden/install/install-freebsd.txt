@@ -1,0 +1,10 @@
+  deploying from @TREE@
+  minted a receipt-signing key
+  magent: 62 deny rules, 656 in rehearsal
+  sysknife: 62 deny rules, 656 in rehearsal
+  platform: FreeBSD is unrecognised; files deployed, scheduling is yours to wire
+  timers not touched (pass --timers to enable them)
+  done
+  
+  next: maintainer-doctor        # checks the install by running it, not by listing files
+        MAINTAINER_PROFILE=<profile> platform/posix/install-cron.sh   # works anywhere with crontab

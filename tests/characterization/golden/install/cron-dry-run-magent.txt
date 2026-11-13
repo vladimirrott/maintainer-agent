@@ -1,0 +1,6 @@
+--- crontab that would be installed ---
+# maintainer-agent (magent)
+PATH=@HOME@/.local/bin:@HOME@/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+17 9 * * *  @HOME@/.local/share/maintainer/run.sh magent review >/dev/null 2>&1
+17 10 * * *  @HOME@/.local/share/maintainer/run.sh magent issues >/dev/null 2>&1
+# maintainer-agent (magent) end

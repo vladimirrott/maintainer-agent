@@ -1,0 +1,12 @@
+  removing the maintainer agent
+  maintainer entries removed
+  maintainer entries removed
+  
+  SOME STEPS FAILED. This deployment is part-removed, and that is the
+  state to fix rather than to leave:
+  
+  removed: @HOME@/.local/share/maintainer, the four commands in @HOME@/.local/bin, and every scheduler entry.
+  kept:    the audit trail. Delete it yourself if you want it gone:
+           ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/__PROFILE__-maint}
+           ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/magent-maint}
+           ${MAINTAINER_STATE_DIR:-@HOME@/.local/state/sysknife-maint}

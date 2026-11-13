@@ -1,0 +1,16 @@
+=== ./deny.json ===
+{"spelled_everywhere": ["gh pr merge", "alpha publish"], "credential_paths": ["~/.ssh/**"]}
+=== ./notes.txt ===
+nothing to substitute here
+=== ./profile.env ===
+PROFILE_NAME="alpha"
+REPO_PATH="${MAINTAINER_REPO_PATH:-$HOME/code/widgets}"
+REPO_SLUG="acme/widgets"
+MAINTAINER_NAME="Alice Example"
+GH_ACCOUNT="alice"
+STATE_DIR="${MAINTAINER_STATE_DIR:-$HOME/.local/state/alpha-maint}"
+TASKS="review issues"
+MIN_HOURS_review=6
+MIN_HOURS_issues=36
+=== ./prompts/review.md ===
+Review acme/widgets as Alice Example (alice), twice: acme/widgets.

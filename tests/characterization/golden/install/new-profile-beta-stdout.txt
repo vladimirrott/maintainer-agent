@@ -1,0 +1,27 @@
+  wrote maintainer@beta-2-review.timer
+  wrote maintainer@beta-2-issues.timer
+
+  profiles/beta-2/ is ready. Three things before the first run:
+
+  1. Read profiles/beta-2/profile.env end to end. It decides what an
+     unattended agent does in your name.
+  2. Rewrite profiles/beta-2/prompts/*.md for this repository. The generic
+     ones are a starting point, not a description of your project. Read
+     profiles/sysknife/prompts/ for a worked set.
+  3. Install, then read the prompt before anything runs:
+
+       ./install.sh
+       export MAINTAINER_PROFILE=beta-2
+       maintainer-doctor
+       maintainer run --show-prompt review | less
+
+  Then one rehearsal run by hand. POST=off, so it posts nothing:
+
+       maintainer run review
+       maintainer status
+
+  Every command above reads MAINTAINER_PROFILE, so export it once per shell or
+  the tools answer for whichever profile is first.
+
+  Turn posting on in profile.env only after you have read a week of reports,
+  then enable the timers with ./install.sh --timers.

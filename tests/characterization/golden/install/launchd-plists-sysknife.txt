@@ -1,0 +1,100 @@
+=== dev.maintainer.sysknife.review.plist ===
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.maintainer.sysknife.review</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@HOME@/.local/share/maintainer/run.sh</string>
+    <string>sysknife</string>
+    <string>review</string>
+  </array>
+  <key>WorkingDirectory</key><string>@HOME@/.local/state/sysknife-maint/checkout</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>9</integer><key>Minute</key><integer>17</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-review.out</string>
+  <key>StandardErrorPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-review.err</string>
+</dict>
+</plist>
+=== dev.maintainer.sysknife.issues.plist ===
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.maintainer.sysknife.issues</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@HOME@/.local/share/maintainer/run.sh</string>
+    <string>sysknife</string>
+    <string>issues</string>
+  </array>
+  <key>WorkingDirectory</key><string>@HOME@/.local/state/sysknife-maint/checkout</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>10</integer><key>Minute</key><integer>17</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-issues.out</string>
+  <key>StandardErrorPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-issues.err</string>
+</dict>
+</plist>
+=== dev.maintainer.sysknife.ci.plist ===
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.maintainer.sysknife.ci</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@HOME@/.local/share/maintainer/run.sh</string>
+    <string>sysknife</string>
+    <string>ci</string>
+  </array>
+  <key>WorkingDirectory</key><string>@HOME@/.local/state/sysknife-maint/checkout</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>11</integer><key>Minute</key><integer>17</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-ci.out</string>
+  <key>StandardErrorPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-ci.err</string>
+</dict>
+</plist>
+=== dev.maintainer.sysknife.audit.plist ===
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>dev.maintainer.sysknife.audit</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@HOME@/.local/share/maintainer/run.sh</string>
+    <string>sysknife</string>
+    <string>audit</string>
+  </array>
+  <key>WorkingDirectory</key><string>@HOME@/.local/state/sysknife-maint/checkout</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>@HOME@/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict><key>Hour</key><integer>12</integer><key>Minute</key><integer>17</integer></dict>
+  <key>RunAtLoad</key><false/>
+  <key>StandardOutPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-audit.out</string>
+  <key>StandardErrorPath</key><string>@HOME@/.local/state/sysknife-maint/logs/launchd-audit.err</string>
+</dict>
+</plist>

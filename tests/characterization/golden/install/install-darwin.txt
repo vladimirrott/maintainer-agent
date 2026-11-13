@@ -1,0 +1,12 @@
+  deploying from @TREE@
+  minted a receipt-signing key
+  magent: 62 deny rules, 656 in rehearsal
+  sysknife: 62 deny rules, 656 in rehearsal
+  platform: macOS (launchd)
+  run platform/macos/install-launchd.sh to register the agents
+  note: launchd has no Persistent=true; a missed run does not catch up
+  timers not touched (pass --timers to enable them)
+  done
+  
+  next: maintainer-doctor        # checks the install by running it, not by listing files
+        platform/macos/install-launchd.sh <profile>

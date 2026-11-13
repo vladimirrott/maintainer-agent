@@ -1,0 +1,8 @@
+--- crontab that would be installed ---
+# maintainer-agent (sysknife)
+PATH=@HOME@/.local/bin:@HOME@/.cargo/bin:/usr/local/bin:/usr/bin:/bin
+17 9 * * *  @HOME@/.local/share/maintainer/run.sh sysknife review >/dev/null 2>&1
+17 10 * * *  @HOME@/.local/share/maintainer/run.sh sysknife issues >/dev/null 2>&1
+17 11 * * *  @HOME@/.local/share/maintainer/run.sh sysknife ci >/dev/null 2>&1
+17 12 * * *  @HOME@/.local/share/maintainer/run.sh sysknife audit >/dev/null 2>&1
+# maintainer-agent (sysknife) end

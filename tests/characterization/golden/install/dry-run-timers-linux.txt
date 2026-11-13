@@ -1,0 +1,71 @@
+  deploying from @TREE@
+  would: mkdir -p @HOME@/.local/share/maintainer @HOME@/.local/bin @HOME@/.config/systemd/user
+  would: cp @TREE@/lib/run.sh @HOME@/.local/share/maintainer/run.sh
+  would: cp @TREE@/lib/prose-style.md @HOME@/.local/share/maintainer/prose-style.md
+  would: cp @TREE@/lib/preamble-core.md @HOME@/.local/share/maintainer/preamble-core.md
+  would: cp @TREE@/lib/profile.sh @HOME@/.local/share/maintainer/profile.sh
+  would: cp @TREE@/lib/failure-shapes.json @HOME@/.local/share/maintainer/failure-shapes.json
+  would: cp @TREE@/lib/defaults.env @HOME@/.local/share/maintainer/defaults.env
+  would stamp @HOME@/.local/share/maintainer/VERSION
+  would mint @HOME@/.local/share/maintainer/receipt.key if absent
+  would: mkdir -p @HOME@/.local/share/maintainer/scripts
+  would: cp @TREE@/scripts/check_drift.py @HOME@/.local/share/maintainer/scripts/check_drift.py
+  would: cp @TREE@/scripts/classify_dependency_bump.py @HOME@/.local/share/maintainer/scripts/classify_dependency_bump.py
+  would: cp @TREE@/scripts/render-settings.py @HOME@/.local/share/maintainer/scripts/render-settings.py
+  would: cp @TREE@/scripts/render_figures.py @HOME@/.local/share/maintainer/scripts/render_figures.py
+  would: cp @TREE@/scripts/resolve_image_digest.py @HOME@/.local/share/maintainer/scripts/resolve_image_digest.py
+  would: cp @TREE@/scripts/transcript.py @HOME@/.local/share/maintainer/scripts/transcript.py
+  would: cp @TREE@/scripts/verify_pip_files.py @HOME@/.local/share/maintainer/scripts/verify_pip_files.py
+  would: cp @TREE@/scripts/verify_pypi_release.py @HOME@/.local/share/maintainer/scripts/verify_pypi_release.py
+  would: rm -rf @HOME@/.local/share/maintainer/backends @HOME@/.local/share/maintainer/profiles
+  would: cp -r @TREE@/lib/backends @HOME@/.local/share/maintainer/backends
+  would: cp -r @TREE@/profiles @HOME@/.local/share/maintainer/profiles
+  would: rm -rf @HOME@/.local/share/maintainer/profiles/_template
+  would: cp @TREE@/bin/maintainer @HOME@/.local/bin/maintainer
+  would: cp @TREE@/bin/maintainer-merge @HOME@/.local/bin/maintainer-merge
+  would: cp @TREE@/bin/maintainer-doctor @HOME@/.local/bin/maintainer-doctor
+  would: cp @TREE@/bin/maintainer-repo @HOME@/.local/bin/maintainer-repo
+  would: cp @TREE@/bin/maintainer-mcp @HOME@/.local/bin/maintainer-mcp
+  would: chmod +x @HOME@/.local/share/maintainer/run.sh @HOME@/.local/bin/maintainer @HOME@/.local/bin/maintainer-merge @HOME@/.local/bin/maintainer-doctor @HOME@/.local/bin/maintainer-repo @HOME@/.local/bin/maintainer-mcp
+  would: cp @TREE@/platform/linux/maintainer-alert@.service @HOME@/.config/systemd/user/maintainer-alert@.service
+  would: cp @TREE@/platform/linux/maintainer@.service @HOME@/.config/systemd/user/maintainer@.service
+  would: cp @TREE@/platform/linux/podman-userns-warmup.service @HOME@/.config/systemd/user/podman-userns-warmup.service
+  would: cp @TREE@/platform/linux/maintainer@magent-issues.timer @HOME@/.config/systemd/user/maintainer@magent-issues.timer
+  would: cp @TREE@/platform/linux/maintainer@magent-review.timer @HOME@/.config/systemd/user/maintainer@magent-review.timer
+  would: cp @TREE@/platform/linux/maintainer@sysknife-audit.timer @HOME@/.config/systemd/user/maintainer@sysknife-audit.timer
+  would: cp @TREE@/platform/linux/maintainer@sysknife-ci.timer @HOME@/.config/systemd/user/maintainer@sysknife-ci.timer
+  would: cp @TREE@/platform/linux/maintainer@sysknife-issues.timer @HOME@/.config/systemd/user/maintainer@sysknife-issues.timer
+  would: cp @TREE@/platform/linux/maintainer@sysknife-review.timer @HOME@/.config/systemd/user/maintainer@sysknife-review.timer
+  would: cp @TREE@/platform/linux/run-instance.sh @HOME@/.local/share/maintainer/run-instance.sh
+  would: chmod +x @HOME@/.local/share/maintainer/run-instance.sh
+  would: cp @TREE@/platform/linux/alert.sh @HOME@/.local/share/maintainer/alert.sh
+  would: chmod +x @HOME@/.local/share/maintainer/alert.sh
+  platform: Linux (systemd user units)
+  would: systemctl --user daemon-reload
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@magent-issues.timer
+  would: systemctl --user enable --now maintainer@magent-issues.timer
+  enabled maintainer@magent-issues.timer
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@magent-review.timer
+  would: systemctl --user enable --now maintainer@magent-review.timer
+  enabled maintainer@magent-review.timer
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-audit.timer
+  would: systemctl --user enable --now maintainer@sysknife-audit.timer
+  enabled maintainer@sysknife-audit.timer
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-ci.timer
+  would: systemctl --user enable --now maintainer@sysknife-ci.timer
+  enabled maintainer@sysknife-ci.timer
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-issues.timer
+  would: systemctl --user enable --now maintainer@sysknife-issues.timer
+  enabled maintainer@sysknife-issues.timer
+  would: mkdir -p @HOME@/.local/share/systemd/timers
+  would: touch @HOME@/.local/share/systemd/timers/stamp-maintainer@sysknife-review.timer
+  would: systemctl --user enable --now maintainer@sysknife-review.timer
+  enabled maintainer@sysknife-review.timer
+  done
+  
+  next: maintainer-doctor        # checks the install by running it, not by listing files
