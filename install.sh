@@ -225,8 +225,11 @@ run cp "$root/bin/maintainer-mcp" "$bin/maintainer-mcp"
 run chmod +x "$share/run.sh" "$bin/maintainer" "$bin/maintainer-merge" "$bin/maintainer-doctor" "$bin/maintainer-repo" "$bin/maintainer-mcp"
 
 # run.sh resolves the profile relative to its own parent, so the deployed tree
-# must mirror the repository layout: $share/{run.sh,profiles,backends}.
-if [ "$dry" = 0 ] && [ ! -d "$share/profiles/sysknife" ]; then
+# must mirror the repository layout: $share/{run.sh,profiles,backends}. What
+# run.sh expects is at least one runnable profile, and profile.env is what
+# marks one; naming a single profile here refused installs of checkouts that
+# ship other profiles instead (#207).
+if [ "$dry" = 0 ] && ! ls "$share"/profiles/*/profile.env >/dev/null 2>&1; then
     echo "install.sh: profiles did not land where run.sh expects" >&2
     exit 1
 fi
