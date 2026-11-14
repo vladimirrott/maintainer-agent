@@ -67,5 +67,5 @@ backend_run() {
     # it would be equivalent to --yolo.
     OPENCODE_CONFIG="${MAINTAINER_SETTINGS:-$PROFILE_DIR/opencode.json}" \
     opencode run --model "$model" --auto --format default \
-        "$(cat "$prompt_file")" >>"$log" 2>&1
+        <"$prompt_file" >>"$log" 2>&1
 }

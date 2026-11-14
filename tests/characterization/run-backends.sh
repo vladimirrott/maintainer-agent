@@ -258,11 +258,6 @@ cz_case "codex: a POST=off preview works and warns that a real run would refuse"
 
 # --- opencode ------------------------------------------------------------------------
 
-# The first line of opencode's argv log starts with the given text.
-rz_expect_oc_prefix() {
-    local first; first="$(head -1 "$(rz_b opencode.argv)")"
-    case "$first" in "$1"*) ;; *) cz_note_fail "opencode argv does not start with '$1': $(printf '%s' "$first" | cut -c1-120)" ;; esac
-}
 OC_CONFIG_MISSING() { printf 'backend opencode unusable: missing %s' "$1"; }
 
 oc_setup() {
@@ -276,31 +271,41 @@ case_opencode_argv() {
     rz_run fx review
     cz_expect_rc 0
     rz_expect_b_not_called claude
-    rz_expect_oc_prefix "run --model groq/openai/gpt-oss-120b --auto --format default \$'Provenance for this run"
+    rz_expect_b_argv opencode "run --model groq/openai/gpt-oss-120b --auto --format default"
     rz_expect_b_env opencode OPENCODE_CONFIG "$RZ_PROFILE_DIR/opencode.json"
     rz_expect_b_env opencode GROQ_API_KEY fixture-groq-key
 }
-cz_case "opencode: argv is run --model M --auto --format default <whole prompt as one argument>, config from the profile" case_opencode_argv
+cz_case "opencode: argv is run --model M --auto --format default, config from the profile" case_opencode_argv
 
-case_opencode_prompt_argument() {
+case_opencode_large_context() {
+    oc_setup
+    python3 -c 'print("=== maintainer 2026-01-01T00-00-review ===\n" + "x" * 140000)' > "$CZ_CASE/h/start.out"
+    rz_run fx review
+    cz_expect_rc 0
+    cz_expect_stderr_empty
+    python3 - "$(rz_b opencode.stdin)" <<'PYEOF' || cz_note_fail "opencode did not receive all 140000 context bytes on stdin"
+import sys
+with open(sys.argv[1], "rb") as f:
+    assert b"x" * 140000 in f.read()
+PYEOF
+}
+cz_case "opencode: a 140000-byte context reaches stdin in full" case_opencode_large_context
+
+case_opencode_prompt_stdin() {
     oc_setup
     rz_run fx review
     cz_expect_rc 0
     rz_want_prompt "$CZ_CASE/want.prompt" review opencode on "$(printf '=== maintainer %s ===\nskill        fixture-skill' "$RZ_RUNID")"
-    # $(cat file) drops the trailing newline, so the argument is the prompt minus its last newline.
-    local want="$CZ_CASE/want.arg"
-    printf '%s' "$(cat "$CZ_CASE/want.prompt")" > "$want"
-    cz_expect_file_equals "$(rz_b opencode.lastarg)" "$want" "the prompt argument"
-    cz_check "stdin is empty" "$(wc -c < "$(rz_b opencode.stdin)" | tr -d ' ')" 0
+    cz_expect_file_equals "$(rz_b opencode.stdin)" "$CZ_CASE/want.prompt" "the prompt on stdin"
 }
-cz_case "opencode: the prompt is the last argument, without its trailing newline, and stdin is empty" case_opencode_prompt_argument
+cz_case "opencode: the full prompt is on stdin" case_opencode_prompt_stdin
 
 case_opencode_model_mapping() {
     oc_setup
     rz_profile_add 'MODEL_review="groq/other-model"'
     rz_run fx review
     cz_expect_rc 0
-    rz_expect_oc_prefix "run --model groq/other-model --auto --format default "
+    rz_expect_b_argv opencode "run --model groq/other-model --auto --format default"
 }
 cz_case "opencode: a profile model that already has a provider/model form is passed through" case_opencode_model_mapping
 
@@ -308,7 +313,7 @@ case_opencode_model_default() {
     oc_setup
     rz_profile_add 'MODEL_review="sonnet"'
     rz_run fx review
-    rz_expect_oc_prefix "run --model groq/openai/gpt-oss-120b --auto --format default "
+    rz_expect_b_argv opencode "run --model groq/openai/gpt-oss-120b --auto --format default"
 }
 cz_case "opencode: a bare model name is replaced by OPENCODE_MODEL from defaults.env" case_opencode_model_default
 
@@ -316,7 +321,7 @@ case_opencode_model_override() {
     oc_setup
     cz_set MAINTAINER_OPENCODE_MODEL groq/override-model
     rz_run fx review
-    rz_expect_oc_prefix "run --model groq/override-model --auto --format default "
+    rz_expect_b_argv opencode "run --model groq/override-model --auto --format default"
 }
 cz_case "opencode: MAINTAINER_OPENCODE_MODEL overrides the default model" case_opencode_model_override
 
@@ -415,21 +420,6 @@ case_opencode_output_to_log() {
 }
 cz_case "opencode: stdout and stderr both go to the log" case_opencode_output_to_log
 
-# Pins current behaviour: the whole prompt is one argument and Linux refuses a
-# single argument over 131072 bytes, so a long task prompt cannot reach opencode.
-# bash reports "Argument list too long", the stub never runs, and the run goes on
-# as a backend failure. No plan decision yet.
-case_opencode_arg_too_long() {
-    oc_setup
-    head -c 140000 /dev/zero | tr '\0' 'x' > "$RZ_PROFILE_DIR/prompts/review.md"
-    printf '\n' >> "$RZ_PROFILE_DIR/prompts/review.md"
-    rz_run fx review
-    cz_expect_rc 0
-    rz_expect_b_not_called opencode
-    cz_expect_stderr_has "opencode exited non-zero for $RZ_RUNID. See $LOG"
-    rz_log_has "opencode: Argument list too long"
-}
-cz_case "opencode: a prompt over 131072 bytes cannot be passed (Argument list too long) and counts as a backend failure" case_opencode_arg_too_long
 
 # --- cursor --------------------------------------------------------------------------
 
@@ -510,6 +500,18 @@ case_cursor_argv_driver() {
     cz_check "stdin is empty" "$(wc -c < "$(rz_b cursor-agent.stdin)" | tr -d ' ')" 0
 }
 cz_case "cursor: backend_run calls cursor-agent -p --output-format text -m MODEL <prompt> with CURSOR_CONFIG_DIR and no --force" case_cursor_argv_driver
+
+case_cursor_large_prompt() {
+    setup
+    rz_wall
+    python3 -c 'print("x" * 140000)' > "$CZ_CASE/prompt.txt"
+    : > "$CZ_CASE/driven.log"
+    rz_drive '. "$RZ_TREE/lib/backends/cursor.sh"; backend_run "$CZ_CASE_DIR/prompt.txt" opus "$CZ_CASE_DIR/driven.log" x'
+    cz_expect_rc 1
+    rz_expect_b_not_called cursor-agent
+    grep -q 'prompt.*too large' "$CZ_CASE/driven.log" || cz_note_fail "cursor did not explain the oversized prompt"
+}
+cz_case "cursor: an oversized prompt is refused before cursor-agent starts" case_cursor_large_prompt
 
 case_cursor_argv_rehearsal_dir() {
     setup

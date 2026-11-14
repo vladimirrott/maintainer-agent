@@ -89,6 +89,13 @@
       "means": "GitHub was unreachable, so the run never verified its identity"
     },
     {
+      "id": "argument-list-too-long",
+      "class": "needs_human",
+      "pattern": "argument list too long",
+      "means": "the operating system refused an oversized argument or environment",
+      "fix": "reduce the prompt context or environment, or use a backend that reads the prompt from stdin"
+    },
+    {
       "id": "oauth-expired",
       "class": "needs_human",
       "pattern": "oauth session expired.{0,60}|failed to authenticate.{0,60}",

@@ -45,6 +45,7 @@ shape_case connection-error     transient   "read ECONNRESET" "ECONNRESET"
 shape_case api-unreachable      transient   "Can't reach the API server. Check your network" "Can't reach the API server. Check your network"
 shape_case dns-failure          transient   "getaddrinfo EAI_AGAIN api.example.test" "EAI_AGAIN"
 shape_case gh-unreachable       transient   "error connecting to api.github.com" "error connecting to api.github.com"
+shape_case argument-list-too-long needs_human "opencode: Argument list too long" "Argument list too long"
 shape_case oauth-expired        needs_human "OAuth session expired. Please log in again" "OAuth session expired. Please log in again"
 shape_case invalid-key          needs_human "Invalid API key. Fix external API key" "Invalid API key. Fix external API key"
 shape_case out-of-credit        needs_human "Your credit balance is too low to access the API" "Your credit balance is too low to access the API"
@@ -80,9 +81,9 @@ PYEOF
     )" || { cz_note_fail "could not read the shipped table"; return 0; }
     local have; have="$(printf '%s\n' $SHAPE_IDS_TESTED | sort | tr '\n' ' ' | sed 's/ $//')"
     cz_check "shape ids in the table versus shape ids tested" "$have" "$ids"
-    cz_check "number of shapes" "$(wc -w <<<"$ids" | tr -d ' ')" 21
+    cz_check "number of shapes" "$(wc -w <<<"$ids" | tr -d ' ')" 22
 }
-cz_case "classify: the shipped table holds exactly the 21 shapes these cases cover" case_every_shape_has_a_case
+cz_case "classify: the shipped table holds exactly the 22 shapes these cases cover" case_every_shape_has_a_case
 
 # --- order, last match, case ----------------------------------------------------------
 
