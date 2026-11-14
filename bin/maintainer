@@ -396,9 +396,11 @@ def refresh() -> tuple[str, str, list[str], list[str]]:
         notes.append("gh unavailable: PR heads not fetched, deltas below are git-only")
         prs = []
     for pr in prs:
-        subprocess.run(("git", "fetch", "origin",
-                        f"refs/pull/{pr['number']}/head:p{pr['number']}", "--force", "--quiet"),
-                       cwd=REPO, capture_output=True, text=True)
+        fetched = subprocess.run(("git", "fetch", "origin",
+                                  f"refs/pull/{pr['number']}/head:p{pr['number']}", "--force", "--quiet"),
+                                 cwd=REPO, capture_output=True, text=True)
+        if fetched.returncode != 0:
+            notes.append(f"PR #{pr['number']} head not fetched, local p{pr['number']} is stale")
     return before, after, commits, notes
 
 
